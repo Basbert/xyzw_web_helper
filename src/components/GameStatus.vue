@@ -48,10 +48,36 @@
     <WeirdTowerStatus v-show="activeSection === 'daily'" />
 
     <!-- 盐罐机器人状态（提取组件） -->
-    <BottleHelperCard v-show="activeSection === 'daily'" />
+    <BottleHelperCard
+      ref="bottleHelperCard"
+      v-show="activeSection === 'daily'"
+      :disabled="combinedBusy"
+    />
 
     <!-- 挂机状态（提取组件） -->
-    <HangUpStatusCard v-show="activeSection === 'daily'" />
+    <HangUpStatusCard
+      ref="hangUpStatusCard"
+      v-show="activeSection === 'daily'"
+      :disabled="combinedBusy"
+    />
+
+    <div v-show="activeSection === 'daily'" class="combined-daily-action">
+      <n-button
+        type="primary"
+        size="large"
+        block
+        :loading="combinedBusy"
+        :disabled="
+          !combinedConnected ||
+          combinedBusy ||
+          bottleHelperCard?.isBusy ||
+          hangUpStatusCard?.isBusy
+        "
+        @click="runCombinedDailyAction"
+      >
+        {{ combinedBusy ? combinedProgress : "一键处理盐罐和挂机" }}
+      </n-button>
+    </div>
 
     <!-- 无限阵容助手（提取组件） -->
     <Unlimitedlineup v-show="activeSection === 'tools'" />
@@ -369,6 +395,7 @@
 import { useMessage } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import { runBottleAndHangUp } from "@/utils/bottleAndHangUp";
 
 import ApexChallenge from "./Apex/ApexChallenge.vue";
 import BottleHelperCard from "./cards/BottleHelperCard.vue";
@@ -407,7 +434,43 @@ import TowerStatus from "./Tower/TowerStatus.vue";
 import WeirdTowerStatus from "./Tower/WeirdTowerStatus.vue";
 
 const tokenStore = useTokenStore();
-useMessage();
+const message = useMessage();
+const bottleHelperCard = ref(null);
+const hangUpStatusCard = ref(null);
+const combinedBusy = ref(false);
+const combinedProgress = ref("");
+const combinedConnected = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  return tokenId && tokenStore.getWebSocketStatus(tokenId) === "connected";
+});
+
+const runCombinedDailyAction = async () => {
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId) return message.warning("请先选择Token");
+  if (combinedBusy.value) return;
+  combinedBusy.value = true;
+  try {
+    const result = await runBottleAndHangUp({
+      tokenStore,
+      tokenId,
+      onProgress: (text) => (combinedProgress.value = text),
+    });
+    if (result.remaining) {
+      message.warning(
+        `盐罐与挂机奖励已处理，仍有 ${result.remaining} 个加钟槽位未确认`,
+      );
+    } else {
+      message.success(
+        `盐罐已启动，挂机奖励已领取，加钟已补满（本次加钟 ${result.sent} 次）`,
+      );
+    }
+  } catch (error) {
+    message.error(`一键处理未完成：${error.message || "未知错误"}`);
+  } finally {
+    combinedBusy.value = false;
+    combinedProgress.value = "";
+  }
+};
 
 const legionMatch = ref({
   isRegistered: false,
@@ -715,6 +778,10 @@ onUnmounted(() => {
 
 .section-tabs :deep(.n-tabs-pane-wrapper) {
   display: none;
+}
+
+.combined-daily-action {
+  grid-column: 1 / -1;
 }
 
 .warrank-full-container {

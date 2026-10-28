@@ -1,3 +1,4 @@
+import { readDailyTaskSettings } from "@/utils/dailyTaskSettings";
 import {
   fillHangUpTime,
   getClaimablePointRewards,
@@ -56,6 +57,8 @@ export class DailyTaskRunner {
     this.sleep =
       options.sleep ||
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.getCurrentHour =
+      options.getCurrentHour || (() => new Date().getHours());
     this.tokenStore = tokenStore;
     this.delaySettings = delaySettings || {
       commandDelay: 500,
@@ -172,7 +175,13 @@ export class DailyTaskRunner {
 
   loadSettings(roleId) {
     try {
-      const raw = localStorage.getItem(`daily-settings:${roleId}`);
+      const token = this.tokenStore.gameTokens?.find(
+        (item) => item.id === roleId,
+      ) || { id: roleId };
+      const saved = readDailyTaskSettings(
+        token,
+        this.tokenStore.gameTokens || [],
+      );
       const defaultSettings = {
         arenaFormation: 1,
         bossFormation: 1,
@@ -186,7 +195,7 @@ export class DailyTaskRunner {
         blackMarketPurchase: true,
         freeGachaEnable: true,
       };
-      return raw ? { ...defaultSettings, ...JSON.parse(raw) } : defaultSettings;
+      return saved ? { ...defaultSettings, ...saved } : defaultSettings;
     } catch (error) {
       console.error("Failed to load settings:", error);
       return null;
@@ -519,19 +528,36 @@ export class DailyTaskRunner {
     }
 
     // 2. 竞技场
+    if (settings.arenaEnable && isTaskCompleted(13)) {
+      this.log(
+        "竞技场每日任务已完成，无法确认剩余免费次数，跳过额外挑战",
+        "warning",
+      );
+    }
     if (!isTaskCompleted(13) && settings.arenaEnable) {
       taskList.push({
         name: "竞技场战斗",
         condition: 13,
         execute: async () => {
           this.log("开始竞技场战斗流程");
-          const hour = new Date().getHours();
+          const hour = this.getCurrentHour();
           if (hour < 6) {
             this.log("当前时间未到6点，跳过竞技场战斗", "warning");
             return false;
           }
-          if (hour > 22) {
-            this.log("当前时间已过22点，跳过竞技场战斗", "warning");
+          if (hour >= 22) {
+            this.log("当前时间已到22点，跳过竞技场战斗", "warning");
+            return false;
+          }
+
+          // Recheck immediately before entering: other game sessions may have
+          // completed the one-fight daily goal since this run was planned.
+          await this.refreshServerRole(tokenId);
+          if (this.getTaskState(13).remaining === 0) {
+            this.log(
+              "竞技场每日任务已完成，无法确认剩余免费次数，跳过额外挑战",
+              "warning",
+            );
             return false;
           }
 
@@ -547,7 +573,9 @@ export class DailyTaskRunner {
             "开始竞技场",
           );
 
-          const arenaAttempts = Math.min(3, this.getTaskState(13).remaining);
+          // The daily goal requires one fight; it is not the free-fight limit.
+          // Only start this three-fight sequence while that goal is still pending.
+          const arenaAttempts = 3;
           for (let i = 1; i <= arenaAttempts; i++) {
             this.log(`竞技场战斗 ${i}/${arenaAttempts}`);
             const targets = await this.executeGameCommand(
@@ -666,6 +694,13 @@ export class DailyTaskRunner {
           ]
         : []),
     ];
+
+    if (settings.claimLegacy) {
+      fixedRewards.push({
+        name: "领取功法残卷",
+        cmd: "legacy_claimhangup",
+      });
+    }
 
     if (settings.claimEmail) {
       fixedRewards.push({

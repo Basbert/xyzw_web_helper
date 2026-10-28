@@ -3098,6 +3098,10 @@ import {
   normalizeBlackMarketPurchaseList,
 } from "@/utils/batch/blackMarketConfig";
 import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
+import {
+  readDailyTaskSettings,
+  writeDailyTaskSettings,
+} from "@/utils/dailyTaskSettings";
 import { goldItemsConfig, merchantConfig } from "@/utils/dreamConstants";
 
 import { isSameGameValue } from "@/utils/gameValue.js";
@@ -4331,10 +4335,10 @@ const importConfig = async ({ file }) => {
         if (Array.isArray(importData.tokenSettings)) {
           importData.tokenSettings.forEach((item) => {
             if (item.tokenId && item.settings) {
-              localStorage.setItem(
-                `daily-settings:${item.tokenId}`,
-                JSON.stringify(item.settings),
-              );
+              const token = tokens.value.find(
+                (entry) => entry.id === item.tokenId,
+              ) || { id: item.tokenId };
+              writeDailyTaskSettings(token, item.settings);
             }
           });
         }
@@ -5356,7 +5360,10 @@ const clearAllItems = () => {
 
 const loadSettings = (tokenId) => {
   try {
-    const raw = localStorage.getItem(`daily-settings:${tokenId}`);
+    const token = tokens.value.find((entry) => entry.id === tokenId) || {
+      id: tokenId,
+    };
+    const saved = readDailyTaskSettings(token, tokens.value);
     const defaultSettings = {
       arenaFormation: 1,
       towerFormation: 1,
@@ -5370,7 +5377,7 @@ const loadSettings = (tokenId) => {
       claimEmail: true,
       blackMarketPurchase: true,
     };
-    return raw ? { ...defaultSettings, ...JSON.parse(raw) } : defaultSettings;
+    return saved ? { ...defaultSettings, ...saved } : defaultSettings;
   } catch (error) {
     console.error("Failed to load settings:", error);
     return null;
@@ -5387,10 +5394,10 @@ const openSettings = (token) => {
 
 const saveSettings = () => {
   if (currentSettingsTokenId.value) {
-    localStorage.setItem(
-      `daily-settings:${currentSettingsTokenId.value}`,
-      JSON.stringify(currentSettings),
-    );
+    const token = tokens.value.find(
+      (entry) => entry.id === currentSettingsTokenId.value,
+    ) || { id: currentSettingsTokenId.value };
+    writeDailyTaskSettings(token, currentSettings);
     message.success(`已保存 ${currentSettingsTokenName.value} 的设置`);
     showSettingsModal.value = false;
   }
@@ -5444,10 +5451,10 @@ const applyTemplate = () => {
       ...template.settings,
       templateId: template.id, // 记录模板ID
     };
-    localStorage.setItem(
-      `daily-settings:${tokenId}`,
-      JSON.stringify(accountSettings),
-    );
+    const token = tokens.value.find((entry) => entry.id === tokenId) || {
+      id: tokenId,
+    };
+    writeDailyTaskSettings(token, accountSettings);
     successCount++;
   });
 

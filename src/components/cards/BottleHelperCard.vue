@@ -21,6 +21,7 @@
         secondary
         size="small"
         block
+        :disabled="disabled || isBusy"
         @click="handleBottleHelper"
       >
         {{ state.isRunning ? "重启服务" : "启动服务" }}
@@ -35,8 +36,12 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import MyCard from "../Common/MyCard.vue";
 
+defineProps({ disabled: { type: Boolean, default: false } });
+
 const tokenStore = useTokenStore();
 const message = useMessage();
+const isBusy = ref(false);
+defineExpose({ isBusy });
 
 const roleInfo = computed(() => tokenStore.gameData?.roleInfo || null);
 
@@ -92,10 +97,19 @@ const handleBottleHelper = () => {
     return;
   }
   const tokenId = tokenStore.selectedToken.id;
-  tokenStore.sendMessage(tokenId, "bottlehelper_stop");
+  isBusy.value = true;
+  if (!tokenStore.sendMessage(tokenId, "bottlehelper_stop")) {
+    isBusy.value = false;
+    message.error("盐罐操作失败，请检查连接状态");
+    return;
+  }
   setTimeout(() => {
-    tokenStore.sendMessage(tokenId, "bottlehelper_start");
+    if (!tokenStore.sendMessage(tokenId, "bottlehelper_start"))
+      message.error("盐罐启动请求发送失败，请检查运行状态");
     tokenStore.sendMessage(tokenId, "role_getroleinfo");
+    setTimeout(() => {
+      isBusy.value = false;
+    }, 1000);
   }, 500);
   message.info(state.value.isRunning ? "重启盐罐机器人" : "启动盐罐机器人");
 };

@@ -133,6 +133,9 @@ export default defineConfig(async () => {
         "@": path.resolve(__dirname, "src"),
       },
     },
+    preview: {
+      open: false,
+    },
     server: {
       port: 3000,
       open: true,
@@ -152,20 +155,6 @@ export default defineConfig(async () => {
             "Content-Type": "application/json; charset=utf-8",
           },
         },
-        // 微信登录接口代理
-        "/api/weixin": {
-          target: "https://open.weixin.qq.com",
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api\/weixin/, ""),
-          secure: true,
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Linux; Android 7.0; Mi-4c Build/NRD90M; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/53.0.2785.49 Mobile MQQBrowser/6.2 TBS/043632 Safari/537.36 MicroMessenger/6.6.1.1220(0x26060135) NetType/WIFI Language/zh_CN",
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            Referer: "https://open.weixin.qq.com/",
-          },
-        },
         // 微信扫码状态轮询代理
         "/api/weixin-long": {
           target: "https://long.open.weixin.qq.com",
@@ -176,6 +165,20 @@ export default defineConfig(async () => {
             "User-Agent":
               "Mozilla/5.0 (Linux; Android 7.0; Mi-4c Build/NRD90M; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/53.0.2785.49 Mobile MQQBrowser/6.2 TBS/043632 Safari/537.36 MicroMessenger/6.6.1.1220(0x26060135) NetType/WIFI Language/zh_CN",
             Accept: "*/*",
+            Referer: "https://open.weixin.qq.com/",
+          },
+        },
+        // 微信登录接口代理；较长的 weixin-long 路径必须先匹配。
+        "/api/weixin": {
+          target: "https://open.weixin.qq.com",
+          changeOrigin: true,
+          rewrite: (path) => path.replace(/^\/api\/weixin/, ""),
+          secure: true,
+          headers: {
+            "User-Agent":
+              "Mozilla/5.0 (Linux; Android 7.0; Mi-4c Build/NRD90M; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/53.0.2785.49 Mobile MQQBrowser/6.2 TBS/043632 Safari/537.36 MicroMessenger/6.6.1.1220(0x26060135) NetType/WIFI Language/zh_CN",
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
             Referer: "https://open.weixin.qq.com/",
           },
         },

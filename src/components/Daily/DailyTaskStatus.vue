@@ -163,6 +163,11 @@
             </div>
 
             <div class="switch-row">
+              <span class="switch-label">领取功法残卷</span>
+              <n-switch v-model:value="settings.claimLegacy" />
+            </div>
+
+            <div class="switch-row">
               <span class="switch-label">竞技场</span>
               <n-switch v-model:value="settings.arenaEnable" />
             </div>
@@ -294,12 +299,12 @@ import {
   nextTick,
   onBeforeUnmount,
   onMounted,
-  reactive,
   ref,
   watch,
 } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
+import { useDailyTaskSettings } from "@/utils/dailyTaskSettings";
 import {
   getDailyTaskStates,
   loadDailyTaskConfig,
@@ -316,19 +321,9 @@ const busy = ref(false);
 const logContainer = ref(null);
 
 // 任务设置
-const settings = reactive({
-  arenaFormation: 1,
-  bossFormation: 1,
-  bossTimes: 2,
-  claimBottle: true,
-  payRecruit: true,
-  openBox: true,
-  arenaEnable: true,
-  claimHangUp: true,
-  claimEmail: true,
-  blackMarketPurchase: true,
-  commandDelay: 500,
-  taskDelay: 500,
+const settings = useDailyTaskSettings(tokenStore, (error) => {
+  console.error("每日任务设置读写失败:", error);
+  message.warning("无法保存或读取每日任务设置，请检查浏览器存储权限");
 });
 
 // 每日任务列表
@@ -543,45 +538,12 @@ const handleRefreshTaskStatus = async () => {
   }
 };
 
-const loadSettings = (roleId) => {
-  try {
-    const raw = localStorage.getItem(`daily-settings:${roleId}`);
-    return raw ? JSON.parse(raw) : null;
-  } catch (error) {
-    console.error("Failed to load settings:", error);
-    return null;
-  }
-};
-
-const saveSettings = (roleId, s) => {
-  try {
-    localStorage.setItem(`daily-settings:${roleId}`, JSON.stringify(s));
-  } catch (error) {
-    console.error("Failed to save settings:", error);
-  }
-};
-
-// 监听设置变化
-watch(
-  settings,
-  (cur) => {
-    const tokenId = tokenStore.selectedToken?.id;
-    if (tokenId) saveSettings(tokenId, cur);
-  },
-  { deep: true },
-);
-
 // 监听token选择变化
 watch(
-  () => tokenStore.selectedToken,
-  async (newToken, oldToken) => {
-    if (newToken && newToken !== oldToken) {
-      log(`切换到Token: ${newToken.name}`);
-
-      // 加载新token的设置
-      const saved = loadSettings(newToken.id);
-      if (saved) Object.assign(settings, saved);
-
+  () => tokenStore.selectedToken?.id,
+  async (newTokenId, oldTokenId) => {
+    if (newTokenId && newTokenId !== oldTokenId) {
+      log(`切换到Token: ${tokenStore.selectedToken.name}`);
       // 如果WebSocket已连接，尝试获取最新角色信息
       if (isConnected.value) {
         try {

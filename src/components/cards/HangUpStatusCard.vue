@@ -18,7 +18,7 @@
     <template #action>
       <button
         class="action-button secondary"
-        :disabled="hangUp.isExtending"
+        :disabled="disabled || hangUp.isExtending || hangUp.isClaiming"
         @click="extendHangUp"
       >
         <span v-if="hangUp.isExtending" class="loading-text">
@@ -28,7 +28,7 @@
       </button>
       <button
         class="action-button primary"
-        :disabled="hangUp.isClaiming"
+        :disabled="disabled || hangUp.isExtending || hangUp.isClaiming"
         @click="claimHangUpReward"
       >
         <span v-if="hangUp.isClaiming" class="loading-text">
@@ -46,6 +46,8 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import MyCard from "../Common/MyCard.vue";
 
+defineProps({ disabled: { type: Boolean, default: false } });
+
 const tokenStore = useTokenStore();
 const message = useMessage();
 const roleInfo = computed(() => tokenStore.gameData?.roleInfo || null);
@@ -58,6 +60,9 @@ const hangUp = ref({
   hangUpTime: 0,
   isExtending: false,
   isClaiming: false,
+});
+defineExpose({
+  isBusy: computed(() => hangUp.value.isExtending || hangUp.value.isClaiming),
 });
 
 const formatTime = (seconds) => {

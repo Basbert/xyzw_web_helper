@@ -267,6 +267,20 @@ export const useTokenStore = defineStore("tokens", () => {
     return false;
   };
 
+  // A newly imported token can change, but the game role ID remains stable.
+  const rememberRoleId = (tokenId: string, role: any) => {
+    const roleId = role?.roleId;
+    if (
+      (typeof roleId !== "string" && typeof roleId !== "number") ||
+      !String(roleId).trim() ||
+      String(roleId) === "0"
+    )
+      return;
+    const token = gameTokens.value.find((item) => item.id === tokenId);
+    if (token && String(token.roleId ?? "") !== String(roleId))
+      updateToken(tokenId, { roleId });
+  };
+
   /**
    * Remove token metadata, its active connection and associated persisted BIN data.
    * @param {string} tokenId Token to remove.
@@ -514,6 +528,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
       if (cmd === "role_getroleinforesp") {
         syncRandomSeedFromStatistics(tokenId, body, client);
+        rememberRoleId(tokenId, body?.role);
 
         // 更新头像
         if (body?.role?.headImg) {
@@ -1115,6 +1130,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
       // 手动更新游戏数据（因为响应可能不会自动触发消息处理）
       if (roleInfo) {
+        rememberRoleId(tokenId, roleInfo.role);
         gameData.value.roleInfo = roleInfo;
         gameData.value.lastUpdated = new Date().toISOString();
         gameLogger.verbose("角色信息已通过 Promise 更新");

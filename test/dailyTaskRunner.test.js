@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import * as settingsHelpers from "../src/utils/dailyTaskSettings.js";
 import * as stateHelpers from "../src/utils/dailyTaskState.js";
 import { loadModule } from "./helpers/loadModule.js";
 
 const { DailyTaskRunner } = await loadModule(
   new URL("../src/utils/dailyTaskRunner.js", import.meta.url),
-  { "@/utils/dailyTaskState": stateHelpers },
+  {
+    "@/utils/dailyTaskState": stateHelpers,
+    "@/utils/dailyTaskSettings": settingsHelpers,
+  },
 );
 const definitions = [
   [1, 1, 1],
@@ -89,6 +93,8 @@ function fixture(progress = {}) {
       calls.push({ cmd, params });
       if (cmd === "presetteam_getinfo")
         return { presetTeamInfo: { useTeamId: 1 } };
+      if (cmd === "arena_getareatarget") return { roleList: [{ roleId: 123 }] };
+      if (cmd === "fight_startareaarena") role.dailyTask.complete[13] = 1;
       if (cmd === "system_buygold") role.dailyTask.complete[6]++;
       if (cmd === "item_openbox") role.dailyTask.complete[7] += params.number;
       if (cmd === "hero_recruit")
@@ -112,6 +118,7 @@ function fixture(progress = {}) {
       {
         loadConfig: async () => config,
         sleep: async () => {},
+        getCurrentHour: () => 10,
       },
     );
   return {
@@ -168,6 +175,96 @@ test("a new runner skips claimed actions using new server data, without local pr
     0,
   );
   assert.ok(f.calls.some((c) => c.cmd === "role_getroleinfo"));
+});
+
+test("an untouched arena daily task runs three fights once, not once per click", async () => {
+  const f = fixture({ 13: 0 });
+  const arenaSettings = { ...settings, arenaEnable: true };
+  await f.runner().run("account-a", {}, arenaSettings);
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "fight_startareaarena").length,
+    3,
+  );
+  assert.equal(f.role.dailyTask.complete[13], -1);
+
+  await f.runner().run("account-a", {}, arenaSettings);
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "fight_startareaarena").length,
+    3,
+  );
+});
+
+test("arena fights are not guessed when the daily goal is already complete", async () => {
+  const f = fixture({ 13: 1 });
+  const logs = [];
+  await f
+    .runner()
+    .run(
+      "account-a",
+      { onLog: (entry) => logs.push(entry.message) },
+      { ...settings, arenaEnable: true },
+    );
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "fight_startareaarena").length,
+    0,
+  );
+  assert.ok(logs.some((message) => message.includes("无法确认剩余免费次数")));
+});
+
+test("arena task is rechecked just before fighting", async () => {
+  const f = fixture({ 13: 0 });
+  const read = f.store.sendGetRoleInfo;
+  let reads = 0;
+  f.store.sendGetRoleInfo = async (...args) => {
+    if (++reads === 2) f.role.dailyTask.complete[13] = 1;
+    return read(...args);
+  };
+  await f.runner().run("account-a", {}, { ...settings, arenaEnable: true });
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "fight_startareaarena").length,
+    0,
+  );
+});
+
+test("arena fights are skipped at 22:00", async () => {
+  const f = fixture({ 13: 0 });
+  const runner = f.runner();
+  runner.getCurrentHour = () => 22;
+  const result = await runner.run(
+    "account-a",
+    {},
+    { ...settings, arenaEnable: true },
+  );
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "fight_startareaarena").length,
+    0,
+  );
+  assert.equal(result.remainingTasks, 1);
+});
+
+test("an interrupted arena sequence does not replay completed fights", async () => {
+  const f = fixture({ 13: 0 });
+  const send = f.store.sendMessageWithPromise;
+  let interrupted = false;
+  f.store.sendMessageWithPromise = async (...args) => {
+    const result = await send(...args);
+    if (args[1] === "fight_startareaarena" && !interrupted) {
+      interrupted = true;
+      f.disconnect();
+    }
+    return result;
+  };
+  const arenaSettings = { ...settings, arenaEnable: true };
+  await assert.rejects(
+    f.runner().run("account-a", {}, arenaSettings),
+    /WebSocket 已断开/,
+  );
+  f.reconnect();
+  await f.runner().run("account-a", {}, arenaSettings);
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "fight_startareaarena").length,
+    1,
+  );
 });
 
 test("a successful write followed by disconnect does not cause replay on reconnect", async () => {
@@ -415,6 +512,41 @@ test("server-claimed sign-in, cards and free gacha are not requested again", asy
     f.calls.filter((c) => c.cmd === "collection_claimfreereward").length,
     1,
   );
+});
+
+test("legacy fragments are claimed once when enabled and skipped when disabled", async () => {
+  const enabled = fixture();
+  await enabled
+    .runner()
+    .run("account-a", {}, { ...settings, claimLegacy: true });
+  assert.equal(
+    enabled.calls.filter((call) => call.cmd === "legacy_claimhangup").length,
+    1,
+  );
+
+  const disabled = fixture();
+  await disabled
+    .runner()
+    .run("account-a", {}, { ...settings, claimLegacy: false });
+  assert.equal(
+    disabled.calls.filter((call) => call.cmd === "legacy_claimhangup").length,
+    0,
+  );
+});
+
+test("a legacy claim business error leaves other daily tasks running", async () => {
+  const f = fixture({ 6: 2 });
+  const send = f.store.sendMessageWithPromise;
+  f.store.sendMessageWithPromise = async (...args) => {
+    if (args[1] === "legacy_claimhangup")
+      throw new Error("服务器错误: 400010 - 暂无可领取残卷");
+    return send(...args);
+  };
+  const result = await f
+    .runner()
+    .run("account-a", {}, { ...settings, claimLegacy: true });
+  assert.equal(f.role.dailyTask.complete[6], -1);
+  assert.equal(result.failed, 1);
 });
 
 test("a failed formation query never triggers a forced switch", async () => {
