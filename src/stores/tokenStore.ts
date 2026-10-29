@@ -2,11 +2,12 @@ import type { ProtoMsg } from "@/utils/bonProtocol";
 import { useLocalStorage } from "@vueuse/core";
 import { defineStore } from "pinia";
 
-import { computed, ref } from "vue";
+import { computed, onScopeDispose, ref } from "vue";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import router from "@/router";
 import { createAccountGameData } from "@/utils/accountGameData";
 import { g_utils } from "@/utils/bonProtocol";
+import { createConnectionRecovery } from "@/utils/connectionRecovery";
 
 import { gameLogger, tokenLogger, wsLogger } from "@/utils/logger";
 import { generateRandomSeed } from "@/utils/randomSeed";
@@ -477,7 +478,11 @@ export const useTokenStore = defineStore("tokens", () => {
         currentPath === "/tokens" ||
         currentPath === "/admin/game-features";
 
-      if (shouldReconnect) {
+      if (
+        shouldReconnect &&
+        selectedTokenId.value === tokenId &&
+        desiredConnections.has(tokenId)
+      ) {
         wsLogger.info(`触发自动重连 [${tokenId}]`);
         // 重置重连状态以允许立即重连
         if (wsConnections.value[tokenId]) {
@@ -725,15 +730,20 @@ export const useTokenStore = defineStore("tokens", () => {
     action: string,
     sessionId: string = currentSessionId,
   ) => {
-    const state = useLocalStorage(`ws_connection_${tokenId}`, {
-      action, // 'connecting', 'connected', 'disconnecting', 'disconnected'
-      sessionId,
-      timestamp: Date.now(),
-      url: window.location.href,
-    });
-
-    if (activeConnections.value) {
-      activeConnections.value[tokenId] = state.value;
+    const key = `ws_connection_${tokenId}`;
+    try {
+      const previous = JSON.parse(localStorage.getItem(key) || "null");
+      if (
+        ["disconnecting", "disconnected"].includes(action) &&
+        previous &&
+        previous.sessionId !== sessionId
+      )
+        return;
+      const state = { action, sessionId, timestamp: Date.now() };
+      localStorage.setItem(key, JSON.stringify(state));
+      if (activeConnections.value) activeConnections.value[tokenId] = state;
+    } catch (error) {
+      wsLogger.warn("更新跨标签页连接状态失败", error);
     }
   };
 
@@ -762,13 +772,73 @@ export const useTokenStore = defineStore("tokens", () => {
     return null;
   };
 
+  // Only the currently selected account is restored after an unexpected close.
+  const desiredConnections = new Set<string>();
+  const connectionRecovery = createConnectionRecovery({
+    canRecover: (tokenId: string) => {
+      const connection = wsConnections.value[tokenId];
+      return (
+        desiredConnections.has(tokenId) &&
+        selectedTokenId.value === tokenId &&
+        gameTokens.value.some((token) => token.id === tokenId) &&
+        (typeof navigator === "undefined" || navigator.onLine !== false) &&
+        !["connected", "connecting", "disconnecting"].includes(
+          connection?.status || "",
+        ) &&
+        !checkCrossTabConnection(tokenId)
+      );
+    },
+    reconnect: (tokenId: string) => {
+      const token = gameTokens.value.find((entry) => entry.id === tokenId);
+      if (!token) return null;
+      return createWebSocketConnection(tokenId, token.token, token.wsUrl, true);
+    },
+  });
+
+  const restoreSelectedConnection = () => {
+    const tokenId = selectedTokenId.value;
+    if (!tokenId || !desiredConnections.has(tokenId)) return;
+    const connection = wsConnections.value[tokenId];
+    if (connection?.status === "connected") {
+      try {
+        connection.client?.sendHeartbeat();
+      } catch (error) {
+        wsLogger.warn("恢复页面时发送心跳失败", error);
+      }
+    } else {
+      connectionRecovery.schedule(tokenId, { reset: true, immediate: true });
+    }
+  };
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === "visible") restoreSelectedConnection();
+  };
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+  }
+  if (typeof window !== "undefined" && window.addEventListener) {
+    window.addEventListener("online", restoreSelectedConnection);
+  }
+  onScopeDispose(() => {
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    }
+    if (typeof window !== "undefined" && window.removeEventListener) {
+      window.removeEventListener("online", restoreSelectedConnection);
+    }
+    connectionRecovery.dispose();
+  });
+
   // WebSocket连接管理（重构版 - 防重连）
   const createWebSocketConnection = async (
     tokenId: string,
     base64Token: string,
     customWsUrl = null,
+    fromRecovery = false,
   ) => {
     wsLogger.info(`开始创建连接: ${tokenId}`);
+    if (!fromRecovery && selectedTokenId.value === tokenId) {
+      desiredConnections.add(tokenId);
+    }
 
     // 1. 获取连接锁，防止竞态条件
     const lockAcquired = await acquireConnectionLock(tokenId, "connect");
@@ -778,6 +848,13 @@ export const useTokenStore = defineStore("tokens", () => {
     }
 
     try {
+      if (
+        fromRecovery &&
+        (!desiredConnections.has(tokenId) || selectedTokenId.value !== tokenId)
+      ) {
+        releaseConnectionLock(tokenId, "connect");
+        return null;
+      }
       // 2. 检查跨标签页连接状态
       const crossTabState = checkCrossTabConnection(tokenId);
       if (crossTabState) {
@@ -792,7 +869,14 @@ export const useTokenStore = defineStore("tokens", () => {
       // 4. 如果存在现有连接，先优雅关闭
       if (wsConnections.value[tokenId]) {
         wsLogger.debug(`优雅关闭现有连接: ${tokenId}`);
-        await closeWebSocketConnectionAsync(tokenId);
+        await closeWebSocketConnectionAsync(tokenId, true);
+      }
+      if (
+        fromRecovery &&
+        (!desiredConnections.has(tokenId) || selectedTokenId.value !== tokenId)
+      ) {
+        releaseConnectionLock(tokenId, "connect");
+        return null;
       }
 
       // 5. 解析token
@@ -854,6 +938,8 @@ export const useTokenStore = defineStore("tokens", () => {
           wsConnections.value[tokenId].lastRandomSeed = null;
         }
         updateCrossTabConnectionState(tokenId, "connected");
+        if (desiredConnections.has(tokenId))
+          connectionRecovery.markConnected(tokenId);
         releaseConnectionLock(tokenId, "connect");
         localStorage.removeItem("xyzw_chat_msg_list");
         try {
@@ -867,6 +953,7 @@ export const useTokenStore = defineStore("tokens", () => {
         if (!isCurrentConnection()) return;
         const reason = event.code === 1006 ? "异常断开" : event.reason || "";
         wsLogger.wsDisconnect(tokenId, reason);
+        releaseConnectionLock(tokenId, "connect");
         if (wsConnections.value[tokenId]) {
           const conn = wsConnections.value[tokenId];
           const wasDisconnecting = conn.status === "disconnecting";
@@ -876,10 +963,20 @@ export const useTokenStore = defineStore("tokens", () => {
 
           // 如果连接异常断开(1006)且从未连接成功(握手失败)，尝试刷新Token
           // connectedAt 为 null 表示 socket.onopen 还没触发就断开了，通常意味着握手失败（如403 Forbidden）
-          if (event.code === 1006 && !conn.connectedAt && !wasDisconnecting) {
+          if (
+            event.code === 1006 &&
+            !conn.connectedAt &&
+            !wasDisconnecting &&
+            desiredConnections.has(tokenId) &&
+            selectedTokenId.value === tokenId
+          ) {
             wsLogger.warn(`检测到握手失败(1006)，尝试刷新Token [${tokenId}]`);
             // 强制刷新并重连
-            await attemptTokenRefresh(tokenId, true);
+            const refreshed = await attemptTokenRefresh(tokenId, true);
+            if (refreshed) return;
+          }
+          if (!wasDisconnecting && isCurrentConnection()) {
+            connectionRecovery.schedule(tokenId);
           }
         }
       };
@@ -932,7 +1029,14 @@ export const useTokenStore = defineStore("tokens", () => {
    * @param {string} tokenId Account connection to close.
    * @returns {Promise<void>} Resolves after transport closure or the five-second limit.
    */
-  const closeWebSocketConnectionAsync = async (tokenId: string) => {
+  const closeWebSocketConnectionAsync = async (
+    tokenId: string,
+    preserveRecovery = false,
+  ) => {
+    if (!preserveRecovery) {
+      desiredConnections.delete(tokenId);
+      connectionRecovery.cancel(tokenId);
+    }
     const lockAcquired = await acquireConnectionLock(tokenId, "disconnect");
     if (!lockAcquired) {
       wsLogger.warn(`无法获取断开连接锁: ${tokenId}`);
@@ -1517,7 +1621,10 @@ export const useTokenStore = defineStore("tokens", () => {
   };
 
   // 初始化
+  let tokenStoreInitialized = false;
   const initTokenStore = () => {
+    if (tokenStoreInitialized) return;
+    tokenStoreInitialized = true;
     // // 恢复数据
     // const savedTokens = localStorage.getItem('gameTokens')
     // const savedSelectedId = localStorage.getItem('selectedTokenId')

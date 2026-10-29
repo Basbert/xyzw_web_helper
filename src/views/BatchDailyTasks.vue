@@ -52,9 +52,9 @@
                 <n-button size="small" @click="showTasksModal = true">
                   查看定时任务
                 </n-button>
-                <n-button size="small" @click="exportConfig">
-                  导出配置
-                </n-button>
+                <n-dropdown :options="exportOptions" @select="exportConfig">
+                  <n-button size="small">导出配置</n-button>
+                </n-dropdown>
                 <n-upload
                   :show-file-list="false"
                   accept=".json"
@@ -4217,8 +4217,13 @@ const deselectAllTasks = () => {
 // Import/Export Config
 // ======================
 
-// Export all tokens and scheduled tasks configuration
-const exportConfig = () => {
+const exportOptions = [
+  { label: "导出任务设置（不含账号凭据）", key: "settings" },
+  { label: "备份账号和设置（包含账号凭据）", key: "full" },
+];
+
+// Export settings by default; credentials are included only in an explicit backup.
+const exportConfig = (mode = "settings") => {
   try {
     // Get all valid token IDs
     const validTokenIds = new Set(tokens.value.map((t) => t.id));
@@ -4226,7 +4231,14 @@ const exportConfig = () => {
     // Filter scheduled tasks: remove invalid token IDs from selectedTokens
     const filteredScheduledTasks = scheduledTasks.value
       .map((task) => ({
-        ...task,
+        id: task.id,
+        name: task.name,
+        runType: task.runType,
+        runTime: task.runTime,
+        cronExpression: task.cronExpression,
+        selectedTasks: task.selectedTasks,
+        legionApplyTargetId: task.legionApplyTargetId,
+        enabled: task.enabled,
         selectedTokens:
           task.selectedTokens?.filter((tokenId) =>
             validTokenIds.has(tokenId),
@@ -4242,7 +4254,16 @@ const exportConfig = () => {
         try {
           tokenSettings.push({
             tokenId: token.id,
-            settings: JSON.parse(settings),
+            settings:
+              mode === "full"
+                ? JSON.parse(settings)
+                : Object.fromEntries(
+                    Object.entries(JSON.parse(settings)).filter(
+                      ([key]) =>
+                        Object.hasOwn(DAILY_TASK_DEFAULTS, key) ||
+                        ["towerFormation", "freeGachaEnable"].includes(key),
+                    ),
+                  ),
           });
         } catch (e) {
           console.warn(`Failed to parse settings for token ${token.id}`, e);
@@ -4251,21 +4272,26 @@ const exportConfig = () => {
     });
 
     const exportData = {
-      version: "1.1",
+      version: "1.2",
       exportTime: new Date().toISOString(),
-      tokens: tokens.value.map((t) => ({
-        id: t.id,
-        name: t.name,
-        token: t.token,
-        server: t.server,
-        wsUrl: t.wsUrl,
-        remark: t.remark,
-        importMethod: t.importMethod,
-        sourceUrl: t.sourceUrl,
-        upgradedToPermanent: true,
-        upgradedAt: t.upgradedAt,
-        updatedAt: t.updatedAt,
-      })),
+      tokens: tokens.value.map((t) =>
+        mode === "full"
+          ? {
+              id: t.id,
+              name: t.name,
+              roleId: t.roleId,
+              token: t.token,
+              server: t.server,
+              wsUrl: t.wsUrl,
+              remark: t.remark,
+              importMethod: t.importMethod,
+              sourceUrl: t.sourceUrl,
+              upgradedToPermanent: true,
+              upgradedAt: t.upgradedAt,
+              updatedAt: t.updatedAt,
+            }
+          : { id: t.id, name: t.name, roleId: t.roleId, server: t.server },
+      ),
       scheduledTasks: filteredScheduledTasks,
       batchSettings: {
         boxCount: batchSettings.boxCount,
@@ -4292,14 +4318,16 @@ const exportConfig = () => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `xyzw_config_${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = `xyzw_${mode === "full" ? "account_backup" : "settings"}_${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
 
     message.success(
-      `导出成功: ${exportData.tokens.length} 个账号, ${exportData.scheduledTasks.length} 个定时任务`,
+      mode === "full"
+        ? `账号备份已导出，包含 ${exportData.tokens.length} 个账号凭据`
+        : `任务设置已导出，不包含账号凭据`,
     );
   } catch (error) {
     console.error("Export failed:", error);
@@ -4318,8 +4346,8 @@ const importConfig = async ({ file }) => {
         // Validate structure
         if (
           !importData.version ||
-          !importData.tokens ||
-          !importData.scheduledTasks
+          !Array.isArray(importData.tokens) ||
+          !Array.isArray(importData.scheduledTasks)
         ) {
           message.error("无效的配置文件格式");
           return;
@@ -4327,14 +4355,26 @@ const importConfig = async ({ file }) => {
 
         let importedTokens = 0;
         let importedTasks = 0;
+        let skippedTasks = 0;
+        let unmatchedReferences = 0;
+        const accountMap = new Map();
 
         // Import tokens
         if (Array.isArray(importData.tokens)) {
           importData.tokens.forEach((token) => {
             // Check if token already exists
-            const exists = gameTokens.value.some(
-              (t) => t.token === token.token || t.id === token.id,
+            const exists = gameTokens.value.find(
+              (t) =>
+                (token.token && t.token === token.token) || t.id === token.id,
             );
+            if (
+              exists &&
+              token.id &&
+              (!token.roleId ||
+                !exists.roleId ||
+                String(token.roleId) === String(exists.roleId))
+            )
+              accountMap.set(token.id, exists.id);
             if (!exists && token.token) {
               // Add new token directly to gameTokens (useLocalStorage)
               gameTokens.value.push({
@@ -4342,6 +4382,7 @@ const importConfig = async ({ file }) => {
                   token.id ||
                   `token_${Date.now()}${Math.random().toString(36).slice(2)}`,
                 name: token.name || "",
+                roleId: token.roleId || null,
                 token: token.token,
                 server: token.server || "",
                 wsUrl: token.wsUrl || null,
@@ -4355,7 +4396,20 @@ const importConfig = async ({ file }) => {
                 lastUsed: new Date().toISOString(),
               });
               importedTokens++;
+              if (token.id) accountMap.set(token.id, token.id);
             }
+          });
+          importData.tokens.forEach((token) => {
+            if (!token.id || accountMap.has(token.id) || !token.roleId) return;
+            const matches = gameTokens.value.filter(
+              (entry) =>
+                entry.roleId &&
+                String(entry.roleId) === String(token.roleId) &&
+                (!token.server ||
+                  !entry.server ||
+                  token.server === entry.server),
+            );
+            if (matches.length === 1) accountMap.set(token.id, matches[0].id);
           });
         }
 
@@ -4364,8 +4418,35 @@ const importConfig = async ({ file }) => {
           importData.scheduledTasks.forEach((task) => {
             // Check if task already exists
             const exists = scheduledTasks.value.some((t) => t.id === task.id);
-            if (!exists && task.id) {
-              scheduledTasks.value.push(task);
+            if (
+              !exists &&
+              task.id &&
+              Array.isArray(task.selectedTokens) &&
+              Array.isArray(task.selectedTasks)
+            ) {
+              if (
+                task.selectedTasks.some(
+                  (name) =>
+                    !availableTasks.some((entry) => entry.value === name),
+                )
+              ) {
+                skippedTasks++;
+                return;
+              }
+              const selectedTokens = task.selectedTokens
+                .map((id) => accountMap.get(id))
+                .filter(Boolean);
+              unmatchedReferences +=
+                task.selectedTokens.length - selectedTokens.length;
+              if (!selectedTokens.length) {
+                skippedTasks++;
+                return;
+              }
+              scheduledTasks.value.push({
+                ...task,
+                selectedTokens,
+                enabled: false,
+              });
               importedTasks++;
             }
           });
@@ -4374,7 +4455,28 @@ const importConfig = async ({ file }) => {
 
         // Import batch settings if provided
         if (importData.batchSettings) {
-          Object.assign(batchSettings, importData.batchSettings);
+          const allowedKeys = new Set([
+            "boxCount",
+            "fishCount",
+            "recruitCount",
+            "defaultBoxType",
+            "defaultFishType",
+            "blackMarketPurchaseList",
+            "commandDelay",
+            "taskDelay",
+            "actionDelay",
+            "battleDelay",
+            "refreshDelay",
+            "longDelay",
+            "maxActive",
+            "tokenListColumns",
+          ]);
+          const safeSettings = Object.fromEntries(
+            Object.entries(importData.batchSettings).filter(([key]) =>
+              allowedKeys.has(key),
+            ),
+          );
+          Object.assign(batchSettings, safeSettings);
           batchSettings.blackMarketPurchaseList =
             normalizeBlackMarketPurchaseList(
               batchSettings.blackMarketPurchaseList?.length
@@ -4388,17 +4490,24 @@ const importConfig = async ({ file }) => {
         if (Array.isArray(importData.tokenSettings)) {
           importData.tokenSettings.forEach((item) => {
             if (item.tokenId && item.settings) {
-              const token = tokens.value.find(
-                (entry) => entry.id === item.tokenId,
-              ) || { id: item.tokenId };
-              writeDailyTaskSettings(token, item.settings);
+              const mappedId = accountMap.get(item.tokenId);
+              const token = tokens.value.find((entry) => entry.id === mappedId);
+              if (token) writeDailyTaskSettings(token, item.settings);
             }
           });
         }
 
-        message.success(
-          `导入成功: ${importedTokens} 个新账号, ${importedTasks} 个新定时任务`,
-        );
+        const summary = `导入 ${importedTokens} 个新账号、${importedTasks} 个定时任务。新导入的定时任务默认关闭，请核对账号后启用。`;
+        const unmatchedAccounts = importData.tokens.filter(
+          (token) => token.id && !accountMap.has(token.id),
+        ).length;
+        if (skippedTasks || unmatchedReferences || unmatchedAccounts) {
+          message.warning(
+            `${summary} ${unmatchedAccounts} 个账号未匹配，${skippedTasks} 个计划未导入，${unmatchedReferences} 个账号引用未匹配。`,
+          );
+        } else {
+          message.success(summary);
+        }
       } catch (parseError) {
         console.error("Parse error:", parseError);
         message.error("解析配置文件失败");

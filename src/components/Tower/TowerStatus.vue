@@ -12,11 +12,15 @@
       </div>
       <div class="energy-display">
         <img src="/icons/xiaoyugan.png" alt="小鱼干" class="energy-icon" />
-        <span class="energy-count">{{ towerEnergy }}</span>
+        <span class="energy-count">{{
+          isTowerConnected && Number.isFinite(roleInfo?.role?.tower?.energy)
+            ? towerEnergy
+            : "—"
+        }}</span>
         <button
           class="buy-energy-button"
           :class="{ disabled: isBuying || isClimbing }"
-          :disabled="isBuying || isClimbing"
+          :disabled="!isTowerConnected || isBuying || isClimbing"
           @click="openBuyEnergyDialog"
         >
           购买
@@ -139,11 +143,13 @@
         :disabled="!canClimb"
         @click="startTowerClimb"
       >
-        {{ isClimbing.value ? "爬塔中..." : "开始爬塔" }}
+        {{ isClimbing ? "爬塔中..." : "开始爬塔" }}
       </button>
 
       <!-- 停止批量爬塔按钮，仅批量时显示 -->
-      <button class="stop-button" @click="stopClimbing">停止爬塔</button>
+      <button v-if="isClimbing" class="stop-button" @click="stopClimbing">
+        停止爬塔
+      </button>
       <!-- 调试用的重置按钮，只在开发环境显示 -->
       <button v-if="false" class="reset-button" @click="resetClimbingState">
         重置状态
@@ -165,8 +171,7 @@ const stopClimbing = () => {
     clearTimeout(climbTimeout.value);
     climbTimeout.value = null;
   }
-  isClimbing.value = false;
-  message.info("已手动停止批量爬塔");
+  message.info("正在停止爬塔");
 };
 
 const tokenStore = useTokenStore();
@@ -185,16 +190,23 @@ const roleInfo = computed(() => {
   const data = tokenStore.gameData?.roleInfo || null;
   return data;
 });
+const isTowerConnected = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  return (
+    Boolean(tokenId) && tokenStore.getWebSocketStatus(tokenId) === "connected"
+  );
+});
 
 const currentFloor = computed(() => {
+  if (!isTowerConnected.value) return "—";
   const tower = roleInfo.value?.role?.tower;
 
   if (!tower) {
-    return "0 - 0";
+    return "—";
   }
 
   if (!tower.id && tower.id !== 0) {
-    return "0 - 0";
+    return "—";
   }
 
   const towerId = tower.id;
@@ -213,7 +225,7 @@ const towerEnergy = computed(() => {
 const canClimb = computed(() => {
   const hasEnergy = towerEnergy.value > 0;
   const notClimbing = !isClimbing.value;
-  return hasEnergy && notClimbing;
+  return isTowerConnected.value && hasEnergy && notClimbing;
 });
 
 // ==================== 购买小鱼干 ====================
@@ -323,7 +335,6 @@ const startTowerClimb = async () => {
   const maxClimb = 100; // 最多批量次数，防止死循环
   // 设置超时保护，60秒后自动重置状态
   climbTimeout.value = setTimeout(() => {
-    isClimbing.value = false;
     climbTimeout.value = null;
     stopFlag = true;
     message.info("批量爬塔已超时自动停止");
@@ -331,12 +342,29 @@ const startTowerClimb = async () => {
 
   try {
     const tokenId = tokenStore.selectedToken.id;
+    const client = tokenStore.wsConnections?.[tokenId]?.client;
+    const checkSession = () => {
+      if (
+        !client ||
+        tokenStore.selectedToken?.id !== tokenId ||
+        tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
+        tokenStore.wsConnections?.[tokenId]?.client !== client
+      )
+        throw new Error("账号或连接已变化，请重新检查爬塔状态");
+    };
     for (let i = 0; i < maxClimb; i++) {
       if (stopFlag) break;
-      await getTowerInfo();
-      // 体力判断必须每次都刷新
-      const tower = roleInfo.value?.role?.tower;
-      const energy = tower?.energy || 0;
+      checkSession();
+      const response = await tokenStore.sendMessageWithPromise(
+        tokenId,
+        "role_getroleinfo",
+        {},
+        10000,
+      );
+      checkSession();
+      if (stopFlag) break;
+      const energy = response?.role?.tower?.energy;
+      if (!Number.isFinite(energy)) throw new Error("服务器未返回当前爬塔体力");
       if (energy <= 0) break;
       await tokenStore.sendMessageWithPromise(
         tokenId,
@@ -348,7 +376,8 @@ const startTowerClimb = async () => {
       message.success(`第${climbCount}次爬塔命令已发送`);
       await new Promise((res) => setTimeout(res, 2000)); // 每次间隔2秒
     }
-    message.success(`已自动爬塔${climbCount}次，体力已耗尽或达到上限。`);
+    if (stopFlag) message.info(`爬塔已停止，本次爬塔 ${climbCount} 次`);
+    else message.success(`已自动爬塔${climbCount}次，体力已耗尽或达到上限。`);
   } catch (error) {
     message.error(`批量爬塔失败: ${error.message || "未知错误"}`);
   }
@@ -439,17 +468,6 @@ watch(
         }
       } else {
         message.error("咸将塔挑战失败");
-      }
-
-      // 重置爬塔状态（仅在未批量时重置）
-      if (!stopFlag) {
-        setTimeout(() => {
-          if (climbTimeout.value) {
-            clearTimeout(climbTimeout.value);
-            climbTimeout.value = null;
-          }
-          isClimbing.value = false;
-        }, 2000);
       }
     }
   },

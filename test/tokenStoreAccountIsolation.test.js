@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createPinia, defineStore, setActivePinia } from "pinia";
 import * as vue from "vue";
 import * as accountData from "../src/utils/accountGameData.js";
+import * as connectionRecovery from "../src/utils/connectionRecovery.js";
 import { loadModule } from "./helpers/loadModule.js";
 
 test("token store keeps role responses and battle versions with their own account", async () => {
@@ -25,6 +26,7 @@ test("token store keeps role responses and battle versions with their own accoun
       "@/router": { default: {} },
       "@/utils/accountGameData": accountData,
       "@/utils/bonProtocol": { g_utils: {} },
+      "@/utils/connectionRecovery": connectionRecovery,
       "@/utils/logger": {
         gameLogger: logger,
         tokenLogger: logger,

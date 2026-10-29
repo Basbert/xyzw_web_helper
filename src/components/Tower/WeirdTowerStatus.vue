@@ -12,13 +12,29 @@
       </div>
       <div class="energy-display">
         <img src="/icons/xiaoyugan.png" alt="小鱼干" class="energy-icon" />
-        <span class="energy-count">{{ towerEnergy }}</span>
+        <span class="energy-count">{{
+          isTowerConnected && Number.isFinite(weirdTowerData?.energy)
+            ? towerEnergy
+            : "—"
+        }}</span>
         <button
           class="buy-energy-button"
           :class="{
-            disabled: isBuying || isClimbing || isUsingItems || isMerging,
+            disabled:
+              isBuying ||
+              isClimbSequence ||
+              isClimbing ||
+              isUsingItems ||
+              isMerging,
           }"
-          :disabled="isBuying || isClimbing || isUsingItems || isMerging"
+          :disabled="
+            !isTowerConnected ||
+            isBuying ||
+            isClimbSequence ||
+            isClimbing ||
+            isUsingItems ||
+            isMerging
+          "
           @click="openBuyEnergyDialog"
         >
           购买
@@ -138,7 +154,7 @@
           min="1"
           step="1"
           aria-label="怪异塔爬塔次数"
-          :disabled="isClimbing || isUsingItems || isMerging"
+          :disabled="isClimbSequence || isClimbing || isUsingItems || isMerging"
         />
         <span class="climb-limit-unit">次</span>
         <button
@@ -152,9 +168,16 @@
           :disabled="!canClimb"
           @click="startTowerClimb"
         >
-          {{ isClimbing ? "爬塔中..." : "开始爬塔" }}
+          {{
+            isClimbing
+              ? "爬塔中..."
+              : isClimbSequence
+                ? "正在处理道具和合成..."
+                : "开始爬塔"
+          }}
         </button>
       </div>
+      <p class="climb-hint">爬塔结束后自动使用道具并合成</p>
 
       <!-- 停止批量爬塔按钮，仅批量时显示 -->
       <button v-if="isClimbing" class="stop-button" @click="stopClimbing">
@@ -162,8 +185,9 @@
       </button>
 
       <button
-        v-if="!isClimbing && !isUsingItems && !isMerging"
+        v-if="!isClimbSequence && !isClimbing && !isUsingItems && !isMerging"
         class="climb-button active"
+        :disabled="!isTowerConnected"
         @click="startUseItems"
       >
         一键使用道具
@@ -173,8 +197,9 @@
       </button>
 
       <button
-        v-if="!isClimbing && !isUsingItems && !isMerging"
+        v-if="!isClimbSequence && !isClimbing && !isUsingItems && !isMerging"
         class="climb-button active"
+        :disabled="!isTowerConnected"
         @click="autoMergeItems"
       >
         {{ isMerging ? "合成中..." : "一键合成" }}
@@ -187,7 +212,7 @@
 import { useMessage } from "naive-ui";
 
 // 停止批量爬塔操作
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { isSameGameValue } from "@/utils/gameValue.js";
 import {
@@ -205,8 +230,7 @@ const stopClimbing = () => {
     clearTimeout(climbTimeout.value);
     climbTimeout.value = null;
   }
-  isClimbing.value = false;
-  message.info("已手动停止批量爬塔");
+  message.info("正在停止爬塔，随后继续处理道具和合成");
 };
 
 const stopUsingItems = () => {
@@ -215,8 +239,7 @@ const stopUsingItems = () => {
     clearTimeout(itemTimeout.value);
     itemTimeout.value = null;
   }
-  isUsingItems.value = false;
-  message.info("已手动停止使用道具");
+  message.info("正在停止使用道具");
 };
 
 const tokenStore = useTokenStore();
@@ -224,6 +247,7 @@ const message = useMessage();
 
 // 响应式数据
 const isClimbing = ref(false);
+const isClimbSequence = ref(false);
 const isUsingItems = ref(false);
 const isMerging = ref(false);
 const isBuying = ref(false); // 购买小鱼干状态
@@ -233,6 +257,22 @@ const maxClimbInput = ref(DEFAULT_WEIRD_TOWER_MAX_CLIMB);
 const climbTimeout = ref(null); // 用于超时重置状态
 const itemTimeout = ref(null); // 用于道具使用超时
 const mergeTimeout = ref(null); // 用于合成超时
+let componentDisposed = false;
+
+const createSessionCheck = (tokenId) => {
+  const client = tokenStore.wsConnections?.[tokenId]?.client;
+  return () => {
+    if (
+      componentDisposed ||
+      !client ||
+      tokenStore.selectedToken?.id !== tokenId ||
+      tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
+      tokenStore.wsConnections?.[tokenId]?.client !== client
+    ) {
+      throw new Error("账号或连接已变化，请重新检查怪异塔状态");
+    }
+  };
+};
 // 最后一次爬塔结果
 
 // 计算属性 - 从gameData中获取塔相关信息
@@ -243,6 +283,12 @@ const evoTowerInfo = computed(() => {
 
 const weirdTowerData = computed(() => {
   return evoTowerInfo.value?.evoTower || null;
+});
+const isTowerConnected = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  return (
+    Boolean(tokenId) && tokenStore.getWebSocketStatus(tokenId) === "connected"
+  );
 });
 
 const currentTowerId = computed(() => {
@@ -264,6 +310,11 @@ const pendingChapterRewards = computed(() => {
 });
 
 const displayFloor = computed(() => {
+  if (
+    !isTowerConnected.value ||
+    !Number.isFinite(weirdTowerData.value?.towerId)
+  )
+    return "—";
   const towerId = currentTowerId.value;
 
   if (towerId === 0) {
@@ -286,7 +337,14 @@ const canClimb = computed(() => {
   const notClimbing = !isClimbing.value;
   const notUsingItems = !isUsingItems.value;
   const notMerging = !isMerging.value;
-  return hasEnergy && notClimbing && notUsingItems && notMerging;
+  return (
+    isTowerConnected.value &&
+    hasEnergy &&
+    !isClimbSequence.value &&
+    notClimbing &&
+    notUsingItems &&
+    notMerging
+  );
 });
 
 // ==================== 购买小鱼干 ====================
@@ -301,6 +359,7 @@ const openBuyEnergyDialog = () => {
     return;
   }
   if (
+    isClimbSequence.value ||
     isClimbing.value ||
     isUsingItems.value ||
     isMerging.value ||
@@ -403,13 +462,13 @@ const isWeirdTowerActivityOpen = computed(() => {
 });
 
 // 方法
-const startUseItems = async () => {
+const startUseItems = async (options = {}) => {
   if (!tokenStore.selectedToken) {
     message.warning("请先选择Token");
     return;
   }
 
-  if (isClimbing.value) {
+  if (isClimbing.value || isUsingItems.value) {
     message.warning("正在爬塔中，请稍后再试");
     return;
   }
@@ -424,14 +483,15 @@ const startUseItems = async () => {
 
   // 设置超时保护，60秒后自动重置状态
   itemTimeout.value = setTimeout(() => {
-    isUsingItems.value = false;
     itemTimeout.value = null;
     stopItemFlag = true;
     message.info("一键使用道具已超时自动停止");
   }, 60000);
 
   try {
-    const tokenId = tokenStore.selectedToken.id;
+    const tokenId = options.tokenId || tokenStore.selectedToken.id;
+    const checkSession = options.checkSession || createSessionCheck(tokenId);
+    checkSession();
 
     // 1. 获取活动信息
     const infoRes = await tokenStore.sendMessageWithPromise(
@@ -440,6 +500,7 @@ const startUseItems = async () => {
       { actType: 1 },
       5000,
     );
+    checkSession();
 
     // 获取怪异塔信息以读取剩余道具数量
     const towerInfoRes = await tokenStore.sendMessageWithPromise(
@@ -448,8 +509,9 @@ const startUseItems = async () => {
       {},
       5000,
     );
+    checkSession();
 
-    if (!infoRes || !infoRes.mergeBox) {
+    if (!infoRes?.mergeBox || !towerInfoRes?.evoTower) {
       throw new Error("获取活动信息失败");
     }
 
@@ -470,6 +532,7 @@ const startUseItems = async () => {
 
     // eslint-disable-next-line no-unmodified-loop-condition -- The Stop button changes this flag while awaited requests yield.
     while (lotteryLeftCnt > 0 && !stopItemFlag) {
+      checkSession();
       let pos = {};
       if (costTotalCnt < 2) {
         pos = { gridX: 4, gridY: 5 };
@@ -489,6 +552,7 @@ const startUseItems = async () => {
         },
         5000,
       );
+      checkSession();
 
       costTotalCnt++;
       lotteryLeftCnt--;
@@ -498,6 +562,7 @@ const startUseItems = async () => {
     }
 
     // 领取累计奖励
+    checkSession();
     await tokenStore
       .sendMessageWithPromise(
         tokenId,
@@ -507,7 +572,10 @@ const startUseItems = async () => {
       )
       .catch(() => {});
 
-    message.success(`已使用道具 ${processedCount} 次`);
+    checkSession();
+    if (stopItemFlag)
+      message.warning(`已停止使用道具，本次使用 ${processedCount} 次`);
+    else message.success(`已使用道具 ${processedCount} 次`);
     // 刷新一下
     await getTowerInfo();
   } catch (error) {
@@ -521,13 +589,13 @@ const startUseItems = async () => {
   }
 };
 
-const autoMergeItems = async () => {
+const autoMergeItems = async (options = {}) => {
   if (!tokenStore.selectedToken) {
     message.warning("请先选择Token");
     return;
   }
 
-  if (isClimbing.value || isUsingItems.value) {
+  if (isClimbing.value || isUsingItems.value || isMerging.value) {
     message.warning("正在执行其他操作，请稍后再试");
     return;
   }
@@ -537,14 +605,15 @@ const autoMergeItems = async () => {
 
   // 设置超时保护，60秒后自动重置状态
   mergeTimeout.value = setTimeout(() => {
-    isMerging.value = false;
     mergeTimeout.value = null;
     stopMergeFlag = true;
     message.info("一键合成已超时自动停止");
   }, 60000);
 
   try {
-    const tokenId = tokenStore.selectedToken.id;
+    const tokenId = options.tokenId || tokenStore.selectedToken.id;
+    const checkSession = options.checkSession || createSessionCheck(tokenId);
+    checkSession();
     message.loading("正在执行一键合成...");
 
     let loopCount = 0;
@@ -552,6 +621,7 @@ const autoMergeItems = async () => {
 
     // eslint-disable-next-line no-unmodified-loop-condition -- The Stop button changes this flag while awaited requests yield.
     while (loopCount < MAX_LOOPS && !stopMergeFlag) {
+      checkSession();
       loopCount++;
 
       // 获取当前信息
@@ -561,6 +631,7 @@ const autoMergeItems = async () => {
         { actType: 1 },
         5000,
       );
+      checkSession();
 
       if (!infoRes || !infoRes.mergeBox) {
         throw new Error("返回数据缺少 mergeBox");
@@ -574,6 +645,7 @@ const autoMergeItems = async () => {
         for (const taskId in taskMap) {
           if (stopMergeFlag) break;
           if (taskMap[taskId] !== 0 && !taskClaimMap[taskId]) {
+            checkSession();
             await tokenStore
               .sendMessageWithPromise(
                 tokenId,
@@ -640,6 +712,7 @@ const autoMergeItems = async () => {
         infoRes.mergeBox.taskMap["251212208"] !== 0;
 
       if (isLevel8OrAbove) {
+        checkSession();
         // 8级以上使用智能合成
         await tokenStore.sendMessageWithPromise(
           tokenId,
@@ -656,6 +729,7 @@ const autoMergeItems = async () => {
           // 两两合成
           while (group.length >= 2) {
             if (stopMergeFlag) break;
+            checkSession();
             const source = group.shift();
             const target = group.shift();
 
@@ -680,7 +754,10 @@ const autoMergeItems = async () => {
       await new Promise((res) => setTimeout(res, 500));
     }
 
-    message.success("一键合成操作完成");
+    checkSession();
+    if (stopMergeFlag || loopCount >= MAX_LOOPS)
+      message.warning("合成已停止，请检查是否还有可合成物品");
+    else message.success("一键合成操作完成");
     // 刷新一下
     await getTowerInfo();
   } catch (error) {
@@ -709,6 +786,14 @@ const startTowerClimb = async () => {
     message.warning("体力不足或正在执行其他操作");
     return;
   }
+  const tokenId = tokenStore.selectedToken.id;
+  const checkSession = createSessionCheck(tokenId);
+  try {
+    checkSession();
+  } catch (error) {
+    message.warning(error.message);
+    return;
+  }
 
   // 清除之前的超时
   if (climbTimeout.value) {
@@ -716,6 +801,7 @@ const startTowerClimb = async () => {
     climbTimeout.value = null;
   }
 
+  isClimbSequence.value = true;
   isClimbing.value = true;
   stopFlag = false;
   let climbCount = 0;
@@ -723,23 +809,31 @@ const startTowerClimb = async () => {
   maxClimbInput.value = maxClimb;
   // 设置超时保护，60秒后自动重置状态
   climbTimeout.value = setTimeout(() => {
-    isClimbing.value = false;
     climbTimeout.value = null;
     stopFlag = true;
     message.info("批量爬塔已超时自动停止");
   }, 60000);
 
   try {
-    const tokenId = tokenStore.selectedToken.id;
     // 爬塔前先补领未领取的章节奖励，否则 evotower_readyfight 会被拒绝（12200020）
-    await claimPendingChapterRewards(tokenId);
+    await claimPendingChapterRewards(tokenId, checkSession);
 
     for (let i = 0; i < maxClimb; i++) {
       if (stopFlag) break;
 
       // 检查当前能量
-      await getTowerInfo();
-      const currentEnergy = towerEnergy.value;
+      checkSession();
+      const towerSnapshot = await tokenStore.sendMessageWithPromise(
+        tokenId,
+        "evotower_getinfo",
+        {},
+        5000,
+      );
+      checkSession();
+      if (stopFlag) break;
+      const currentEnergy = towerSnapshot?.evoTower?.energy;
+      if (!Number.isFinite(currentEnergy))
+        throw new Error("服务器未返回当前怪异塔体力");
       if (currentEnergy <= 0) break;
 
       // 准备战斗
@@ -749,6 +843,8 @@ const startTowerClimb = async () => {
         {},
         5000,
       );
+      checkSession();
+      if (stopFlag) break;
 
       // 执行战斗
       await tokenStore.sendMessageWithPromise(
@@ -760,12 +856,15 @@ const startTowerClimb = async () => {
         },
         10000,
       );
+      checkSession();
 
       climbCount++;
       message.success(`第${climbCount}次爬塔命令已发送`);
+      if (stopFlag) break;
 
       // 更新爬塔信息
       await getTowerInfo();
+      checkSession();
 
       // 检查并领取每日任务奖励
       const towerData = evoTowerInfo.value?.evoTower;
@@ -781,6 +880,7 @@ const startTowerClimb = async () => {
 
         for (const taskId of taskIds) {
           if (!dailyTasks[taskId]) {
+            checkSession();
             await tokenStore
               .sendMessageWithPromise(
                 tokenId,
@@ -803,11 +903,12 @@ const startTowerClimb = async () => {
       // 通关章节奖励：以 rewardTowerId 为准判断是否有未领取的章节
       // （原按 (towerId % 10) + 1 === 1 判断，towerId 为 10 的整数倍时恒成立，
       //   会重复发送领奖命令，且无法感知历史未领取的章节）
-      await claimPendingChapterRewards(tokenId);
+      await claimPendingChapterRewards(tokenId, checkSession);
 
       await new Promise((res) => setTimeout(res, 400)); // 每次间隔400毫秒
     }
     // 获取免费道具数量
+    checkSession();
     const freeEnergyResult = await tokenStore.sendMessageWithPromise(
       tokenId,
       "mergebox_getinfo",
@@ -816,7 +917,8 @@ const startTowerClimb = async () => {
       },
       5000,
     );
-    if (freeEnergyResult && freeEnergyResult.mergeBox.freeEnergy > 0) {
+    checkSession();
+    if (freeEnergyResult?.mergeBox?.freeEnergy > 0) {
       // 领取免费道具
       await tokenStore.sendMessageWithPromise(
         tokenId,
@@ -831,17 +933,27 @@ const startTowerClimb = async () => {
       );
     }
     await new Promise((res) => setTimeout(res, 500));
-    message.success(`已自动爬塔${climbCount}次，体力已耗尽或达到上限。`);
+    if (stopFlag) message.info(`爬塔已提前结束，本次爬塔 ${climbCount} 次`);
+    else message.success(`已自动爬塔${climbCount}次，体力已耗尽或达到上限。`);
   } catch (error) {
     message.error(`批量爬塔失败: ${error.message || "未知错误"}`);
+  } finally {
+    if (climbTimeout.value) {
+      clearTimeout(climbTimeout.value);
+      climbTimeout.value = null;
+    }
+    isClimbing.value = false;
+    try {
+      checkSession();
+      await startUseItems({ tokenId, checkSession });
+      checkSession();
+      await autoMergeItems({ tokenId, checkSession });
+    } catch (error) {
+      message.warning(`后续操作未完成：${error.message || "未知错误"}`);
+    } finally {
+      isClimbSequence.value = false;
+    }
   }
-
-  // 清除超时并重置状态
-  if (climbTimeout.value) {
-    clearTimeout(climbTimeout.value);
-    climbTimeout.value = null;
-  }
-  isClimbing.value = false;
 };
 
 const getTowerInfo = async () => {
@@ -881,7 +993,7 @@ const getTowerInfo = async () => {
  * @param {string} tokenId - token id
  * @returns {Promise<number>} 实际补领的章节数
  */
-const claimPendingChapterRewards = async (tokenId) => {
+const claimPendingChapterRewards = async (tokenId, checkSession = () => {}) => {
   let pending = pendingChapterRewards.value;
   if (pending <= 0) {
     return 0;
@@ -889,8 +1001,11 @@ const claimPendingChapterRewards = async (tokenId) => {
 
   message.info(`检测到 ${pending} 个未领取的章节奖励，先行补领`);
   let claimed = 0;
-  while (pending > 0) {
+  // The Stop button can change stopFlag while a request is in flight.
+  // eslint-disable-next-line no-unmodified-loop-condition
+  while (pending > 0 && !stopFlag) {
     try {
+      checkSession();
       await tokenStore.sendMessageWithPromise(
         tokenId,
         "evotower_claimreward",
@@ -954,6 +1069,13 @@ onMounted(() => {
   if (tokenStore.selectedToken && wsStatus.value === "connected") {
     getTowerInfo();
   }
+});
+
+onUnmounted(() => {
+  componentDisposed = true;
+  stopFlag = true;
+  stopItemFlag = true;
+  stopMergeFlag = true;
 });
 </script>
 
@@ -1359,7 +1481,8 @@ onMounted(() => {
     }
   }
 
-  &.disabled {
+  &.disabled,
+  &:disabled {
     background: var(--bg-secondary);
     color: var(--text-tertiary);
     cursor: not-allowed;
@@ -1369,13 +1492,22 @@ onMounted(() => {
 // 响应式设计
 @media (max-width: 768px) {
   .card-header {
-    flex-direction: column;
+    flex-direction: row;
+    flex-wrap: wrap;
     gap: var(--spacing-sm);
-    text-align: center;
+    text-align: left;
   }
 
   .energy-display {
-    align-self: center;
+    align-self: flex-start;
+    margin-left: auto;
   }
+}
+
+.climb-hint {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
 }
 </style>
