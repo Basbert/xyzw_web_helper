@@ -1,4 +1,7 @@
-import { readDailyTaskSettings } from "@/utils/dailyTaskSettings";
+import {
+  DAILY_TASK_DEFAULTS,
+  readDailyTaskSettings,
+} from "@/utils/dailyTaskSettings";
 import {
   fillHangUpTime,
   getClaimablePointRewards,
@@ -183,16 +186,7 @@ export class DailyTaskRunner {
         this.tokenStore.gameTokens || [],
       );
       const defaultSettings = {
-        arenaFormation: 1,
-        bossFormation: 1,
-        bossTimes: 2,
-        claimBottle: true,
-        payRecruit: true,
-        openBox: true,
-        arenaEnable: true,
-        claimHangUp: true,
-        claimEmail: true,
-        blackMarketPurchase: true,
+        ...DAILY_TASK_DEFAULTS,
         freeGachaEnable: true,
       };
       return saved ? { ...defaultSettings, ...saved } : defaultSettings;
@@ -916,6 +910,7 @@ export class DailyTaskRunner {
 
     const summary = { completed: 0, skipped: 0, failed: 0, deferred: 0 };
     let supplementalIncomplete = 0;
+    let arenaSequenceIncomplete = false;
     const attemptedConditions = new Set();
     const attemptedClaims = new Set();
     const totalTasks = taskList.length;
@@ -949,13 +944,10 @@ export class DailyTaskRunner {
             attemptedClaims.add(task.claimCondition);
           this.log(`执行中: ${task.name}`);
           const result = await task.execute();
-          if (
-            result === false &&
-            this.activeCondition === undefined &&
-            !task.checkOnly
-          ) {
+          if (result === false && !task.checkOnly) {
             summary.deferred++;
-            supplementalIncomplete++;
+            if (this.activeCondition === undefined) supplementalIncomplete++;
+            if (task.condition === 13) arenaSequenceIncomplete = true;
           } else summary.completed++;
           this.log(
             `${task.name}: ${result === false && !task.checkOnly ? "待继续" : task.condition !== undefined || task.claimCondition !== undefined ? "已执行，等待集中核对服务器状态" : "已处理"}`,
@@ -966,6 +958,7 @@ export class DailyTaskRunner {
           if (error.interrupted) throw error;
           summary.failed++;
           if (this.activeCondition === undefined) supplementalIncomplete++;
+          if (task.condition === 13) arenaSequenceIncomplete = true;
           this.log(`任务执行失败: ${task.name} - ${error.message}`, "error");
           // Match the original runner: a business rejection fails this step only.
           if (
@@ -1031,6 +1024,20 @@ export class DailyTaskRunner {
         ).length,
       0,
     );
+    // The server's daily goal requires only one arena fight, so it cannot
+    // confirm that our three-fight sequence finished after a partial failure.
+    if (
+      arenaSequenceIncomplete &&
+      serverTasks.some(
+        (task) => task.condition === 13 && task.status !== "pending",
+      )
+    ) {
+      supplementalIncomplete++;
+      this.log(
+        "本轮未确认完成三场竞技场；每日任务已完成，请在游戏内核对剩余免费次数",
+        "warning",
+      );
+    }
     summary.incomplete =
       summary.remainingTasks +
       summary.unclaimedTasks +

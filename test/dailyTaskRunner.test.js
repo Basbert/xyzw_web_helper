@@ -226,6 +226,49 @@ test("arena task is rechecked just before fighting", async () => {
   );
 });
 
+test("a partially completed arena sequence is reported as incomplete", async () => {
+  const f = fixture({ 13: 0 });
+  const send = f.store.sendMessageWithPromise;
+  let targetsRequested = 0;
+  f.store.sendMessageWithPromise = async (...args) => {
+    if (args[1] === "arena_getareatarget" && ++targetsRequested === 2)
+      return { roleList: [] };
+    return send(...args);
+  };
+  const logs = [];
+  const result = await f
+    .runner()
+    .run(
+      "account-a",
+      { onLog: (entry) => logs.push(entry.message) },
+      { ...settings, arenaEnable: true },
+    );
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "fight_startareaarena").length,
+    1,
+  );
+  assert.equal(f.role.dailyTask.complete[13], -1);
+  assert.ok(result.incomplete > 0);
+  assert.ok(logs.some((message) => message.includes("未确认完成三场竞技场")));
+});
+
+test("an arena server error after the first fight is reported as incomplete", async () => {
+  const f = fixture({ 13: 0 });
+  const send = f.store.sendMessageWithPromise;
+  let fights = 0;
+  f.store.sendMessageWithPromise = async (...args) => {
+    if (args[1] === "fight_startareaarena" && ++fights === 2)
+      throw new Error("服务器错误: 400010 - 竞技场挑战失败");
+    return send(...args);
+  };
+  const result = await f
+    .runner()
+    .run("account-a", {}, { ...settings, arenaEnable: true });
+  assert.equal(result.failed, 1);
+  assert.equal(f.role.dailyTask.complete[13], -1);
+  assert.ok(result.incomplete > 0);
+});
+
 test("arena fights are skipped at 22:00", async () => {
   const f = fixture({ 13: 0 });
   const runner = f.runner();
@@ -532,6 +575,49 @@ test("legacy fragments are claimed once when enabled and skipped when disabled",
     disabled.calls.filter((call) => call.cmd === "legacy_claimhangup").length,
     0,
   );
+});
+
+test("batch settings default legacy claims on and preserve an explicit off switch", async () => {
+  const previousStorage = Object.getOwnPropertyDescriptor(
+    globalThis,
+    "localStorage",
+  );
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+  };
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: storage,
+  });
+  try {
+    const f = fixture();
+    assert.equal(f.runner().loadSettings("account-a").claimLegacy, true);
+
+    // Settings saved before the legacy toggle existed must use the default.
+    storage.setItem("daily-settings:account-a", JSON.stringify(settings));
+    await f.runner().run("account-a");
+    assert.equal(
+      f.calls.filter((call) => call.cmd === "legacy_claimhangup").length,
+      1,
+    );
+
+    storage.setItem(
+      "daily-settings:account-a",
+      JSON.stringify({ ...settings, claimLegacy: false }),
+    );
+    f.calls.length = 0;
+    await f.runner().run("account-a");
+    assert.equal(
+      f.calls.filter((call) => call.cmd === "legacy_claimhangup").length,
+      0,
+    );
+  } finally {
+    if (previousStorage)
+      Object.defineProperty(globalThis, "localStorage", previousStorage);
+    else delete globalThis.localStorage;
+  }
 });
 
 test("a legacy claim business error leaves other daily tasks running", async () => {

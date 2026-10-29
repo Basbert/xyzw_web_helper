@@ -507,7 +507,7 @@ const runDailyFix = async () => {
     const incomplete = result.incomplete;
     if (incomplete) {
       log(`=== 本轮结束，${incomplete} 个步骤待继续 ===`, "warning");
-      message.warning("仍有未完成步骤，再次补差将重新读取服务器任务状态");
+      message.warning("仍有未完成步骤，请查看日志并核对需要手动处理的项目");
     } else {
       log("=== 任务执行完成 ===", "success");
       message.success("每日任务补差执行完成");
