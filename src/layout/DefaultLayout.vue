@@ -5,82 +5,37 @@
       <div class="nav-container">
         <div class="nav-brand">
           <img src="/icons/xiaoyugan.png" alt="XYZW" class="brand-logo" />
-          <div class="brand-toggle" @click="isMobileMenuOpen = true">
+          <button
+            type="button"
+            class="brand-toggle"
+            aria-label="打开导航菜单"
+            @click="isMobileMenuOpen = true"
+          >
             <n-icon>
               <Menu />
             </n-icon>
             <span class="brand-text">XYZW 控制台</span>
-          </div>
+          </button>
         </div>
 
         <div class="nav-menu">
           <router-link
-            to="/admin/dashboard"
+            v-for="item in primaryNavigation"
+            :key="item.to"
+            :to="item.to"
             class="nav-item"
             active-class="active"
           >
-            <n-icon>
-              <Home />
-            </n-icon>
-            <span>首页</span>
+            <n-icon><component :is="item.icon" /></n-icon>
+            <span>{{ item.label }}</span>
           </router-link>
-          <router-link
-            to="/admin/game-features"
-            class="nav-item"
-            active-class="active"
+          <n-dropdown
+            trigger="click"
+            :options="getSecondaryNavigation().map((item) => ({ label: item.label, key: item.to }))"
+            @select="router.push"
           >
-            <n-icon>
-              <Cube />
-            </n-icon>
-            <span>游戏功能</span>
-          </router-link>
-          <router-link to="/tokens" class="nav-item" active-class="active">
-            <n-icon>
-              <PersonCircle />
-            </n-icon>
-            <span>Token管理</span>
-          </router-link>
-          <router-link
-            to="/admin/batch-daily-tasks"
-            class="nav-item"
-            active-class="active"
-          >
-            <n-icon>
-              <Layers />
-            </n-icon>
-            <span>批量日常</span>
-          </router-link>
-          <router-link
-            to="/admin/PushingLevels"
-            class="nav-item"
-            active-class="active"
-          >
-            <n-icon>
-              <ArrowUpCircle />
-            </n-icon>
-            <span>主线推关</span>
-          </router-link>
-          <router-link
-            to="/admin/message-test"
-            class="nav-item"
-            active-class="active"
-          >
-            <n-icon>
-              <ChatbubbleEllipsesSharp />
-            </n-icon>
-            <span>消息测试</span>
-          </router-link>
-          <router-link
-            to="/admin/legion-war"
-            class="nav-item"
-            active-class="active"
-            v-if="isNowInLegionWarTime()"
-          >
-            <n-icon>
-              <LockOpen />
-            </n-icon>
-            <span>实时盐场</span>
-          </router-link>
+            <button type="button" class="nav-item nav-more">更多功能</button>
+          </n-dropdown>
         </div>
 
         <div class="nav-user">
@@ -119,95 +74,14 @@
     >
       <div class="drawer-menu">
         <router-link
-          to="/admin/dashboard"
+          v-for="item in [...primaryNavigation, ...getSecondaryNavigation()]"
+          :key="item.to"
+          :to="item.to"
           class="drawer-item"
           @click="isMobileMenuOpen = false"
         >
-          <n-icon>
-            <Home />
-          </n-icon>
-          <span>首页</span>
-        </router-link>
-        <router-link
-          to="/admin/game-features"
-          class="drawer-item"
-          @click="isMobileMenuOpen = false"
-        >
-          <n-icon>
-            <Cube />
-          </n-icon>
-          <span>游戏功能</span>
-        </router-link>
-        <router-link
-          to="/tokens"
-          class="drawer-item"
-          @click="isMobileMenuOpen = false"
-        >
-          <n-icon>
-            <PersonCircle />
-          </n-icon>
-          <span>Token管理</span>
-        </router-link>
-        <router-link
-          to="/admin/daily-tasks"
-          class="drawer-item"
-          @click="isMobileMenuOpen = false"
-        >
-          <n-icon>
-            <Settings />
-          </n-icon>
-          <span>任务管理</span>
-        </router-link>
-        <router-link
-          to="/admin/batch-daily-tasks"
-          class="drawer-item"
-          @click="isMobileMenuOpen = false"
-        >
-          <n-icon>
-            <Layers />
-          </n-icon>
-          <span>批量日常</span>
-        </router-link>
-        <router-link
-          to="/admin/PushingLevels"
-          class="drawer-item"
-          @click="isMobileMenuOpen = false"
-        >
-          <n-icon>
-            <ArrowUpCircle />
-          </n-icon>
-          <span>主线推关</span>
-        </router-link>
-        <router-link
-          to="/admin/message-test"
-          class="drawer-item"
-          @click="isMobileMenuOpen = false"
-        >
-          <n-icon>
-            <ChatbubbleEllipsesSharp />
-          </n-icon>
-          <span>消息测试</span>
-        </router-link>
-        <router-link
-          to="/admin/legion-war"
-          class="nav-item"
-          active-class="active"
-          v-if="isNowInLegionWarTime()"
-        >
-          <n-icon>
-            <LockOpen />
-          </n-icon>
-          <span>实时盐场</span>
-        </router-link>
-        <router-link
-          to="/admin/profile"
-          class="drawer-item"
-          @click="isMobileMenuOpen = false"
-        >
-          <n-icon>
-            <Settings />
-          </n-icon>
-          <span>个人设置</span>
+          <n-icon><component :is="item.icon" /></n-icon>
+          <span>{{ item.label }}</span>
         </router-link>
       </div>
     </n-drawer>
@@ -244,6 +118,21 @@ const message = useMessage();
 const dialog = useDialog();
 
 const isMobileMenuOpen = ref(false);
+
+const primaryNavigation = [
+  { to: "/admin/dashboard", label: "首页", icon: Home },
+  { to: "/admin/game-features", label: "游戏功能", icon: Cube },
+  { to: "/admin/batch-daily-tasks", label: "批量日常", icon: Layers },
+  { to: "/tokens", label: "账号管理", icon: PersonCircle },
+  { to: "/admin/PushingLevels", label: "主线推关", icon: ArrowUpCircle },
+];
+const secondaryNavigation = [
+  { to: "/admin/message-test", label: "消息测试", icon: ChatbubbleEllipsesSharp },
+  { to: "/admin/legion-war", label: "实时盐场", icon: LockOpen, warOnly: true },
+  { to: "/admin/profile", label: "个人设置", icon: Settings },
+];
+const getSecondaryNavigation = () =>
+  secondaryNavigation.filter((item) => !item.warOnly || isNowInLegionWarTime());
 
 const userMenuOptions = [
   {
@@ -315,6 +204,11 @@ const handleUserAction = (key) => {
   display: none;
   align-items: center;
   gap: var(--spacing-xs);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: inherit;
   cursor: pointer;
   font-size: var(--font-size-lg);
 }
@@ -350,6 +244,25 @@ const handleUserAction = (key) => {
   }
 }
 
+.nav-more {
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
+:global(html[data-theme="dark"] .dashboard-nav .nav-item.active),
+:global(html[data-theme="dark"] .drawer-menu .drawer-item.router-link-active) {
+  background: #3c466b;
+  color: #ffffff;
+}
+
+.brand-toggle:focus-visible,
+.nav-more:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 3px;
+}
+
 .nav-user {
   margin-left: auto;
   display: flex;
@@ -382,7 +295,7 @@ const handleUserAction = (key) => {
   white-space: nowrap;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 1100px) {
   .nav-user {
     gap: 4px;
   }

@@ -33,44 +33,38 @@
           }}</span>
         </div>
 
-        <section class="today-grid" aria-label="今日常用操作">
-          <article class="today-panel daily-panel">
-            <div class="panel-heading">
+        <section class="today-panel" aria-label="今日常用操作">
+          <div class="today-heading">
+            <div>
+              <h2>日常操作</h2>
+              <p>在日常页分别处理每日任务与盐罐挂机</p>
+            </div>
+          </div>
+          <div class="today-items">
+            <div class="today-item">
               <img src="/icons/174023274867420.png" alt="" />
-              <div>
-                <h2>每日任务</h2>
-                <p>使用当前角色保存的任务设置</p>
+              <div class="today-item-name">
+                <strong>每日任务</strong>
+                <span>按当前角色的设置执行</span>
+              </div>
+              <div class="today-item-status">
+                <span>当前进度</span><strong>{{ dailyProgress }}</strong>
               </div>
             </div>
-            <div class="daily-progress">
-              <span>当前进度</span><strong>{{ dailyProgress }}</strong>
-            </div>
-            <n-button
-              type="primary"
-              size="large"
-              @click="router.push('/admin/game-features')"
-              >打开每日任务</n-button
-            >
-          </article>
-          <article class="today-panel maintenance-summary">
-            <div class="panel-heading">
+            <div class="today-item">
               <img src="/icons/173746572831736.png" alt="" />
-              <div>
-                <h2>盐罐与挂机</h2>
-                <p>领奖励、补挂机时间和处理盐罐</p>
+              <div class="today-item-name">
+                <strong>盐罐与挂机</strong>
+                <span>处理盐罐、领奖励并补充挂机时间</span>
               </div>
             </div>
-            <p class="panel-note">
-              {{
-                isConnected
-                  ? "可在日常页查看两项状态。"
-                  : "连接后可查看两项状态。"
-              }}
-            </p>
-            <n-button size="large" @click="router.push('/admin/game-features')"
-              >前往处理</n-button
-            >
-          </article>
+          </div>
+          <n-button
+            type="primary"
+            size="large"
+            @click="router.push('/admin/game-features')"
+            >进入日常页</n-button
+          >
         </section>
 
         <section class="other-actions" aria-label="其他功能">
@@ -408,12 +402,6 @@ onMounted(async () => {
   }
 }
 
-.today-grid {
-  display: grid;
-  grid-template-columns: 1.15fr 1fr;
-  gap: 16px;
-}
-
 .today-panel {
   display: flex;
   flex-direction: column;
@@ -423,6 +411,7 @@ onMounted(async () => {
   padding: 24px;
   background: var(--bg-primary);
   border: 1px solid var(--border-light);
+  border-top: 3px solid var(--primary-color);
   border-radius: 14px;
 
   :deep(.n-button) {
@@ -431,20 +420,7 @@ onMounted(async () => {
   }
 }
 
-.daily-panel {
-  border-top: 3px solid var(--primary-color);
-}
-
-.panel-heading {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-
-  img {
-    width: 40px;
-    height: 40px;
-    object-fit: contain;
-  }
+.today-heading {
   h2 {
     margin: 0 0 4px;
     font-size: 18px;
@@ -456,28 +432,60 @@ onMounted(async () => {
   }
 }
 
-.daily-progress {
-  display: flex;
+.today-items {
   width: 100%;
-  justify-content: space-between;
-  align-items: baseline;
-  padding: 14px 0;
   border-top: 1px solid var(--border-light);
   border-bottom: 1px solid var(--border-light);
+}
+
+.today-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 0;
+
+  & + & {
+    border-top: 1px solid var(--border-light);
+  }
+
+  img {
+    width: 36px;
+    height: 36px;
+    object-fit: contain;
+    flex-shrink: 0;
+  }
+}
+
+.today-item-name {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+
+  strong {
+    font-size: 15px;
+  }
+  span {
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+}
+
+.today-item-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: 13px;
+  white-space: nowrap;
 
   strong {
     color: var(--text-primary);
     font-size: 18px;
     font-variant-numeric: tabular-nums;
   }
-}
-
-.panel-note {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: 14px;
 }
 
 .other-actions {
@@ -526,6 +534,17 @@ onMounted(async () => {
   }
 }
 
+:global(html[data-theme="dark"] .dashboard-page .account-link),
+:global(html[data-theme="dark"] .dashboard-page .advanced-links button) {
+  color: #bdc8ff;
+}
+
+:global(html[data-theme="dark"] .dashboard-page .today-panel .n-button--primary-type) {
+  --n-color: #167a4c !important;
+  --n-color-hover: #20935b !important;
+  --n-color-pressed: #10653e !important;
+}
+
 button:focus-visible,
 summary:focus-visible {
   outline: 2px solid var(--primary-color);
@@ -542,7 +561,6 @@ summary:focus-visible {
   .dashboard-heading h1 {
     font-size: 24px;
   }
-  .today-grid,
   .other-action-list {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -555,6 +573,20 @@ summary:focus-visible {
   }
   .other-action-list button {
     padding: 14px 16px;
+  }
+}
+
+@media (max-width: 430px) {
+  .today-item {
+    flex-wrap: wrap;
+  }
+  .today-item-name {
+    flex-basis: calc(100% - 48px);
+  }
+  .today-item-status {
+    flex-basis: calc(100% - 48px);
+    justify-content: space-between;
+    margin-left: 48px;
   }
 }
 </style>

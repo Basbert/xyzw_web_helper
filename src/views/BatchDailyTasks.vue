@@ -4,96 +4,12 @@
       <!-- Left Column -->
       <div class="left-column">
         <!-- Header -->
-        <div
-          class="page-header"
-          style="
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 12px;
-          "
-        >
-          <div
-            class="page-header-primary"
-            style="display: flex; align-items: center; gap: 16px"
-          >
+        <div class="page-header">
+          <div class="page-header-primary">
             <h2>批量日常任务</h2>
-            <div
-              class="schedule-summary"
-              style="
-                display: flex;
-                align-items: center;
-                gap: 12px;
-                padding: 8px 12px;
-                background-color: #f8f9fa;
-                border-radius: 8px;
-                border: 1px solid #e9ecef;
-              "
-            >
-              <div style="font-size: 14px; color: #495057">
-                共 {{ scheduledTasks.length }} 个定时任务
-              </div>
-              <div
-                v-if="shortestCountdownTask"
-                style="font-size: 14px; font-weight: 500; color: #1677ff"
-              >
-                即将执行：{{ shortestCountdownTask.task.name }} ({{
-                  shortestCountdownTask.countdown.formatted
-                }})
-              </div>
-              <div v-else style="font-size: 14px; color: #6c757d">
-                暂无定时任务
-              </div>
-              <div class="schedule-actions" style="display: flex; gap: 8px">
-                <n-button type="primary" size="small" @click="openTaskModal">
-                  新增定时任务
-                </n-button>
-                <n-button size="small" @click="showTasksModal = true">
-                  查看定时任务
-                </n-button>
-                <n-dropdown
-                  trigger="click"
-                  :options="exportOptions"
-                  @select="exportConfig"
-                >
-                  <n-button size="small">导出配置</n-button>
-                </n-dropdown>
-                <n-upload
-                  :show-file-list="false"
-                  accept=".json"
-                  :custom-request="importConfig"
-                >
-                  <n-button size="small">导入配置</n-button>
-                </n-upload>
-              </div>
-              <div
-                class="setting-item"
-                style="
-                  flex-direction: row;
-                  justify-content: space-between;
-                  align-items: center;
-                "
-              >
-                <label class="setting-label">黑市采购清单配置</label>
-                <n-button size="small" @click="openBlackMarketPurchaseModal">
-                  点击配置
-                </n-button>
-              </div>
-            </div>
+            <p>已选 {{ selectedTokens.length }} 个账号，执行时使用各账号的每日设置</p>
           </div>
-          <div
-            class="batch-actions"
-            style="
-              display: flex;
-              align-items: center;
-              gap: 12px;
-              padding: 8px 12px;
-              background-color: #f8f9fa;
-              border-radius: 8px;
-              border: 1px solid #e9ecef;
-            "
-          >
+          <div class="batch-actions">
             <n-button
               type="primary"
               @click="startBatch"
@@ -125,7 +41,49 @@
               </template>
               设置
             </n-button>
+            <n-button size="medium" @click="showBatchLogs = !showBatchLogs">
+              {{ showBatchLogs ? "收起日志" : "查看日志" }}
+            </n-button>
           </div>
+          <div class="schedule-summary">
+            <div class="schedule-copy">
+              <strong>定时任务 · {{ scheduledTasks.length }} 个</strong>
+              <span v-if="shortestCountdownTask">
+                即将执行：{{ shortestCountdownTask.task.name }}（{{
+                  shortestCountdownTask.countdown.formatted
+                }}）
+              </span>
+              <span v-else>暂无即将执行的任务</span>
+            </div>
+            <div class="schedule-actions">
+              <n-button size="small" @click="openTaskModal">新增定时任务</n-button>
+              <n-button size="small" @click="showTasksModal = true">
+                查看定时任务
+              </n-button>
+            </div>
+          </div>
+          <details class="batch-more">
+            <summary>更多配置</summary>
+            <div class="batch-more-actions">
+              <n-dropdown
+                trigger="click"
+                :options="exportOptions"
+                @select="exportConfig"
+              >
+                <n-button size="small">导出配置</n-button>
+              </n-dropdown>
+              <n-upload
+                :show-file-list="false"
+                accept=".json"
+                :custom-request="importConfig"
+              >
+                <n-button size="small">导入配置</n-button>
+              </n-upload>
+              <n-button size="small" @click="openBlackMarketPurchaseModal">
+                黑市采购清单
+              </n-button>
+            </div>
+          </details>
         </div>
 
         <!-- Token Selection -->
@@ -726,7 +684,7 @@
       </div>
 
       <!-- Right Column - Execution Log -->
-      <div class="right-column">
+      <div v-if="showBatchLogs" class="right-column">
         <n-card class="log-card">
           <template #header>
             <div class="custom-card-header">
@@ -3338,6 +3296,10 @@ const executionTokens = computed(
   () => activeScheduledRun.value?.accounts ?? selectedTokens.value,
 );
 const uiBusy = computed(() => isRunning.value || scheduledQueueSize.value > 0);
+const showBatchLogs = ref(false);
+watch(uiBusy, (running) => {
+  if (running) showBatchLogs.value = true;
+});
 
 // =====================
 // Token分组管理状态
@@ -6651,6 +6613,8 @@ const stopBatch = () => {
   height: 100vh;
   box-sizing: border-box;
   overflow: hidden;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
 }
 
 .main-layout {
@@ -6677,22 +6641,82 @@ const stopBatch = () => {
 
 .page-header {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
   margin-bottom: 20px;
 }
 
-.page-header-primary,
+.page-header-primary h2 {
+  margin: 0 0 4px;
+}
+
+.page-header-primary p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
 .schedule-summary,
 .schedule-actions,
 .batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
   flex-wrap: wrap;
 }
 
 .schedule-summary {
+  justify-content: space-between;
   max-width: 100%;
   box-sizing: border-box;
+  padding: 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-radius: 8px;
+}
+
+.schedule-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.schedule-copy span {
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.batch-more summary {
+  width: fit-content;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.batch-more-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.batch-more summary:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 3px;
+}
+
+:global(html[data-theme="dark"] .batch-daily-tasks .batch-more summary) {
+  color: #bdc8ff;
+}
+
+:global(html[data-theme="dark"] .batch-daily-tasks .n-button--default-type.n-button--disabled) {
+  opacity: 0.7 !important;
 }
 
 .token-item {
@@ -6791,7 +6815,7 @@ const stopBatch = () => {
 .log-container {
   flex: 1;
   overflow-y: auto;
-  background: #f5f5f5;
+  background: var(--bg-tertiary);
   padding: 10px;
   border-radius: 4px;
   margin-top: 10px;
@@ -6817,7 +6841,7 @@ const stopBatch = () => {
 }
 
 .log-item.info {
-  color: #333;
+  color: var(--text-primary);
 }
 
 .time {
@@ -6925,9 +6949,8 @@ const stopBatch = () => {
 @media (max-width: 768px) {
   .batch-daily-tasks {
     padding: 12px;
-    height: 100vh;
-    overflow-y: auto;
-    overflow-x: hidden;
+    height: auto;
+    overflow: visible;
   }
 
   .main-layout {
@@ -6985,6 +7008,10 @@ const stopBatch = () => {
     flex-direction: column;
     align-items: flex-start;
     gap: 4px;
+  }
+
+  .token-list-card :deep(.n-grid) {
+    grid-template-columns: minmax(0, 1fr) !important;
   }
 
   /* 批量功法残卷赠送样式 */

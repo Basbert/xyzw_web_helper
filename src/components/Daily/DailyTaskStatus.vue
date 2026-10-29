@@ -84,6 +84,14 @@
         <span v-else-if="!isConnected">连接后执行每日任务</span>
         <span v-else>执行每日任务</span>
       </button>
+      <button
+        v-if="runSummary && !busy && runSummary.tokenId === tokenStore.selectedToken?.id"
+        type="button"
+        class="result-link"
+        @click="showLog = true"
+      >
+        查看上次执行结果
+      </button>
     </div>
 
     <!-- 任务设置模态框 -->
@@ -103,8 +111,12 @@
       </template>
 
       <div class="settings-content">
-        <div class="settings-grid">
-          <!-- 竞技场设置 -->
+        <p class="settings-note">更改后自动保存到当前角色</p>
+        <section class="settings-group" aria-label="常用设置">
+          <div class="settings-group-heading">
+            <h3>常用设置</h3>
+            <p>选择阵容和需要执行的日常项目</p>
+          </div>
           <div class="setting-item">
             <label class="setting-label">竞技场阵容</label>
             <n-select
@@ -114,7 +126,6 @@
             />
           </div>
 
-          <!-- BOSS设置 -->
           <div class="setting-item">
             <label class="setting-label">BOSS阵容</label>
             <n-select
@@ -124,7 +135,6 @@
             />
           </div>
 
-          <!-- BOSS次数 -->
           <div class="setting-item">
             <label class="setting-label">BOSS次数</label>
             <n-select
@@ -134,71 +144,82 @@
             />
           </div>
 
-          <!-- 延迟设置 -->
-          <div class="setting-item">
-            <label class="setting-label">命令延迟 (毫秒)</label>
-            <n-input-number
-              v-model:value="settings.commandDelay"
-              :min="0"
-              :max="5000"
-              :step="100"
-              size="small"
-            />
-          </div>
-
-          <div class="setting-item">
-            <label class="setting-label">任务延迟 (毫秒)</label>
-            <n-input-number
-              v-model:value="settings.taskDelay"
-              :min="0"
-              :max="5000"
-              :step="100"
-              size="small"
-            />
-          </div>
-
-          <!-- 功能开关 -->
           <div class="setting-switches">
             <div class="switch-row">
               <span class="switch-label">领罐子</span>
-              <n-switch v-model:value="settings.claimBottle" />
+              <n-switch v-model:value="settings.claimBottle" aria-label="领罐子" />
             </div>
 
             <div class="switch-row">
               <span class="switch-label">领挂机</span>
-              <n-switch v-model:value="settings.claimHangUp" />
+              <n-switch v-model:value="settings.claimHangUp" aria-label="领挂机" />
             </div>
 
             <div class="switch-row">
               <span class="switch-label">领取功法残卷</span>
-              <n-switch v-model:value="settings.claimLegacy" />
+              <n-switch v-model:value="settings.claimLegacy" aria-label="领取功法残卷" />
             </div>
 
             <div class="switch-row">
               <span class="switch-label">竞技场</span>
-              <n-switch v-model:value="settings.arenaEnable" />
-            </div>
-
-            <div class="switch-row">
-              <span class="switch-label">开宝箱</span>
-              <n-switch v-model:value="settings.openBox" />
+              <n-switch v-model:value="settings.arenaEnable" aria-label="竞技场" />
             </div>
 
             <div class="switch-row">
               <span class="switch-label">领取邮件奖励</span>
-              <n-switch v-model:value="settings.claimEmail" />
+              <n-switch v-model:value="settings.claimEmail" aria-label="领取邮件奖励" />
+            </div>
+          </div>
+        </section>
+
+        <section class="settings-group" aria-label="资源消耗">
+          <div class="settings-group-heading">
+            <h3>资源消耗</h3>
+            <p>按需选择可能消耗游戏资源的操作</p>
+          </div>
+          <div class="setting-switches">
+            <div class="switch-row">
+              <span class="switch-label">开宝箱</span>
+              <n-switch v-model:value="settings.openBox" aria-label="开宝箱" />
             </div>
             <div class="switch-row">
               <span class="switch-label">黑市购买物品</span>
-              <n-switch v-model:value="settings.blackMarketPurchase" />
+              <n-switch v-model:value="settings.blackMarketPurchase" aria-label="黑市购买物品" />
             </div>
 
             <div class="switch-row">
               <span class="switch-label">付费招募</span>
-              <n-switch v-model:value="settings.payRecruit" />
+              <n-switch v-model:value="settings.payRecruit" aria-label="付费招募" />
             </div>
           </div>
-        </div>
+        </section>
+
+        <details class="settings-group advanced-settings">
+          <summary>高级设置 · 运行延迟</summary>
+          <p>通常无需调整；单位为毫秒</p>
+          <div class="settings-grid">
+            <div class="setting-item">
+              <label class="setting-label">命令延迟 (毫秒)</label>
+              <n-input-number
+                v-model:value="settings.commandDelay"
+                :min="0"
+                :max="5000"
+                :step="100"
+                size="small"
+              />
+            </div>
+            <div class="setting-item">
+              <label class="setting-label">任务延迟 (毫秒)</label>
+              <n-input-number
+                v-model:value="settings.taskDelay"
+                :min="0"
+                :max="5000"
+                :step="100"
+                size="small"
+              />
+            </div>
+          </div>
+        </details>
       </div>
     </n-modal>
 
@@ -256,7 +277,7 @@
     <n-modal
       v-model:show="showLog"
       preset="card"
-      title="任务执行日志"
+      title="每日任务执行情况"
       style="width: 90%; max-width: 500px"
     >
       <template #header>
@@ -264,29 +285,37 @@
           <n-icon>
             <DocumentText />
           </n-icon>
-          <span>任务执行日志</span>
+          <span>每日任务执行情况</span>
         </div>
       </template>
 
-      <div ref="logContainer" class="log-container">
-        <div
-          v-for="logItem in logList"
-          :key="logItem.time + logItem.message"
-          class="log-item"
-        >
-          <span class="log-time">{{ logItem.time }}</span>
-          <span
-            class="log-message"
-            :class="{
-              error: logItem.type === 'error',
-              success: logItem.type === 'success',
-              warning: logItem.type === 'warning',
-            }"
-          >
-            {{ logItem.message }}
-          </span>
-        </div>
+      <div v-if="runSummary" class="run-summary" aria-live="polite">
+        <strong>{{ runSummary.title }}</strong>
+        <p>{{ runSummary.account }}</p>
+        <p v-if="runSummary.detail">{{ runSummary.detail }}</p>
       </div>
+      <details class="run-log-details" :open="busy">
+        <summary>查看执行日志</summary>
+        <div ref="logContainer" class="log-container">
+          <div
+            v-for="logItem in logList"
+            :key="logItem.time + logItem.message"
+            class="log-item"
+          >
+            <span class="log-time">{{ logItem.time }}</span>
+            <span
+              class="log-message"
+              :class="{
+                error: logItem.type === 'error',
+                success: logItem.type === 'success',
+                warning: logItem.type === 'warning',
+              }"
+            >
+              {{ logItem.message }}
+            </span>
+          </div>
+        </div>
+      </details>
     </n-modal>
   </div>
 </template>
@@ -326,6 +355,7 @@ const showTaskDetails = ref(false);
 const showLog = ref(false);
 const busy = ref(false);
 const logContainer = ref(null);
+const runSummary = ref(null);
 
 // 任务设置
 const settings = useDailyTaskSettings(tokenStore, (error) => {
@@ -495,6 +525,15 @@ const runDailyFix = async () => {
   busy.value = true;
   showLog.value = true;
   logList.value = [];
+  const runToken = tokenStore.selectedToken;
+  const accountName = runToken.name || "当前角色";
+  const account = `执行账号：${accountName}`;
+  runSummary.value = {
+    title: "正在执行",
+    account,
+    tokenId: runToken.id,
+    detail: "请保持游戏连接",
+  };
 
   try {
     log("=== 开始执行一键补差任务 ===");
@@ -506,7 +545,7 @@ const runDailyFix = async () => {
     });
 
     const result = await runner.run(
-      tokenStore.selectedToken.id,
+      runToken.id,
       {
         onLog: (logItem) => log(logItem.message, logItem.type),
         onProgress: (progress) => {
@@ -517,17 +556,34 @@ const runDailyFix = async () => {
     ); // 执行器会固定本次任务的设置
 
     const incomplete = result.incomplete;
-    if (incomplete) {
-      log(`=== 本轮结束，${incomplete} 个步骤待继续 ===`, "warning");
-      message.warning("仍有未完成步骤，请查看日志并核对需要手动处理的项目");
+    const details = [];
+    if (incomplete) details.push(`${incomplete} 项待处理或核对`);
+    if (result.failed) details.push(`${result.failed} 个步骤执行失败`);
+    if (result.skipped) details.push(`${result.skipped} 个步骤已跳过`);
+    runSummary.value = {
+      title:
+        incomplete || result.failed ? "本轮结束，请核对结果" : "本轮执行完成",
+      account,
+      tokenId: runToken.id,
+      detail: details.join(" · ") || "服务器任务状态已核对",
+    };
+    if (incomplete || result.failed) {
+      log("=== 本轮结束，请查看日志并核对结果 ===", "warning");
+      message.warning(`${accountName}有项目需要核对，请查看执行结果和日志`);
     } else {
       log("=== 任务执行完成 ===", "success");
-      message.success("每日任务补差执行完成");
+      message.success(`${accountName}的每日任务执行完成`);
     }
   } catch (error) {
+    runSummary.value = {
+      title: "本轮执行中断",
+      account,
+      tokenId: runToken.id,
+      detail: "请查看日志，并核对尚未确认的操作",
+    };
     log(`任务执行失败: ${error.message}`, "error");
     console.error("详细错误信息:", error);
-    message.error(`任务执行失败: ${error.message}`);
+    message.error(`${accountName}的任务执行失败: ${error.message}`);
   } finally {
     busy.value = false;
   }
@@ -660,6 +716,22 @@ onBeforeUnmount(() => {
   padding-top: var(--spacing-sm);
 }
 
+.result-link {
+  display: block;
+  margin: var(--spacing-sm) auto 0;
+  padding: 4px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+}
+
+.result-link:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+}
+
 .status-icon {
   width: 32px;
   height: 32px;
@@ -733,12 +805,12 @@ onBeforeUnmount(() => {
   }
 }
 
-:global(html[data-theme="dark"]) .action-button:disabled {
+:global(html[data-theme="dark"] .daily-task .action-button:disabled) {
   background: #374151;
   color: #cbd5e1;
 }
 
-:global(html[data-theme="dark"]) .action-button:disabled span {
+:global(html[data-theme="dark"] .daily-task .action-button:disabled span) {
   color: #cbd5e1 !important;
 }
 
@@ -800,13 +872,78 @@ onBeforeUnmount(() => {
 }
 
 .settings-content {
-  padding: var(--spacing-sm) 0;
-}
-
-.settings-grid {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-lg);
+  padding: var(--spacing-sm) 0;
+  max-height: 68vh;
+  overflow-y: auto;
+}
+
+.settings-grid,
+.settings-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+.settings-note,
+.settings-group-heading p,
+.advanced-settings p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.settings-group-heading h3 {
+  margin: 0 0 var(--spacing-xs);
+  font-size: var(--font-size-md);
+  color: var(--text-primary);
+}
+
+.settings-group + .settings-group {
+  padding-top: var(--spacing-md);
+  border-top: 1px solid var(--border-light);
+}
+
+.advanced-settings summary,
+.run-log-details summary {
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.advanced-settings[open] summary {
+  margin-bottom: var(--spacing-sm);
+}
+
+:global(html[data-theme="dark"] .advanced-settings summary),
+:global(html[data-theme="dark"] .run-log-details summary),
+:global(html[data-theme="dark"] .daily-task .result-link) {
+  color: #bdc8ff;
+}
+
+.advanced-settings .settings-grid {
+  margin-top: var(--spacing-md);
+}
+
+.run-summary {
+  padding: var(--spacing-md);
+  border: 1px solid var(--border-light);
+  border-radius: var(--border-radius-medium);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.run-summary p {
+  margin: var(--spacing-xs) 0 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+}
+
+.run-log-details {
+  margin-top: var(--spacing-md);
 }
 
 .setting-item {
