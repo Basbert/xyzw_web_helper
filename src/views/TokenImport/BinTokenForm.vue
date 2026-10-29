@@ -228,7 +228,6 @@ const addSelectedRole = async (roleInfo: any) => {
 
 const uploadBin = (binFile: File) => {
   tQueue.add(async () => {
-    console.log("上传文件数据:", binFile);
     const reader = new FileReader();
     reader.onload = async (e) => {
       const userToken = e.target?.result as ArrayBuffer;
@@ -246,7 +245,6 @@ const uploadBin = (binFile: File) => {
         } else {
           serverListData.value = [];
         }
-        console.log("Server List:", parsedList);
         message.success("获取服务器角色列表成功，请选择角色添加");
       } catch (err) {
         console.error("Failed to get server list", err);
@@ -263,7 +261,6 @@ const uploadBin = (binFile: File) => {
           binData = { ...(binMsg as any)._raw };
         }
 
-        console.log("Bin文件解析:", binData);
         binDecodedResult.value = JSON.stringify(binData, null, 2);
         originalBinData.value = binData;
       } catch (err: any) {
@@ -288,7 +285,6 @@ const handleImport = async () => {
     // tokenStore.gameTokens中发现已存在的重复名称，则移出token后重新添加
     const gameToken = tokenStore.gameTokens.find((t) => t.id === role.id);
     if (gameToken) {
-      console.log("移除同名token:", gameToken);
       // tokenStore.removeToken(gameToken.id);
       tokenStore.updateToken(gameToken.id, {
         ...role,
@@ -299,7 +295,6 @@ const handleImport = async () => {
       });
     }
   });
-  console.log("当前Token列表:", tokenStore.gameTokens);
   message.success("Token添加成功");
   roleList.value = [];
   $emit("ok");

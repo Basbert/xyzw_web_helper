@@ -187,6 +187,13 @@ autoRoutes.handleHotUpdate?.(router);
 router.beforeEach((to, from, next) => {
   const tokenStore = useTokenStore();
 
+  // The legacy task-management screen contains only mock data. Keep old links
+  // working by opening the real daily-task screen instead.
+  if (to.name === "DailyTasks" || to.name === "/DailyTasks") {
+    next({ name: "GameFeatures" });
+    return;
+  }
+
   // 设置页面标题
   document.title = to.meta.title
     ? `${to.meta.title} - XYZW 游戏管理系统`

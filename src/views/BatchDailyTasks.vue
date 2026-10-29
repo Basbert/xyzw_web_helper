@@ -6076,7 +6076,7 @@ const ensureConnection = async (
       5000,
     );
     if (res?.battleData?.version) {
-      tokenStore.setBattleVersion(res.battleData.version);
+      tokenStore.setBattleVersion(res.battleData.version, tokenId);
     }
   } catch (e) {
     addLog({

@@ -136,7 +136,7 @@ export function createConnectionManager({ tokenStore, batchSettings, addLog }) {
         5000,
       );
       if (res?.battleData?.version) {
-        tokenStore.setBattleVersion(res.battleData.version);
+        tokenStore.setBattleVersion(res.battleData.version, tokenId);
       }
     } catch (e) {
       addLog({

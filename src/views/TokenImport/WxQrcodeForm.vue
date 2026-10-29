@@ -185,7 +185,6 @@ const qrcodeUUID = ref<string | null>(null);
 const isProcessing = ref(false);
 const statusMessage = ref("点击获取微信登录二维码");
 const statusType = ref("info");
-const accountName = ref<string | null>(null);
 const isScanning = ref(false);
 const scanInterval = ref<any>(null);
 const timeout = 120000; // 120秒超时
@@ -520,15 +519,9 @@ const getEncryptedData = async (code) => {
   };
 
   const rawJson = JSON.stringify(payload);
-  console.log("原始登录 JSON:", rawJson);
 
   // 调用encodePayload加密
   const encoded = encodePayload(rawJson);
-
-  try {
-    console.log("加密后的登录 JSON:", encoded);
-    console.log("解密:", decodePayload(encoded));
-  } catch (err) {}
 
   const loginUrl =
     `/api/hortor/comb-login-server/api/v1/login` +
@@ -599,28 +592,9 @@ const encodePayload = (text) => {
   const shuffleTimes = 6;
   const step = 3;
 
-  console.log("原始文本长度:", text.length);
   const mid = codeBase64(text, cipherTable, shuffleTimes, step, xorShift);
-  console.log("codeBase64:", `${mid?.substring(0, 100)}...`);
   const final = encodeBase64(mid);
-  console.log("编码结果长度:", final?.length);
   return final;
-};
-
-const decodePayload = (cipherText) => {
-  const xorShift = 1;
-  const shuffleTimes = 6;
-  const step = 3;
-
-  const cipherTable = encodePayload
-    .toString()
-    .match(/const cipherTable = "([^"]+)"/)[1];
-
-  const mid = atob(cipherText);
-  const shuffled = transCode(cipherTable, shuffleTimes);
-  const key = getCodeKey(shuffled, step);
-  const base64Text = dealWithString(mid, key, xorShift);
-  return decodeURIComponent(escape(atob(base64Text)));
 };
 
 const codeBase64 = (text, cipherTable, shuffleTimes, step, xorShift) => {
@@ -687,10 +661,6 @@ const dealWithString = (src, key, shift) => {
  * 保存账号
  */
 const saveAccount = async (arrBuf: ArrayBuffer) => {
-  const name = accountName.value?.trim();
-
-  console.log("name:", name);
-
   const bin = new Uint8Array(arrBuf);
   // console.log("bin:", bin);
   currentBinData.value = bin.buffer;
@@ -706,7 +676,6 @@ const saveAccount = async (arrBuf: ArrayBuffer) => {
     } else {
       serverListData.value = [];
     }
-    console.log("Server List:", parsedList);
     message.success("获取服务器角色列表成功，请选择角色添加");
   } catch (err) {
     console.error("Failed to get server list", err);
@@ -722,7 +691,6 @@ const saveAccount = async (arrBuf: ArrayBuffer) => {
       binData = { ...(binMsg as any)._raw };
     }
 
-    console.log("Bin文件解析:", binData);
     binDecodedResult.value = JSON.stringify(binData, null, 2);
     originalBinData.value = binData;
   } catch (err: any) {
@@ -740,7 +708,6 @@ const handleImport = async () => {
     // tokenStore.gameTokens中发现已存在的重复名称，则移出token后重新添加
     const gameToken = tokenStore.gameTokens.find((t) => t.id === role.id);
     if (gameToken) {
-      console.log("移除同名token:", gameToken);
       // tokenStore.removeToken(gameToken.id);
       tokenStore.updateToken(gameToken.id, {
         ...role,
@@ -751,7 +718,6 @@ const handleImport = async () => {
       });
     }
   });
-  console.log("当前Token列表:", tokenStore.gameTokens);
   message.success("Token添加成功");
   roleList.value = [];
   emit("ok");

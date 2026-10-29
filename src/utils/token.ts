@@ -166,7 +166,6 @@ export const getServerList = async (arrayBuffer: ArrayBuffer) => {
   // console.log("解析结果:", msg);
 
   const data = msg.getData();
-  console.log("数据内容:", data);
   return JSON.stringify({
     ...data.roles,
   });

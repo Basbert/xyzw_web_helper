@@ -10,7 +10,7 @@ export const LegionPlugin = ({ onSome }: EVM) => {
       "legion_getinforresp",
     ],
     (data: XyzwSession) => {
-      gameLogger.verbose(`收到军团信息事件: ${data.tokenId}`, data);
+      gameLogger.verbose(`收到军团信息事件: ${data.tokenId}`);
       const { body } = data;
       if (!body) {
         gameLogger.debug("军团信息响应为空");

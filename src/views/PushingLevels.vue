@@ -866,7 +866,7 @@ async function initializeBattleData(tokenId, tokenName) {
     const version =
       response?.battleData?.version || response?.body?.battleData?.version;
     if (version) {
-      tokenStore.setBattleVersion(version);
+      tokenStore.setBattleVersion(version, tokenId);
       addLog(tokenId, tokenName, `battleVersion: ${version}`, "info");
     }
   } catch (error) {

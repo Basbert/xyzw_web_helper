@@ -5,6 +5,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import router from "@/router";
+import { createAccountGameData } from "@/utils/accountGameData";
 import { g_utils } from "@/utils/bonProtocol";
 
 import { gameLogger, tokenLogger, wsLogger } from "@/utils/logger";
@@ -101,7 +102,7 @@ export const useTokenStore = defineStore("tokens", () => {
   const connectionLocks = ref<LockCtx>({}); // 连接操作锁，防止竞态条件
 
   // 游戏数据存储
-  const gameData = ref({
+  const createInitialGameData = () => ({
     roleInfo: null,
     legionInfo: null,
     commonActivityInfo: null, // 消耗活动进度
@@ -118,6 +119,11 @@ export const useTokenStore = defineStore("tokens", () => {
     },
     lastUpdated: null as string | null,
   });
+  const accountGameData = createAccountGameData(
+    selectedTokenId,
+    createInitialGameData,
+  );
+  const gameData = accountGameData.gameData;
 
   // 获取当前选中token的角色信息
   const selectedTokenRoleInfo = computed(() => {
@@ -298,6 +304,7 @@ export const useTokenStore = defineStore("tokens", () => {
     if (selectedTokenId.value === tokenId) {
       selectedTokenId.value = null;
     }
+    accountGameData.remove(tokenId);
 
     // 同时删除IndexedDB中的数据
     await deleteArrayBuffer(tokenId);
@@ -545,7 +552,7 @@ export const useTokenStore = defineStore("tokens", () => {
         body,
         message,
         client,
-        gameData,
+        gameData: accountGameData.forToken(tokenId),
       });
 
       gameLogger.gameMessage(tokenId, cmd, !!body);
@@ -602,7 +609,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
       // 验证token有效性
       if (!validateToken(actualToken)) {
-        throw new Error(`提取的token无效: "${actualToken}"`);
+        throw new Error("提取的Token无效");
       }
 
       return {
@@ -804,10 +811,6 @@ export const useTokenStore = defineStore("tokens", () => {
       const baseWsUrl = `wss://xxz-xyzw.hortorgames.com/agent?p=${encodeURIComponent(actualToken)}&e=x&lang=chinese`;
 
       const wsUrl = customWsUrl || baseWsUrl;
-
-      wsLogger.debug(
-        `Token: ${actualToken.substring(0, 10)}...${actualToken.slice(-4)}`,
-      );
 
       // 7. 创建新的WebSocket客户端（增强版）
       const wsClient = new XyzwWebSocketClient({
@@ -1082,7 +1085,8 @@ export const useTokenStore = defineStore("tokens", () => {
       "fight_level",
     ];
     if (battleCommands.includes(cmd)) {
-      const battleVersion = gameData.value.battleVersion;
+      const battleVersion =
+        accountGameData.forToken(tokenId).value.battleVersion;
       params = { battleVersion, ...params };
       wsLogger.info(
         `⚔️ [战斗命令] 注入 battleVersion: ${battleVersion} [${cmd}]`,
@@ -1131,8 +1135,9 @@ export const useTokenStore = defineStore("tokens", () => {
       // 手动更新游戏数据（因为响应可能不会自动触发消息处理）
       if (roleInfo) {
         rememberRoleId(tokenId, roleInfo.role);
-        gameData.value.roleInfo = roleInfo;
-        gameData.value.lastUpdated = new Date().toISOString();
+        const accountData = accountGameData.forToken(tokenId);
+        accountData.value.roleInfo = roleInfo;
+        accountData.value.lastUpdated = new Date().toISOString();
         gameLogger.verbose("角色信息已通过 Promise 更新");
       }
 
@@ -1286,6 +1291,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
     gameTokens.value = [];
     selectedTokenId.value = null;
+    accountGameData.clear();
 
     // 清空IndexedDB
     await clearAll();
@@ -1550,9 +1556,14 @@ export const useTokenStore = defineStore("tokens", () => {
 
     tokenLogger.info("Token Store 初始化完成，连接监控已启动");
   };
-  const setBattleVersion = (version: number | null) => {
-    gameData.value.battleVersion = version;
-    gameData.value.lastUpdated = new Date().toISOString();
+  const setBattleVersion = (
+    version: number | null,
+    tokenId: string | null = selectedTokenId.value,
+  ) => {
+    if (!tokenId) return;
+    const accountData = accountGameData.forToken(tokenId);
+    accountData.value.battleVersion = version;
+    accountData.value.lastUpdated = new Date().toISOString();
   };
 
   const getBattleVersion = () => {
@@ -1721,20 +1732,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
     // 调试工具方法
     validateToken,
-    debugToken: (tokenString: string) => {
-      console.log("🔍 Token调试信息:");
-      console.log("原始Token:", tokenString);
-      const parseResult = parseBase64Token(tokenString);
-      console.log("解析结果:", parseResult);
-      if (parseResult.success) {
-        console.log("实际Token:", parseResult.data.actualToken);
-        console.log(
-          "Token有效性:",
-          validateToken(parseResult.data.actualToken),
-        );
-      }
-      return parseResult;
-    },
+    debugToken: (tokenString: string) => parseBase64Token(tokenString),
 
     // 连接管理增强功能
     validateConnectionUniqueness,

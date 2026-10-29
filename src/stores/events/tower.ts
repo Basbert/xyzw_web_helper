@@ -6,7 +6,7 @@ export const TowerPlugin = ({ onSome }: EVM) => {
   onSome(
     ["bosstower_getinforesp", "bosstower_getinfo"],
     (data: XyzwSession) => {
-      gameLogger.verbose(`收到咸王宝库信息事件: ${data.tokenId}`, data);
+      gameLogger.verbose(`收到咸王宝库信息事件: ${data.tokenId}`);
       const { body } = data;
       gameLogger.debug("咸王宝库body:", body);
       if (!body) {
@@ -22,7 +22,7 @@ export const TowerPlugin = ({ onSome }: EVM) => {
   onSome(
     ["evotowerinforesp", "evotower_getinforesp", "evotower_getinfo"],
     (data: XyzwSession) => {
-      gameLogger.verbose(`收到怪异塔信息事件: ${data.tokenId}`, data);
+      gameLogger.verbose(`收到怪异塔信息事件: ${data.tokenId}`);
       const { body } = data;
       gameLogger.debug("怪异塔body:", body);
       if (!body) {
@@ -36,7 +36,7 @@ export const TowerPlugin = ({ onSome }: EVM) => {
   );
 
   onSome(["tower_getinfo", "tower_getinforesp"], (data: XyzwSession) => {
-    gameLogger.verbose(`收到查询塔事件: ${data.tokenId}`, data);
+    gameLogger.verbose(`收到查询塔事件: ${data.tokenId}`);
     const { body, gameData } = data;
     // 保存爬塔结果到gameData中，供组件使用
     if (!gameData.value.towerResult) {
@@ -48,7 +48,7 @@ export const TowerPlugin = ({ onSome }: EVM) => {
   });
 
   onSome(["fight_starttower", "fight_starttowerresp"], (data: XyzwSession) => {
-    gameLogger.verbose(`收到爬塔战斗开始事件: ${data.tokenId}`, data);
+    gameLogger.verbose(`收到爬塔战斗开始事件: ${data.tokenId}`);
 
     // 处理"上座塔奖励未领取"错误 (1500040)
     if ((data as any).code === 1500040) {

@@ -10,7 +10,7 @@ export const TeamPlugin = ({ onSome }: EVM) => {
       "role_gettargetteamresp",
     ],
     (data: XyzwSession) => {
-      gameLogger.verbose(`收到队伍信息事件: ${data.tokenId}`, data);
+      gameLogger.verbose(`收到队伍信息事件: ${data.tokenId}`);
       const { body, gameData } = data;
       if (!body) {
         gameLogger.debug("队伍信息响应为空");
@@ -33,7 +33,7 @@ export const TeamPlugin = ({ onSome }: EVM) => {
       "presetteam_saveteamresp",
     ],
     (data: XyzwSession) => {
-      gameLogger.verbose(`收到队伍信息事件: ${data.tokenId}`, data);
+      gameLogger.verbose(`收到队伍信息事件: ${data.tokenId}`);
       const { body, gameData } = data;
       if (!body) {
         gameLogger.debug("队伍信息响应为空");

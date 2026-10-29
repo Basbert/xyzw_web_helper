@@ -223,7 +223,7 @@ import {
   PersonCircle,
   Settings,
 } from "@vicons/ionicons5";
-import { useMessage } from "naive-ui";
+import { useDialog, useMessage } from "naive-ui";
 import { ref } from "vue";
 
 import { useRouter } from "vue-router";
@@ -234,6 +234,7 @@ import { isNowInLegionWarTime } from "@/utils/clubBattleUtils";
 const tokenStore = useTokenStore();
 const router = useRouter();
 const message = useMessage();
+const dialog = useDialog();
 
 const isMobileMenuOpen = ref(false);
 
@@ -245,12 +246,21 @@ const userMenuOptions = [
 ];
 
 // 方法
-const handleUserAction = async (key) => {
+const handleUserAction = (key) => {
   switch (key) {
     case "logout":
-      await tokenStore.clearAllTokens();
-      message.success("已清除所有Token");
-      router.push("/tokens");
+      dialog.warning({
+        title: "清除所有Token并退出",
+        content:
+          "这会清除当前浏览器中保存的所有账号和BIN数据，之后需要重新导入。确定继续吗？",
+        positiveText: "确定清除",
+        negativeText: "取消",
+        onPositiveClick: async () => {
+          await tokenStore.clearAllTokens();
+          message.success("已清除所有Token");
+          router.push("/tokens");
+        },
+      });
       break;
   }
 };

@@ -140,7 +140,6 @@ const initName = (fileName: string) => {
   if (!fileName) return;
   fileName = fileName.trim();
   const binRes = fileName.match(/^bin-(.*?)服-([0-2])-(\d{6,12})-(.*)\.bin$/);
-  console.log(binRes);
   if (binRes) {
     importForm.name = `${binRes[1]}_${binRes[2]}_${binRes[4]}`;
     return {
@@ -160,7 +159,6 @@ const initName = (fileName: string) => {
 
 const uploadBin = (binFile: File) => {
   tQueue.add(async () => {
-    console.log("上传文件数据:", binFile);
     const roleMeta = initName(binFile.name) as any;
     const reader = new FileReader();
     reader.onload = async (e) => {
@@ -213,7 +211,6 @@ const handleImport = async () => {
     // tokenStore.gameTokens中发现已存在的重复名称，则移出token后重新添加
     const gameToken = tokenStore.gameTokens.find((t) => t.id === role.id);
     if (gameToken) {
-      console.log("移除同名token:", gameToken);
       // tokenStore.removeToken(gameToken.id);
       tokenStore.updateToken(gameToken.id, {
         ...role,
@@ -224,7 +221,6 @@ const handleImport = async () => {
       });
     }
   });
-  console.log("当前Token列表:", tokenStore.gameTokens);
   message.success("Token添加成功");
   roleList.value = [];
   $emit("ok");

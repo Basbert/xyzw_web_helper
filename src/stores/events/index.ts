@@ -14,7 +14,7 @@ import { TowerPlugin } from "./tower.ts";
 export const $emit = new EventEmitter();
 export const events: Set<string> = new Set<string>();
 $emit.on("$any", (cmd: string, data: XyzwSession) => {
-  gameLogger.warn(`收到未处理事件: ${cmd} TokenID: ${data.tokenId}`, data);
+  gameLogger.warn(`收到未处理事件: ${cmd} TokenID: ${data.tokenId}`);
 });
 
 export const onSome = (event: string[], listener: (...args: any[]) => void) => {

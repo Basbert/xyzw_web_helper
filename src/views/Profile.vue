@@ -192,31 +192,15 @@ const languageOptions = [
 ];
 
 // 方法
-const saveProfile = async () => {
-  try {
-    // 这里应该调用API保存用户信息
-    message.success("个人信息保存成功");
-  } catch (error) {
-    message.error("保存失败，请稍后重试");
-  }
+const saveProfile = () => {
+  message.warning("当前版本暂不支持保存个人信息");
 };
 
-const changePassword = async () => {
-  if (!passwordFormRef.value) return;
-
-  try {
-    await passwordFormRef.value.validate();
-
-    // 这里应该调用API修改密码
-    message.success("密码修改成功");
-
-    // 清空表单
-    Object.keys(passwordForm).forEach((key) => {
-      passwordForm[key] = "";
-    });
-  } catch (error) {
-    // 验证失败
-  }
+const changePassword = () => {
+  message.warning("当前版本不支持修改游戏账号密码");
+  Object.keys(passwordForm).forEach((key) => {
+    passwordForm[key] = "";
+  });
 };
 
 const updateTheme = (theme) => {

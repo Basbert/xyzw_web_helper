@@ -119,6 +119,7 @@ export function createTasksTower(deps) {
       const tokenSettings = loadSettings
         ? loadSettings(tokenId) || currentSettings
         : currentSettings;
+      let ownsSlot = false;
 
       try {
         addLog({
@@ -127,7 +128,9 @@ export function createTasksTower(deps) {
           type: "info",
         });
 
-        await ensureConnection(tokenId);
+        await ensureConnection(tokenId, 2, (owned) => {
+          ownsSlot = owned;
+        });
 
         const teamInfo = await tokenStore.sendMessageWithPromise(
           tokenId,
@@ -171,7 +174,18 @@ export function createTasksTower(deps) {
           .sendMessageWithPromise(tokenId, "tower_getinfo", {}, 5000)
           .catch(() => {});
         let roleInfo = await tokenStore.sendGetRoleInfo(tokenId);
-        let energy = roleInfo?.role?.tower?.energy || 0;
+        const readEnergy = (response) => {
+          const value = response?.role?.tower?.energy;
+          if (
+            value === undefined ||
+            value === null ||
+            !Number.isFinite(Number(value))
+          ) {
+            throw new Error("服务器未返回当前账号的爬塔体力");
+          }
+          return Math.max(0, Number(value));
+        };
+        let energy = readEnergy(roleInfo);
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `${token.name} 初始体力: ${energy}`,
@@ -181,6 +195,7 @@ export function createTasksTower(deps) {
         let count = 0;
         const MAX_CLIMB = 100;
         let consecutiveFailures = 0;
+        let needsReview = false;
 
         while (energy > 0 && count < MAX_CLIMB && !shouldStop.value) {
           try {
@@ -200,46 +215,51 @@ export function createTasksTower(deps) {
 
             await new Promise((r) => setTimeout(r, 1000));
 
-            // Refresh energy
-            // 默认每5次刷新一次，或体力不足时刷新
-            if (count % 5 === 0) {
+            // Track this account's successful fights and periodically confirm
+            // its own server state; the selected account's cache may differ.
+            energy = Math.max(0, energy - 1);
+            if (count % 5 === 0 || energy === 0) {
               try {
                 roleInfo = await tokenStore.sendGetRoleInfo(tokenId);
-                energy = roleInfo?.role?.tower?.energy || 0;
+                energy = readEnergy(roleInfo);
               } catch (e) {
-                // 忽略刷新失败
-              }
-            } else {
-              // 尝试从本地缓存获取最新的体力信息（如果其他地方更新了）
-              const storeRoleInfo = tokenStore.gameData?.roleInfo;
-              const storeEnergy = storeRoleInfo?.role?.tower?.energy;
-
-              // 如果store中的体力大于当前预计剩余体力，说明可能有额外恢复/奖励，使用store的值
-              if (storeEnergy !== undefined && storeEnergy > energy - 1) {
-                energy = storeEnergy;
-              } else {
-                // 本地扣除体力
-                energy--;
+                needsReview = true;
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `${token.name} 无法确认剩余爬塔体力，已停止: ${e.message}`,
+                  type: "warning",
+                });
+                break;
               }
             }
           } catch (err) {
             if (err.message && err.message.includes("200400")) {
+              consecutiveFailures++;
               addLog({
                 time: new Date().toLocaleTimeString(),
-                message: `${token.name} 操作过快 (200400)，等待5秒后重试...`,
+                message: `${token.name} 操作过快 (200400)，重试 ${consecutiveFailures}/3`,
                 type: "warning",
               });
+              if (consecutiveFailures >= 3) {
+                needsReview = true;
+                break;
+              }
               await new Promise((r) => setTimeout(r, 5000));
               continue;
             }
 
             // 处理"上座塔奖励未领取"错误 (1500040)
             if (err.message && err.message.includes("1500040")) {
+              consecutiveFailures++;
               addLog({
                 time: new Date().toLocaleTimeString(),
-                message: `${token.name} 上座塔奖励未领取，尝试自动领取并等待...`,
+                message: `${token.name} 上座塔奖励未领取，尝试自动领取 (${consecutiveFailures}/3)...`,
                 type: "warning",
               });
+              if (consecutiveFailures >= 3) {
+                needsReview = true;
+                break;
+              }
 
               // 尝试获取当前塔层数
               try {
@@ -273,11 +293,9 @@ export function createTasksTower(deps) {
               // 刷新角色信息以更新状态
               try {
                 roleInfo = await tokenStore.sendGetRoleInfo(tokenId);
-                energy = roleInfo?.role?.tower?.energy || 0;
+                energy = readEnergy(roleInfo);
               } catch (e) {}
 
-              // 重置连续失败计数，因为这是一个可恢复的错误
-              consecutiveFailures = 0;
               continue;
             }
 
@@ -289,6 +307,7 @@ export function createTasksTower(deps) {
             });
 
             if (consecutiveFailures >= 3) {
+              needsReview = true;
               addLog({
                 time: new Date().toLocaleTimeString(),
                 message: `${token.name} 连续失败次数过多，停止爬塔`,
@@ -301,7 +320,7 @@ export function createTasksTower(deps) {
 
             try {
               roleInfo = await tokenStore.sendGetRoleInfo(tokenId);
-              energy = roleInfo?.role?.tower?.energy || 0;
+              energy = readEnergy(roleInfo);
             } catch (e) {
               // 忽略刷新失败
             }
@@ -315,7 +334,11 @@ export function createTasksTower(deps) {
             5000,
           );
         }
-        tokenStatus.value[tokenId] = "completed";
+        tokenStatus.value[tokenId] = shouldStop.value
+          ? "stopped"
+          : needsReview || (count >= MAX_CLIMB && energy > 0)
+            ? "pending"
+            : "completed";
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `=== ${token.name} 爬塔结束，共 ${count} 次 ===`,
@@ -330,13 +353,15 @@ export function createTasksTower(deps) {
           type: "error",
         });
       } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭  (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
-        });
+        if (ownsSlot) {
+          tokenStore.closeWebSocketConnection(tokenId);
+          releaseConnectionSlot();
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `${token.name} 连接已关闭  (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
+            type: "info",
+          });
+        }
       }
     });
 

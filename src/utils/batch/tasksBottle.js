@@ -1,13 +1,6 @@
-/**
- * 罐子类任务
- * 包含: resetBottles, batchlingguanzi
- */
+import { runWithDailyTaskLock } from "@/utils/dailyTaskState";
 
-/**
- * 创建罐子类任务执行器
- * @param {object} deps - 依赖项
- * @returns {object} 任务函数集合
- */
+/** Create the batch actions for resetting and claiming salt jars. */
 export function createTasksBottle(deps) {
   const {
     selectedTokens,
@@ -25,158 +18,125 @@ export function createTasksBottle(deps) {
     currentRunningTokenId,
   } = deps;
 
-  /**
-   * 重置罐子
-   */
-  const resetBottles = async () => {
-    if (selectedTokens.value.length === 0) return;
+  const log = (text, type = "info") =>
+    addLog({ time: new Date().toLocaleTimeString(), message: text, type });
 
+  const runBatch = async (label, execute) => {
+    if (isRunning.value || selectedTokens.value.length === 0) return;
+    const ids = [...selectedTokens.value];
     isRunning.value = true;
     shouldStop.value = false;
-
-    selectedTokens.value.forEach((id) => {
+    ids.forEach((id) => {
       tokenStatus.value[id] = "waiting";
     });
 
-    const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+    try {
+      await Promise.all(
+        ids.map(async (tokenId) => {
+          if (shouldStop.value) {
+            tokenStatus.value[tokenId] = "stopped";
+            return;
+          }
+          tokenStatus.value[tokenId] = "running";
+          const token = tokens.value.find((item) => item.id === tokenId);
+          if (!token) {
+            tokenStatus.value[tokenId] = "failed";
+            log(`账号已不存在，跳过${label}`, "error");
+            return;
+          }
 
-      tokenStatus.value[tokenId] = "running";
+          try {
+            await runWithDailyTaskLock(tokenId, async () => {
+              let ownsSlot = false;
+              const check = () => {
+                if (
+                  shouldStop.value ||
+                  tokenStore.getWebSocketStatus(tokenId) !== "connected"
+                ) {
+                  const error = new Error("任务已停止或连接已断开");
+                  error.interrupted = true;
+                  throw error;
+                }
+              };
+              try {
+                await ensureConnection(tokenId, 2, (owned) => {
+                  ownsSlot = owned;
+                });
+                check();
+                log(`=== 开始${label}: ${token.name} ===`);
+                await execute(tokenId, token.name, check);
+                check();
+                tokenStatus.value[tokenId] = "completed";
+                log(`=== ${token.name} ${label}完成 ===`, "success");
+              } finally {
+                if (ownsSlot) {
+                  try {
+                    tokenStore.closeWebSocketConnection(tokenId);
+                  } finally {
+                    releaseConnectionSlot();
+                  }
+                  log(
+                    `${token.name} 连接已关闭 (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
+                  );
+                }
+              }
+            });
+          } catch (error) {
+            tokenStatus.value[tokenId] = error.interrupted
+              ? "stopped"
+              : "failed";
+            log(
+              `${token.name} ${label}未完成: ${error.message || "未知错误"}`,
+              error.interrupted ? "warning" : "error",
+            );
+          }
+        }),
+      );
+    } finally {
+      isRunning.value = false;
+      currentRunningTokenId.value = null;
+    }
 
-      const token = tokens.value.find((t) => t.id === tokenId);
-
-      try {
-        await ensureConnection(tokenId);
-
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== 开始重置罐子: ${token.name} ===`,
-          type: "info",
-        });
-
-        // Execute commands
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 停止计时...`,
-          type: "info",
-        });
-        await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "bottlehelper_stop",
-          {},
-          5000,
-        );
-
-        await new Promise((r) => setTimeout(r, 500));
-
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 开始计时...`,
-          type: "info",
-        });
-        await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "bottlehelper_start",
-          {},
-          5000,
-        );
-
-        tokenStatus.value[tokenId] = "completed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== ${token.name} 重置完成 ===`,
-          type: "success",
-        });
-      } catch (error) {
-        console.error(error);
-        tokenStatus.value[tokenId] = "failed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 重置失败: ${error.message}`,
-          type: "error",
-        });
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭  (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
-        });
-      }
-    });
-
-    await Promise.all(taskPromises);
-
-    isRunning.value = false;
-    currentRunningTokenId.value = null;
-    message.success("批量重置罐子结束");
+    if (ids.some((id) => tokenStatus.value[id] !== "completed")) {
+      message.warning(`批量${label}已结束，部分账号未完成，请查看日志`);
+    } else {
+      message.success(`批量${label}完成`);
+    }
   };
 
-  /**
-   * 一键领取盐罐
-   */
-  const batchlingguanzi = async () => {
-    if (selectedTokens.value.length === 0) return;
-    isRunning.value = true;
-    shouldStop.value = false;
-
-    selectedTokens.value.forEach((id) => {
-      tokenStatus.value[id] = "waiting";
+  const resetBottles = () =>
+    runBatch("重置罐子", async (tokenId, tokenName) => {
+      log(`${tokenName} 停止计时...`);
+      await tokenStore.sendMessageWithPromise(
+        tokenId,
+        "bottlehelper_stop",
+        {},
+        5000,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      // Complete the restart after a stop request, even if the user cancels.
+      if (tokenStore.getWebSocketStatus(tokenId) !== "connected")
+        throw new Error("盐罐已停止，连接断开，请检查并重新启动");
+      log(`${tokenName} 开始计时...`);
+      await tokenStore.sendMessageWithPromise(
+        tokenId,
+        "bottlehelper_start",
+        {},
+        5000,
+      );
     });
 
-    const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
-      tokenStatus.value[tokenId] = "running";
-      const token = tokens.value.find((t) => t.id === tokenId);
-      try {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== 开始一键领取盐罐: ${token.name} ===`,
-          type: "info",
-        });
-        await ensureConnection(tokenId);
-        if (shouldStop.value) return;
-        await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "bottlehelper_claim",
-          {},
-          5000,
-        );
-        await new Promise((r) => setTimeout(r, 500));
-        tokenStatus.value[tokenId] = "completed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== ${token.name} 领取盐罐已完成 ===`,
-          type: "success",
-        });
-      } catch (error) {
-        console.error(error);
-        tokenStatus.value[tokenId] = "failed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 领取盐罐失败: ${error.message || "未知错误"}`,
-          type: "error",
-        });
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭  (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
-        });
-      }
+  const batchlingguanzi = () =>
+    runBatch("领取盐罐", async (tokenId, _tokenName, check) => {
+      await tokenStore.sendMessageWithPromise(
+        tokenId,
+        "bottlehelper_claim",
+        {},
+        5000,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      check();
     });
 
-    await Promise.all(taskPromises);
-    isRunning.value = false;
-    currentRunningTokenId.value = null;
-    message.success("批量领取盐罐结束");
-  };
-
-  return {
-    resetBottles,
-    batchlingguanzi,
-  };
+  return { resetBottles, batchlingguanzi };
 }

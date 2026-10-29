@@ -214,7 +214,7 @@ const initializeGameData = async () => {
       tokenId,
       "fight_startlevel",
     );
-    tokenStore.setBattleVersion(res?.battleData?.version);
+    tokenStore.setBattleVersion(res?.battleData?.version, tokenId);
   } catch (error) {
     // 静默处理初始化异常
   }

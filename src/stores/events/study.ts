@@ -7,7 +7,7 @@ export const StudyPlugin = ({ onSome, $emit }: EVM) => {
   onSome(
     ["study", "studyresp", "study_startgame", "study_startgameresp"],
     async (data: XyzwSession) => {
-      gameLogger.verbose(`收到学习答题事件: ${data.tokenId}`, data);
+      gameLogger.verbose(`收到学习答题事件: ${data.tokenId}`);
       const { body, gameData, client } = data;
       if (!body) {
         return;
