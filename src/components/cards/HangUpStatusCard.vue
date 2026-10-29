@@ -1,24 +1,31 @@
 <template>
-  <MyCard class="hang-up" :status-class="{ active: hangUp.isActive }">
+  <MyCard
+    class="hang-up"
+    :status-class="{ active: hasState && hangUp.isActive }"
+  >
     <template #icon>
       <img src="/icons/174061875626614.png" alt="挂机图标" />
     </template>
     <template #title>
       <h3>挂机时间</h3>
-      <p>已挂机：{{ formatTime(hangUp.elapsedTime) }}</p>
+      <p>已挂机：{{ hasState ? formatTime(hangUp.elapsedTime) : "—" }}</p>
     </template>
     <template #badge>
-      <span>{{ hangUp.isActive ? "挂机中" : "已完成" }}</span>
+      <span>{{
+        !hasState ? "状态待更新" : hangUp.isActive ? "挂机中" : "已完成"
+      }}</span>
     </template>
     <template #default>
       <div class="time-display">
-        {{ formatTime(hangUp.remainingTime) }}
+        {{ hasState ? formatTime(hangUp.remainingTime) : "—" }}
       </div>
     </template>
     <template #action>
       <button
         class="action-button secondary"
-        :disabled="disabled || hangUp.isExtending || hangUp.isClaiming"
+        :disabled="
+          disabled || hangUp.isExtending || hangUp.isClaiming || !hasState
+        "
         @click="extendHangUp"
       >
         <span v-if="hangUp.isExtending" class="loading-text">
@@ -28,7 +35,9 @@
       </button>
       <button
         class="action-button primary"
-        :disabled="disabled || hangUp.isExtending || hangUp.isClaiming"
+        :disabled="
+          disabled || hangUp.isExtending || hangUp.isClaiming || !hasState
+        "
         @click="claimHangUpReward"
       >
         <span v-if="hangUp.isClaiming" class="loading-text">
@@ -44,6 +53,7 @@
 import { useMessage } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import { runStandaloneDailyAction } from "@/utils/standaloneDailyActions";
 import MyCard from "../Common/MyCard.vue";
 
 defineProps({ disabled: { type: Boolean, default: false } });
@@ -51,6 +61,16 @@ defineProps({ disabled: { type: Boolean, default: false } });
 const tokenStore = useTokenStore();
 const message = useMessage();
 const roleInfo = computed(() => tokenStore.gameData?.roleInfo || null);
+const hasState = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  const data = roleInfo.value?.role?.hangUp;
+  return (
+    Boolean(tokenId) &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected" &&
+    Number.isFinite(data?.lastTime) &&
+    Number.isFinite(data?.hangUpTime)
+  );
+});
 
 const hangUp = ref({
   isActive: false,
@@ -119,28 +139,17 @@ const extendHangUp = async () => {
   try {
     hangUp.value.isExtending = true;
     message.info("正在加钟...");
-    const tasks = [];
-    for (let i = 0; i < 4; i++) {
-      tasks.push(
-        new Promise((resolve) => {
-          setTimeout(() => {
-            tokenStore.sendMessage(tokenId, "system_mysharecallback", {
-              isSkipShareCard: true,
-              type: 2,
-            });
-            resolve();
-          }, i * 300);
-        }),
-      );
-    }
-    await Promise.all(tasks);
-    setTimeout(() => tokenStore.sendMessage(tokenId, "role_getroleinfo"), 1500);
-    setTimeout(() => {
-      message.success("加钟操作已完成，请查看挂机剩余时间");
-      hangUp.value.isExtending = false;
-    }, 2500);
+    const result = await runStandaloneDailyAction({
+      tokenStore,
+      tokenId,
+      action: "extend",
+    });
+    if (result.remaining)
+      message.warning(`仍有 ${result.remaining} 个加钟槽位未确认`);
+    else message.success(`挂机加钟已补满（本次加钟 ${result.sent} 次）`);
   } catch (e) {
     message.error(`加钟操作失败: ${e?.message || "未知错误"}`);
+  } finally {
     hangUp.value.isExtending = false;
   }
 };
@@ -151,26 +160,16 @@ const claimHangUpReward = async () => {
   try {
     hangUp.value.isClaiming = true;
     message.info("正在领取挂机奖励...");
-    tokenStore.sendMessage(tokenId, "system_mysharecallback");
-    setTimeout(
-      () => tokenStore.sendMessage(tokenId, "system_claimhangupreward"),
-      200,
-    );
-    setTimeout(
-      () =>
-        tokenStore.sendMessage(tokenId, "system_mysharecallback", {
-          isSkipShareCard: true,
-          type: 2,
-        }),
-      400,
-    );
-    setTimeout(() => tokenStore.sendMessage(tokenId, "role_getroleinfo"), 600);
-    setTimeout(() => {
-      message.success("挂机奖励领取完成");
-      hangUp.value.isClaiming = false;
-    }, 1200);
+    const result = await runStandaloneDailyAction({
+      tokenStore,
+      tokenId,
+      action: "claim",
+    });
+    if (result.refreshed) message.success("挂机奖励领取完成");
+    else message.warning("领取请求已确认，但状态刷新失败，请稍后查看");
   } catch (e) {
     message.error(`领取挂机奖励失败: ${e?.message || "未知错误"}`);
+  } finally {
     hangUp.value.isClaiming = false;
   }
 };

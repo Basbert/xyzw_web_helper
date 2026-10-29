@@ -35,6 +35,10 @@ const { createTasksBottle } = await loadModule(
     },
   },
 );
+const { createTasksLegacy } = await loadModule(
+  new URL("../src/utils/batch/tasksLegacy.js", import.meta.url),
+  { "@/utils/dailyTaskState": dailyState },
+);
 
 function fixture() {
   const calls = [];
@@ -100,6 +104,44 @@ function fixture() {
   };
   return { calls, closed, statuses, deps, roles, getReleases: () => releases };
 }
+
+test("batch legacy claim keeps existing connections and accepts acknowledgements without optional rewards", async () => {
+  const f = fixture();
+  await createTasksLegacy(f.deps).batchLegacyClaim();
+  assert.deepEqual(
+    f.calls.map((call) => [call.id, call.cmd]),
+    [
+      ["alpha", "legacy_claimhangup"],
+      ["beta", "legacy_claimhangup"],
+    ],
+  );
+  assert.deepEqual(f.closed, ["alpha"]);
+  assert.equal(f.getReleases(), 1);
+  assert.equal(f.statuses.value.alpha, "completed");
+  assert.equal(f.statuses.value.beta, "completed");
+});
+
+test("batch legacy claim shares the daily account lock", async () => {
+  const f = fixture();
+  f.deps.selectedTokens.value = ["alpha"];
+  await dailyState.runWithDailyTaskLock("alpha", async () => {
+    await createTasksLegacy(f.deps).batchLegacyClaim();
+  });
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.statuses.value.alpha, "failed");
+});
+
+test("scheduled legacy gifting rejects a missing recipient before any game command", async () => {
+  const f = fixture();
+  f.deps.recipientIdInput = { value: "" };
+  f.deps.recipientInfo = { value: null };
+  f.deps.securityPassword = { value: "" };
+  f.deps.giftQuantity = { value: 1 };
+  f.deps.batchSettings.receiverId = "";
+  await createTasksLegacy(f.deps).batchLegacyGiftSendEnhanced(true);
+  assert.deepEqual(f.calls, []);
+  assert.equal(f.deps.isRunning.value, false);
+});
 
 test("batch arena checks each account's own ticket count and preserves existing connections", async () => {
   const { calls, closed, statuses, deps, getReleases } = fixture();

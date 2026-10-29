@@ -85,6 +85,9 @@ function fixture({
       }
     },
   };
+  context.executionTokens = context.selectedTokens;
+  context.runtimeBatchSettings = context.batchSettings;
+  context.activeScheduledRun = { value: null };
   vm.createContext(context);
   vm.runInContext(
     `${declarations}\nglobalThis.api = { startBatch, waitForConnectionSlot };`,

@@ -124,6 +124,22 @@ test("a disconnected account does not continue with later operations", async () 
   );
 });
 
+test("switching accounts after stopping restarts the original bottle without claiming rewards", async () => {
+  const f = fixture();
+  const send = f.tokenStore.sendMessageWithPromise;
+  f.tokenStore.sendMessageWithPromise = async (...args) => {
+    const response = await send(...args);
+    if (args[1] === "bottlehelper_stop")
+      f.tokenStore.selectedToken = { id: "other" };
+    return response;
+  };
+  await assert.rejects(f.run(), /账号或连接已变化/);
+  assert.deepEqual(
+    f.calls.map((call) => call.command),
+    ["role_getroleinfo", "bottlehelper_stop", "bottlehelper_start"],
+  );
+});
+
 test("the combined operation shares the lock with the daily task runner", async () => {
   const f = fixture();
   await runWithDailyTaskLock("account-a", async () => {

@@ -2,6 +2,7 @@
  * 功法类任务
  * 包含: batchLegacyClaim, batchLegacyGiftSendEnhanced
  */
+import { runWithDailyTaskLock } from "@/utils/dailyTaskState";
 
 /**
  * 创建功法类任务执行器
@@ -34,63 +35,88 @@ export function createTasksLegacy(deps) {
    * 批量领取功法残卷
    */
   const batchLegacyClaim = async () => {
-    if (selectedTokens.value.length === 0) return;
+    if (isRunning.value || selectedTokens.value.length === 0) return;
+    const tokenIds = [...selectedTokens.value];
     isRunning.value = true;
     shouldStop.value = false;
 
-    selectedTokens.value.forEach((id) => {
+    tokenIds.forEach((id) => {
       tokenStatus.value[id] = "waiting";
     });
 
-    const taskPromises = selectedTokens.value.map(async (tokenId) => {
+    const taskPromises = tokenIds.map(async (tokenId) => {
       if (shouldStop.value) return;
       tokenStatus.value[tokenId] = "running";
 
       const token = tokens.value.find((t) => t.id === tokenId);
-      try {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== 开始领取功法残卷: ${token.name} ===`,
-          type: "info",
-        });
-        await ensureConnection(tokenId);
-
-        const LegacyClaimHangUpResp = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "legacy_claimhangup",
-          {},
-          5000,
-        );
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== ${token.name} 成功领取功法残卷${LegacyClaimHangUpResp.reward[0].value}，共有${LegacyClaimHangUpResp.role.items[37007].quantity}个`,
-          type: "success",
-        });
-        tokenStatus.value[tokenId] = "completed";
-      } catch (error) {
-        console.error(error);
+      if (!token) {
         tokenStatus.value[tokenId] = "failed";
+        return;
+      }
+      try {
+        await runWithDailyTaskLock(tokenId, async () => {
+          let ownsSlot = false;
+          try {
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `=== 开始领取功法残卷: ${token.name} ===`,
+              type: "info",
+            });
+            await ensureConnection(tokenId, 2, (owned) => {
+              ownsSlot = owned;
+            });
+            if (shouldStop.value) {
+              const error = new Error("任务已停止");
+              error.interrupted = true;
+              throw error;
+            }
+            const response = await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "legacy_claimhangup",
+              {},
+              5000,
+            );
+            const received = response?.reward?.[0]?.value;
+            const total = response?.role?.items?.[37007]?.quantity;
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `=== ${token.name} 已领取功法残卷${received == null ? "" : ` ${received}`} ${total == null ? "" : `，共有 ${total} 个`} ===`,
+              type: "success",
+            });
+            tokenStatus.value[tokenId] = "completed";
+          } finally {
+            if (ownsSlot) {
+              try {
+                tokenStore.closeWebSocketConnection(tokenId);
+              } finally {
+                releaseConnectionSlot();
+              }
+            }
+          }
+        });
+      } catch (error) {
+        tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `=== ${token.name} 领取功法残卷失败: ${error.message || "未知错误"}`,
-          type: "error",
-        });
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭  (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
+          type: error.interrupted ? "warning" : "error",
         });
       }
     });
-
-    await Promise.all(taskPromises);
-
-    isRunning.value = false;
-    currentRunningTokenId.value = null;
-    message.success("批量领取功法残卷结束");
+    try {
+      await Promise.all(taskPromises);
+    } finally {
+      isRunning.value = false;
+      currentRunningTokenId.value = null;
+    }
+    if (
+      shouldStop.value ||
+      tokenIds.some((id) => tokenStatus.value[id] !== "completed")
+    ) {
+      message.warning("批量领取功法残卷未全部完成，请查看日志");
+    } else {
+      message.success("批量领取功法残卷结束");
+    }
   };
 
   /**
@@ -117,16 +143,14 @@ export function createTasksLegacy(deps) {
       name: recipientInfo.value?.name || "",
     };
 
-    if (!isScheduledTask) {
-      if (!giftConfig.recipientId || giftConfig.recipientId <= 0) {
-        message.error("请输入有效的接收者ID");
-        return;
-      }
+    if (!giftConfig.recipientId || giftConfig.recipientId <= 0) {
+      message.error("请输入有效的接收者ID");
+      return;
+    }
 
-      if (giftConfig.quantity <= 0 || giftConfig.quantity > 9999) {
-        message.error("赠送数量必须在1-9999之间");
-        return;
-      }
+    if (giftConfig.quantity <= 0 || giftConfig.quantity > 9999) {
+      message.error("赠送数量必须在1-9999之间");
+      return;
     }
 
     isRunning.value = true;

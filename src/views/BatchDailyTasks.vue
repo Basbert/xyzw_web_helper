@@ -14,9 +14,13 @@
             gap: 12px;
           "
         >
-          <div style="display: flex; align-items: center; gap: 16px">
+          <div
+            class="page-header-primary"
+            style="display: flex; align-items: center; gap: 16px"
+          >
             <h2>批量日常任务</h2>
             <div
+              class="schedule-summary"
               style="
                 display: flex;
                 align-items: center;
@@ -41,7 +45,7 @@
               <div v-else style="font-size: 14px; color: #6c757d">
                 暂无定时任务
               </div>
-              <div style="display: flex; gap: 8px">
+              <div class="schedule-actions" style="display: flex; gap: 8px">
                 <n-button type="primary" size="small" @click="openTaskModal">
                   新增定时任务
                 </n-button>
@@ -75,6 +79,7 @@
             </div>
           </div>
           <div
+            class="batch-actions"
             style="
               display: flex;
               align-items: center;
@@ -88,14 +93,14 @@
             <n-button
               type="primary"
               @click="startBatch"
-              :disabled="isRunning || selectedTokens.length === 0"
+              :disabled="uiBusy || selectedTokens.length === 0"
               size="medium"
             >
-              {{ isRunning ? "执行中..." : "开始执行" }}
+              {{ uiBusy ? "执行中..." : "开始执行" }}
             </n-button>
             <n-button
               @click="stopBatch"
-              :disabled="!isRunning"
+              :disabled="!uiBusy"
               type="error"
               size="medium"
             >
@@ -320,49 +325,49 @@
                 <n-button
                   size="small"
                   @click="claimHangUpRewards"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   领取挂机
                 </n-button>
                 <n-button
                   size="small"
                   @click="batchAddHangUpTime"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键加钟
                 </n-button>
                 <n-button
                   size="small"
                   @click="resetBottles"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   重置罐子
                 </n-button>
                 <n-button
                   size="small"
                   @click="batchlingguanzi"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键领取罐子
                 </n-button>
                 <n-button
                   size="small"
                   @click="batchclubsign"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键俱乐部签到
                 </n-button>
                 <n-button
                   size="small"
                   @click="openApplyLegionModal"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   批量申请俱乐部
                 </n-button>
                 <n-button
                   size="small"
                   @click="batchStudy"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键答题
                 </n-button>
@@ -370,7 +375,7 @@
                   size="small"
                   @click="batcharenafight"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !isarenaActivityOpen
                   "
@@ -380,28 +385,28 @@
                 <n-button
                   size="small"
                   @click="store_syncpurchaseconfig"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键配置黑市清单
                 </n-button>
                 <n-button
                   size="small"
                   @click="store_purchase"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键黑市采购
                 </n-button>
                 <n-button
                   size="small"
                   @click="collection_claimfreereward"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键领取珍宝阁
                 </n-button>
                 <n-button
                   size="small"
                   @click="batchGenieSweep"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键灯神扫荡
                 </n-button>
@@ -413,7 +418,7 @@
                 >
                   <n-button
                     size="small"
-                    :disabled="isRunning || selectedTokens.length === 0"
+                    :disabled="uiBusy || selectedTokens.length === 0"
                   >
                     营地挑战({{ campChallengeModeLabel }})
                   </n-button>
@@ -421,7 +426,7 @@
                 <n-button
                   size="small"
                   @click="batchXuanwuBlessing"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键玄武赐福
                 </n-button>
@@ -432,7 +437,7 @@
                 <n-button
                   size="small"
                   @click="climbTower"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键爬塔
                 </n-button>
@@ -440,7 +445,7 @@
                   size="small"
                   @click="batchmengjing"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !ismengjingActivityOpen
                   "
@@ -450,14 +455,14 @@
                 <n-button
                   size="small"
                   @click="skinChallenge"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键换皮闯关
                 </n-button>
                 <n-button
                   size="small"
                   @click="batchClaimPeachTasks"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键领取蟠桃园任务
                 </n-button>
@@ -465,7 +470,7 @@
                   size="small"
                   @click="batchBuyDreamItems"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !ismengjingActivityOpen
                   "
@@ -480,14 +485,14 @@
                 >
                   <n-button
                     size="small"
-                    :disabled="isRunning || selectedTokens.length === 0"
+                    :disabled="uiBusy || selectedTokens.length === 0"
                   >
                     一键竞猜({{ footballPickLabel }})
                   </n-button>
                 </n-popselect>
                 <n-button
                   size="small"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                   @click="batchApexGuess()"
                 >
                   逐鹿盐山竞猜
@@ -500,7 +505,7 @@
                   size="small"
                   @click="batchbaoku13"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !isbaokuActivityOpen
                   "
@@ -511,7 +516,7 @@
                   size="small"
                   @click="batchbaoku45"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !isbaokuActivityOpen
                   "
@@ -530,14 +535,14 @@
                   :precision="0"
                   :show-button="false"
                   placeholder="次数"
-                  :disabled="isRunning"
+                  :disabled="uiBusy"
                 />
                 <span class="weird-tower-count-unit">次</span>
                 <n-button
                   size="small"
                   @click="climbWeirdTower"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !isWeirdTowerActivityOpen
                   "
@@ -548,7 +553,7 @@
                   size="small"
                   @click="batchUseItems"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !isWeirdTowerActivityOpen
                   "
@@ -559,7 +564,7 @@
                   size="small"
                   @click="batchMergeItems"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !isWeirdTowerActivityOpen
                   "
@@ -570,7 +575,7 @@
                   size="small"
                   @click="batchClaimFreeEnergy"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !isWeirdTowerActivityOpen
                   "
@@ -584,77 +589,77 @@
                 <n-button
                   size="small"
                   @click="openHelperModal('box')"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   批量开箱
                 </n-button>
                 <n-button
                   size="small"
                   @click="openHelperModal('pointsBox')"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   按积分开箱
                 </n-button>
                 <n-button
                   size="small"
                   @click="batchClaimBoxPointReward"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   领取宝箱积分
                 </n-button>
                 <n-button
                   size="small"
                   @click="openHelperModal('fish')"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   批量钓鱼
                 </n-button>
                 <n-button
                   size="small"
                   @click="openHelperModal('recruit')"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   批量招募
                 </n-button>
                 <n-button
                   size="small"
                   @click="openRedeemCodeModal"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键使用兑换码
                 </n-button>
                 <n-button
                   size="small"
                   @click="batchHeroUpgrade"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键英雄升星
                 </n-button>
                 <n-button
                   size="small"
                   @click="batchBookUpgrade"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键图鉴升星
                 </n-button>
                 <n-button
                   size="small"
                   @click="batchClaimStarRewards"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键领取图鉴奖励
                 </n-button>
                 <n-button
                   size="small"
                   @click="legion_storebuygoods"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键购买四圣碎片
                 </n-button>
                 <n-button
                   size="small"
                   @click="legionStoreBuySkinCoins"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键购买俱乐部5皮肤币
                 </n-button>
@@ -665,14 +670,14 @@
                 <n-button
                   size="small"
                   @click="batchLegacyClaim"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   批量功法残卷领取
                 </n-button>
                 <n-button
                   size="small"
                   @click="showLegacyGiftModal = true"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   批量功法残卷赠送
                 </n-button>
@@ -683,7 +688,7 @@
                 <n-button
                   size="small"
                   @click="batchTopUpFish"
-                  :disabled="isRunning || selectedTokens.length === 0"
+                  :disabled="uiBusy || selectedTokens.length === 0"
                 >
                   一键钓鱼补齐
                 </n-button>
@@ -691,7 +696,7 @@
                   size="small"
                   @click="batchTopUpArena"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !isarenaActivityOpen
                   "
@@ -702,7 +707,7 @@
                   size="small"
                   @click="openWarGuessModal"
                   :disabled="
-                    isRunning ||
+                    uiBusy ||
                     selectedTokens.length === 0 ||
                     !isWarGuessActivityOpen
                   "
@@ -1252,7 +1257,10 @@
                 type="primary"
                 @click="queryRecipientInfo"
                 :disabled="
-                  !recipientIdInput || isQueryingRecipient || !securityPassword
+                  !recipientIdInput ||
+                  isQueryingRecipient ||
+                  !securityPassword ||
+                  uiBusy
                 "
               >
                 查询
@@ -1501,7 +1509,7 @@
           <n-button
             type="primary"
             @click="confirmLegacyGift"
-            :disabled="!recipientIdInput || !recipientInfo"
+            :disabled="!recipientIdInput || !recipientInfo || uiBusy"
           >
             开始赠送
           </n-button>
@@ -1568,7 +1576,9 @@
           <n-button @click="showHelperModal = false" style="margin-right: 12px"
             >取消</n-button
           >
-          <n-button type="primary" @click="executeHelper">开始执行</n-button>
+          <n-button type="primary" @click="executeHelper" :disabled="uiBusy"
+            >开始执行</n-button
+          >
         </div>
       </div>
     </n-modal>
@@ -1615,7 +1625,7 @@
           <n-button
             type="primary"
             @click="executeRedeemCodes"
-            :disabled="!batchSettings.cdkCodes?.trim()"
+            :disabled="!batchSettings.cdkCodes?.trim() || uiBusy"
           >
             开始兑换
           </n-button>
@@ -1853,6 +1863,7 @@
               type="info"
               secondary
               :loading="executingTaskIds.includes(task.id)"
+              :disabled="uiBusy"
               @click="manualExecuteTask(task)"
             >
               立即执行
@@ -2587,11 +2598,15 @@
             <n-button
               type="primary"
               @click="handleWarGuessCheer"
-              :disabled="!selectedWarGuessLegionId || isRunning"
+              :disabled="!selectedWarGuessLegionId || uiBusy"
             >
               助威
             </n-button>
-            <n-button @click="fetchWarGuessRank" :loading="warGuessLoading">
+            <n-button
+              @click="fetchWarGuessRank"
+              :loading="warGuessLoading"
+              :disabled="uiBusy"
+            >
               刷新数据
             </n-button>
           </div>
@@ -2647,13 +2662,14 @@
             <n-button
               @click="fetchApplyLegionTargetInfo"
               :loading="applyLegionLoading"
+              :disabled="uiBusy"
             >
               查询俱乐部
             </n-button>
             <n-button
               type="primary"
               @click="handleBatchApplyLegion"
-              :disabled="!applyLegionPreview?.id || isRunning"
+              :disabled="!applyLegionPreview?.id || uiBusy"
             >
               发起申请
             </n-button>
@@ -3097,8 +3113,13 @@ import {
   defaultBlackMarketPurchaseList,
   normalizeBlackMarketPurchaseList,
 } from "@/utils/batch/blackMarketConfig";
+import {
+  createScheduledRunQueue,
+  summarizeScheduledRun,
+} from "@/utils/batch/scheduledRuns";
 import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
 import {
+  DAILY_TASK_DEFAULTS,
   readDailyTaskSettings,
   writeDailyTaskSettings,
 } from "@/utils/dailyTaskSettings";
@@ -3295,6 +3316,12 @@ const selectedTokens = ref([]);
 const tokenStatus = ref({}); // { tokenId: 'waiting' | 'running' | 'completed' | 'failed' }
 const isRunning = ref(false);
 const shouldStop = ref(false);
+const activeScheduledRun = ref(null);
+const scheduledQueueSize = ref(0);
+const executionTokens = computed(
+  () => activeScheduledRun.value?.accounts ?? selectedTokens.value,
+);
+const uiBusy = computed(() => isRunning.value || scheduledQueueSize.value > 0);
 
 // =====================
 // Token分组管理状态
@@ -3686,6 +3713,14 @@ const batchSettings = reactive({
   enableRefresh: false,
   refreshInterval: 360, // 分钟
 });
+const runtimeBatchSettings = new Proxy(batchSettings, {
+  get(target, key, receiver) {
+    const snapshot = activeScheduledRun.value?.batchSettings;
+    return snapshot && Object.hasOwn(snapshot, key)
+      ? snapshot[key]
+      : Reflect.get(target, key, receiver);
+  },
+});
 
 // Load batch settings from localStorage
 const loadBatchSettings = () => {
@@ -3871,18 +3906,17 @@ const executingTaskIds = ref([]);
 
 // Manual execute task
 const manualExecuteTask = async (task) => {
-  if (executingTaskIds.value.includes(task.id)) return;
-
-  // Reset stop flag if not running, to allow manual execution
-  if (!isRunning.value && shouldStop.value) {
-    shouldStop.value = false;
-  }
+  if (executingTaskIds.value.includes(task.id) || uiBusy.value) return;
 
   executingTaskIds.value.push(task.id);
   try {
     message.info(`开始执行任务: ${task.name}`);
-    await executeScheduledTask(task);
-    message.success(`任务 ${task.name} 执行完成`);
+    const result = await enqueueScheduledTask(task);
+    if (result.status === "completed")
+      message.success(`任务 ${task.name} 执行结束`);
+    else if (result.status === "failed")
+      message.error(`任务 ${task.name} 执行失败，请查看日志`);
+    else message.warning(`任务 ${task.name} 未全部完成，请查看日志`);
   } catch (e) {
     console.error(`执行任务 ${task.name} 失败:`, e);
     message.error(`任务 ${task.name} 执行失败`);
@@ -4470,9 +4504,9 @@ watch(
 
 // Task scheduler variables - moved to component level scope
 const intervalId = ref(null);
-let lastTaskExecution = null;
 let healthCheckInterval = null;
 const pageLoadTime = Date.now();
+let lastTimeoutWarning = null;
 
 // Health check for the scheduler
 const healthCheck = () => {
@@ -4484,28 +4518,25 @@ const healthCheck = () => {
     startScheduler();
   }
 
-  // Add a safety mechanism to prevent isRunning from being stuck
-  if (isRunning.value) {
-    const now = Date.now();
-    const tenMinutesAgo = now - 10 * 60 * 1000; // 10 minutes ago
-    if (lastTaskExecution && lastTaskExecution < tenMinutesAgo) {
-      console.error(
-        `[${new Date().toISOString()}] isRunning has been true for more than 10 minutes, resetting to false`,
-      );
-      isRunning.value = false;
-      addLog({
-        time: new Date().toLocaleTimeString(),
-        message: "=== 检测到任务执行超时，已重置isRunning状态 ===",
-        type: "warning",
-      });
-    }
+  const startedAt = activeScheduledRun.value?.startedAt;
+  if (
+    startedAt &&
+    Date.now() - startedAt >= 10 * 60 * 1000 &&
+    lastTimeoutWarning !== startedAt
+  ) {
+    lastTimeoutWarning = startedAt;
+    addLog({
+      time: new Date().toLocaleTimeString(),
+      message: "定时任务已运行超过 10 分钟，可查看日志或手动停止",
+      type: "warning",
+    });
   }
 
   // Check for page refresh
   if (batchSettings.enableRefresh && batchSettings.refreshInterval > 0) {
     const elapsedMinutes = (Date.now() - pageLoadTime) / 1000 / 60;
     if (elapsedMinutes >= batchSettings.refreshInterval) {
-      if (!isRunning.value) {
+      if (!uiBusy.value) {
         console.log(
           `[${new Date().toISOString()}] Refreshing page as scheduled (Interval: ${batchSettings.refreshInterval}m, Elapsed: ${elapsedMinutes.toFixed(1)}m)`,
         );
@@ -4576,7 +4607,7 @@ const startScheduler = () => {
 
         if (shouldRun) {
           // Check if the task was already executed in the last minute to avoid duplicate execution
-          const taskExecutionKey = `${task.id}_${now.getDate()}_${now.getHours()}_${now.getMinutes()}`;
+          const taskExecutionKey = `${task.id}_${now.getFullYear()}_${now.getMonth() + 1}_${now.getDate()}_${now.getHours()}_${now.getMinutes()}`;
           const lastExecutionKey = localStorage.getItem(
             `lastTaskExecution_${task.id}`,
           );
@@ -4589,8 +4620,13 @@ const startScheduler = () => {
             );
 
             // Execute the task
-            lastTaskExecution = Date.now();
-            executeScheduledTask(task);
+            enqueueScheduledTask(task).catch((error) => {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `定时任务 ${task.name} 无法加入队列: ${error.message}`,
+                type: "error",
+              });
+            });
           } else {
             // Only log once per minute to avoid spamming logs
             // But since we check every 10s, this might log multiple times if we don't track logged state
@@ -4634,6 +4670,8 @@ onMounted(() => {
 
 // Cleanup countdown interval on unmount
 onBeforeUnmount(() => {
+  scheduledQueue.close();
+  if (activeScheduledRun.value) shouldStop.value = true;
   if (countdownInterval) {
     clearInterval(countdownInterval);
     countdownInterval = null;
@@ -4740,8 +4778,9 @@ const verifyTaskDependencies = async (task) => {
 
   // Verify localStorage is available
   try {
-    localStorage.setItem("test", "test");
-    localStorage.removeItem("test");
+    const probeKey = `xyzw_scheduler_probe_${Date.now()}_${Math.random()}`;
+    localStorage.setItem(probeKey, "1");
+    localStorage.removeItem(probeKey);
     addLog({
       time: new Date().toLocaleTimeString(),
       message: "✅ localStorage可用",
@@ -4834,7 +4873,7 @@ const executeScheduledTask = async (task) => {
         message: `=== 定时任务 ${task.name} 依赖验证失败，取消执行 ===`,
         type: "error",
       });
-      return;
+      return { status: "failed", steps: [] };
     }
 
     // Filter out tokens that don't exist in current tokens.value
@@ -4864,11 +4903,14 @@ const executeScheduledTask = async (task) => {
         message: `=== 定时任务 ${task.name} 没有可用的Token，取消执行 ===`,
         type: "error",
       });
-      return;
+      return { status: "failed", steps: [] };
     }
 
-    // Always use the latest selectedTokens from the task that exist in current tokens.value
-    selectedTokens.value = [...availableTokens];
+    if (!activeScheduledRun.value) {
+      throw new Error("定时任务缺少独立的执行上下文");
+    }
+    activeScheduledRun.value.accounts = [...availableTokens];
+    const steps = [];
 
     // Task types share account connections and run state; account-level concurrency stays inside each task.
     for (const taskName of task.selectedTasks) {
@@ -4883,6 +4925,7 @@ const executeScheduledTask = async (task) => {
           message: `跳过任务: ${availableTasks.find((t) => t.value === taskName)?.label || taskName} (不在宝库开放时间)`,
           type: "warning",
         });
+        steps.push({ name: taskName, status: "skipped" });
         continue;
       }
 
@@ -4895,6 +4938,7 @@ const executeScheduledTask = async (task) => {
           message: `跳过任务: ${availableTasks.find((t) => t.value === taskName)?.label || taskName} (不在梦境开放时间)`,
           type: "warning",
         });
+        steps.push({ name: taskName, status: "skipped" });
         continue;
       }
 
@@ -4907,6 +4951,7 @@ const executeScheduledTask = async (task) => {
           message: `跳过任务: ${availableTasks.find((t) => t.value === taskName)?.label || taskName} (不在竞技场开放时间)`,
           type: "warning",
         });
+        steps.push({ name: taskName, status: "skipped" });
         continue;
       }
 
@@ -4924,6 +4969,7 @@ const executeScheduledTask = async (task) => {
           message: `跳过任务: ${availableTasks.find((t) => t.value === taskName)?.label || taskName} (不在怪异塔开放时间)`,
           type: "warning",
         });
+        steps.push({ name: taskName, status: "skipped" });
         continue;
       }
 
@@ -4936,6 +4982,9 @@ const executeScheduledTask = async (task) => {
       // Call the task function dynamically
       const taskFunction = getScheduledTask(taskName);
       if (typeof taskFunction === "function") {
+        availableTokens.forEach((id) => {
+          tokenStatus.value[id] = "waiting";
+        });
         // For batch operations, pass isScheduledTask = true
         // 具体的batch任务函数内部会使用ensureConnection管理并行连接
         if (
@@ -4953,20 +5002,48 @@ const executeScheduledTask = async (task) => {
         } else {
           await taskFunction();
         }
+        const statuses = availableTokens.map((id) => tokenStatus.value[id]);
+        const status = statuses.every((value) => value === "completed")
+          ? "completed"
+          : statuses.includes("failed")
+            ? "failed"
+            : statuses.includes("stopped")
+              ? "stopped"
+              : "pending";
+        steps.push({ name: taskName, status });
       } else {
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `任务函数不存在: ${taskName}`,
           type: "error",
         });
+        steps.push({ name: taskName, status: "failed" });
       }
     }
 
+    const status = summarizeScheduledRun(steps, {
+      stopped:
+        shouldStop.value || steps.some((step) => step.status === "stopped"),
+      missing: missingTokens.length,
+    });
+    const summary = {
+      completed: "执行流程结束，请查看各账号结果",
+      partial: "部分步骤完成，其余步骤待检查",
+      pending: "未确认全部完成，请查看日志",
+      failed: "执行失败，请查看日志",
+      stopped: "已停止，未执行的步骤需要重新开始",
+    }[status];
     addLog({
       time: new Date().toLocaleTimeString(),
-      message: `=== 定时任务执行完成: ${task.name} ===`,
-      type: "success",
+      message: `=== 定时任务 ${task.name}: ${summary} ===`,
+      type:
+        status === "failed"
+          ? "error"
+          : status === "completed"
+            ? "info"
+            : "warning",
     });
+    return { status, steps };
   } catch (error) {
     addLog({
       time: new Date().toLocaleTimeString(),
@@ -4977,7 +5054,58 @@ const executeScheduledTask = async (task) => {
       `[${new Date().toISOString()}] Error executing scheduled task ${task.name}:`,
       error,
     );
+    return { status: "failed", steps: [] };
   }
+};
+
+// Freeze each plan before it is queued, so later UI edits cannot change its targets.
+const snapshotScheduledValue = (value) => JSON.parse(JSON.stringify(value));
+const scheduledQueue = createScheduledRunQueue({
+  isBusy: () =>
+    isRunning.value ||
+    isQueryingRecipient.value ||
+    warGuessLoading.value ||
+    applyLegionLoading.value,
+  onPendingChange: (count) => {
+    scheduledQueueSize.value = count;
+  },
+  execute: async (context) => {
+    shouldStop.value = false;
+    context.startedAt = Date.now();
+    activeScheduledRun.value = context;
+    try {
+      return await executeScheduledTask(context.task);
+    } finally {
+      activeScheduledRun.value = null;
+    }
+  },
+});
+
+const enqueueScheduledTask = async (task) => {
+  const taskSnapshot = snapshotScheduledValue(task);
+  if (
+    !Array.isArray(taskSnapshot.selectedTokens) ||
+    !Array.isArray(taskSnapshot.selectedTasks)
+  ) {
+    throw new TypeError("定时任务的账号或步骤配置无效");
+  }
+  const accountSettings = {};
+  for (const id of taskSnapshot.selectedTokens) {
+    const settings = loadSettings(id);
+    if (!settings) throw new Error("无法读取账号的每日任务设置");
+    accountSettings[id] = snapshotScheduledValue(settings);
+  }
+  return scheduledQueue.enqueue({
+    task: taskSnapshot,
+    accounts: [...taskSnapshot.selectedTokens],
+    accountSettings,
+    batchSettings: snapshotScheduledValue(batchSettings),
+    currentSettings: snapshotScheduledValue(currentSettings),
+    helperSettings: snapshotScheduledValue(helperSettings),
+    weirdTowerMaxClimb: weirdTowerMaxClimb.value,
+    recipientInfo: snapshotScheduledValue(recipientInfo.value),
+    giftQuantity: giftQuantity.value,
+  });
 };
 
 // 注: boxTypeOptions, fishTypeOptions 已从 @/utils/batch 导入
@@ -5364,19 +5492,7 @@ const loadSettings = (tokenId) => {
       id: tokenId,
     };
     const saved = readDailyTaskSettings(token, tokens.value);
-    const defaultSettings = {
-      arenaFormation: 1,
-      towerFormation: 1,
-      bossFormation: 1,
-      bossTimes: 2,
-      claimBottle: true,
-      payRecruit: true,
-      openBox: true,
-      arenaEnable: true,
-      claimHangUp: true,
-      claimEmail: true,
-      blackMarketPurchase: true,
-    };
+    const defaultSettings = { ...DAILY_TASK_DEFAULTS, towerFormation: 1 };
     return saved ? { ...defaultSettings, ...saved } : defaultSettings;
   } catch (error) {
     console.error("Failed to load settings:", error);
@@ -5947,7 +6063,7 @@ const clearLogs = () => {
 
 const waitForConnection = async (
   tokenId,
-  timeout = batchSettings.connectionTimeout,
+  timeout = runtimeBatchSettings.connectionTimeout,
 ) => {
   const start = Date.now();
   while (Date.now() - start < timeout) {
@@ -5962,7 +6078,7 @@ const waitForConnection = async (
 const connectionQueue = { active: 0 };
 
 const waitForConnectionSlot = async () => {
-  while (connectionQueue.active >= batchSettings.maxActive) {
+  while (connectionQueue.active >= runtimeBatchSettings.maxActive) {
     if (shouldStop.value) break;
     await new Promise((r) => setTimeout(r, 1000));
   }
@@ -6007,7 +6123,7 @@ const ensureConnection = async (
 
     addLog({
       time: new Date().toLocaleTimeString(),
-      message: `正在连接... (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
+      message: `正在连接... (队列: ${connectionQueue.active}/${runtimeBatchSettings.maxActive})`,
       type: "info",
     });
 
@@ -6026,7 +6142,9 @@ const ensureConnection = async (
       });
 
       tokenStore.closeWebSocketConnection(tokenId);
-      await new Promise((r) => setTimeout(r, batchSettings.reconnectDelay));
+      await new Promise((r) =>
+        setTimeout(r, runtimeBatchSettings.reconnectDelay),
+      );
 
       addLog({
         time: new Date().toLocaleTimeString(),
@@ -6089,8 +6207,18 @@ const ensureConnection = async (
   return true;
 };
 
+const readScheduledSettings = (name, fallback) =>
+  new Proxy(fallback, {
+    get(target, key, receiver) {
+      const snapshot = activeScheduledRun.value?.[name];
+      return snapshot && Object.hasOwn(snapshot, key)
+        ? snapshot[key]
+        : Reflect.get(target, key, receiver);
+    },
+  });
+
 const createTaskDeps = () => ({
-  selectedTokens,
+  selectedTokens: executionTokens,
   tokens,
   tokenStatus,
   isRunning,
@@ -6098,19 +6226,31 @@ const createTaskDeps = () => ({
   ensureConnection,
   releaseConnectionSlot,
   connectionQueue,
-  batchSettings,
+  batchSettings: runtimeBatchSettings,
   tokenStore,
   addLog,
   message,
   currentRunningTokenId,
   // 延迟配置
   delayConfig: {
-    command: batchSettings.commandDelay,
-    task: batchSettings.taskDelay,
-    action: batchSettings.actionDelay,
-    battle: batchSettings.battleDelay,
-    refresh: batchSettings.refreshDelay,
-    long: batchSettings.longDelay,
+    get command() {
+      return runtimeBatchSettings.commandDelay;
+    },
+    get task() {
+      return runtimeBatchSettings.taskDelay;
+    },
+    get action() {
+      return runtimeBatchSettings.actionDelay;
+    },
+    get battle() {
+      return runtimeBatchSettings.battleDelay;
+    },
+    get refresh() {
+      return runtimeBatchSettings.refreshDelay;
+    },
+    get long() {
+      return runtimeBatchSettings.longDelay;
+    },
   },
   // 其他特定依赖
   logs,
@@ -6118,21 +6258,31 @@ const createTaskDeps = () => ({
   autoScrollLog,
   nextTick,
   // 设置相关
-  currentSettings,
-  helperSettings,
-  weirdTowerMaxClimb,
+  currentSettings: readScheduledSettings("currentSettings", currentSettings),
+  helperSettings: readScheduledSettings("helperSettings", helperSettings),
+  weirdTowerMaxClimb: computed(
+    () =>
+      activeScheduledRun.value?.weirdTowerMaxClimb ?? weirdTowerMaxClimb.value,
+  ),
   // 功法赠送相关
   recipientIdInput,
-  recipientInfo,
+  recipientInfo: computed(() =>
+    activeScheduledRun.value
+      ? activeScheduledRun.value.recipientInfo
+      : recipientInfo.value,
+  ),
   securityPassword,
-  giftQuantity,
+  giftQuantity: computed(
+    () => activeScheduledRun.value?.giftQuantity ?? giftQuantity.value,
+  ),
   // 竞技场相关辅助函数
   pickArenaTargetId,
   getTodayStartSec,
   isTodayAvailable,
   calculateMonthProgress,
   // 配置加载函数
-  loadSettings,
+  loadSettings: (id) =>
+    activeScheduledRun.value?.accountSettings[id] ?? loadSettings(id),
 });
 
 // 初始化任务模块
@@ -6248,18 +6398,19 @@ const onFootballPickChange = async (val) => {
 };
 
 const startBatch = async () => {
-  if (isRunning.value || selectedTokens.value.length === 0) return;
+  const tokenIds = [...executionTokens.value];
+  if (isRunning.value || tokenIds.length === 0) return;
 
   isRunning.value = true;
   shouldStop.value = false;
 
   // Reset status
-  selectedTokens.value.forEach((id) => {
+  tokenIds.forEach((id) => {
     tokenStatus.value[id] = "waiting";
   });
 
   // 并行执行任务，但通过connectionQueue限制并发连接数
-  const taskPromises = selectedTokens.value.map(async (tokenId) => {
+  const taskPromises = tokenIds.map(async (tokenId) => {
     if (shouldStop.value) return;
 
     tokenStatus.value[tokenId] = "running";
@@ -6285,20 +6436,24 @@ const startBatch = async () => {
         ownsSlot = owned;
       });
       const runner = new DailyTaskRunner(tokenStore, {
-        commandDelay: batchSettings.commandDelay,
-        taskDelay: batchSettings.taskDelay,
+        commandDelay: runtimeBatchSettings.commandDelay,
+        taskDelay: runtimeBatchSettings.taskDelay,
       });
-      const result = await runner.run(tokenId, {
-        shouldStop: () => shouldStop.value,
-        onLog: (log) =>
-          addLog({ ...log, message: `${token.name}: ${log.message}` }),
-        onProgress: (progress) =>
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `${token.name}: 服务器每日任务完成并领奖 ${progress}%`,
-            type: "info",
-          }),
-      });
+      const result = await runner.run(
+        tokenId,
+        {
+          shouldStop: () => shouldStop.value,
+          onLog: (log) =>
+            addLog({ ...log, message: `${token.name}: ${log.message}` }),
+          onProgress: (progress) =>
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `${token.name}: 服务器每日任务完成并领奖 ${progress}%`,
+              type: "info",
+            }),
+        },
+        activeScheduledRun.value?.accountSettings[tokenId] ?? null,
+      );
       tokenStatus.value[tokenId] = result.incomplete ? "pending" : "completed";
       addLog({
         time: new Date().toLocaleTimeString(),
@@ -6324,7 +6479,7 @@ const startBatch = async () => {
       }
       addLog({
         time: new Date().toLocaleTimeString(),
-        message: `${token.name} 连接清理结束  (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
+        message: `${token.name} 连接清理结束  (队列: ${connectionQueue.active}/${runtimeBatchSettings.maxActive})`,
         type: "info",
       });
     }
@@ -6339,7 +6494,7 @@ const startBatch = async () => {
   if (shouldStop.value)
     message.info("批量任务已停止，再次开始将按服务器任务列表补差");
   else if (
-    selectedTokens.value.some((id) =>
+    tokenIds.some((id) =>
       ["failed", "pending", "stopped"].includes(tokenStatus.value[id]),
     )
   )
@@ -6349,6 +6504,7 @@ const startBatch = async () => {
 
 const stopBatch = () => {
   shouldStop.value = true;
+  scheduledQueue.cancelPending();
   addLog({
     time: new Date().toLocaleTimeString(),
     message: "正在停止...",
@@ -6392,6 +6548,19 @@ const stopBatch = () => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 20px;
+}
+
+.page-header-primary,
+.schedule-summary,
+.schedule-actions,
+.batch-actions {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.schedule-summary {
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .token-item {
@@ -6654,9 +6823,14 @@ const stopBatch = () => {
     align-items: stretch;
   }
 
-  .page-header .actions {
-    display: flex;
-    gap: 8px;
+  .page-header-primary {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 8px !important;
+  }
+
+  .page-header-primary h2 {
+    margin: 0;
   }
 
   .log-card {

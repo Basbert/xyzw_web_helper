@@ -9,15 +9,19 @@ export async function runBottleAndHangUp({
 }) {
   return runWithDailyTaskLock(tokenId, async () => {
     const client = tokenStore.wsConnections?.[tokenId]?.client;
-    const check = () => {
+    const checkConnection = () => {
       if (
         !client ||
-        tokenStore.selectedToken?.id !== tokenId ||
         tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
         tokenStore.wsConnections?.[tokenId]?.client !== client
       ) {
         throw new Error("账号或连接已变化，请重新检查两项状态");
       }
+    };
+    const check = () => {
+      checkConnection();
+      if (tokenStore.selectedToken?.id !== tokenId)
+        throw new Error("账号或连接已变化，请重新检查两项状态");
     };
     let lastRole;
     const readRole = async () => {
@@ -56,13 +60,47 @@ export async function runBottleAndHangUp({
     ) {
       throw new TypeError("服务器未提供盐罐状态或时间，请刷新后重试");
     }
-    if (stopTime > client.serverTime / 1000) {
+    const wasRunning = stopTime > client.serverTime / 1000;
+    if (wasRunning) {
       onProgress("正在重启盐罐机器人...");
-      await send("bottlehelper_stop", "盐罐停止请求未确认，请检查运行状态");
+      check();
+      try {
+        await tokenStore.sendMessageWithPromise(
+          tokenId,
+          "bottlehelper_stop",
+          {},
+          8000,
+        );
+      } catch (error) {
+        throw new Error(
+          `盐罐停止请求未确认，请检查运行状态：${error.message || "未知错误"}`,
+        );
+      }
+      await sleep(500);
     } else {
       onProgress("正在启动盐罐机器人...");
     }
-    await send("bottlehelper_start", "盐罐启动失败，请检查运行状态");
+    if (wasRunning) {
+      try {
+        // Recover the same salt helper even if selection changed after stop.
+        checkConnection();
+        await tokenStore.sendMessageWithPromise(
+          tokenId,
+          "bottlehelper_start",
+          {},
+          8000,
+        );
+      } catch (error) {
+        throw new Error(
+          `盐罐启动失败，请检查运行状态：${error.message || "未知错误"}`,
+        );
+      }
+      check();
+      await sleep(500);
+      check();
+    } else {
+      await send("bottlehelper_start", "盐罐启动失败，请检查运行状态");
+    }
 
     onProgress("正在领取挂机奖励...");
     await send("system_claimhangupreward", "盐罐已处理，但挂机奖励领取失败");

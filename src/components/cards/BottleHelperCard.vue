@@ -1,5 +1,8 @@
 <template>
-  <MyCard class="bottle-helper" :status-class="{ active: state.isRunning }">
+  <MyCard
+    class="bottle-helper"
+    :status-class="{ active: hasState && state.isRunning }"
+  >
     <template #icon>
       <img src="/icons/173746572831736.png" alt="盐罐图标" />
     </template>
@@ -8,11 +11,13 @@
       <p>剩余时间</p>
     </template>
     <template #badge>
-      <span>{{ state.isRunning ? "运行中" : "已停止" }}</span>
+      <span>{{
+        !hasState ? "状态待更新" : state.isRunning ? "运行中" : "已停止"
+      }}</span>
     </template>
     <template #default>
       <div class="time-display">
-        {{ formatTime(state.remainingTime) }}
+        {{ hasState ? formatTime(state.remainingTime) : "—" }}
       </div>
     </template>
     <template #action>
@@ -21,7 +26,7 @@
         secondary
         size="small"
         block
-        :disabled="disabled || isBusy"
+        :disabled="disabled || isBusy || !hasState"
         @click="handleBottleHelper"
       >
         {{ state.isRunning ? "重启服务" : "启动服务" }}
@@ -34,6 +39,7 @@
 import { useMessage } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import { runStandaloneDailyAction } from "@/utils/standaloneDailyActions";
 import MyCard from "../Common/MyCard.vue";
 
 defineProps({ disabled: { type: Boolean, default: false } });
@@ -44,6 +50,14 @@ const isBusy = ref(false);
 defineExpose({ isBusy });
 
 const roleInfo = computed(() => tokenStore.gameData?.roleInfo || null);
+const hasState = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  return (
+    Boolean(tokenId) &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected" &&
+    Number.isFinite(roleInfo.value?.role?.bottleHelpers?.helperStopTime)
+  );
+});
 
 const state = ref({
   isRunning: false,
@@ -91,27 +105,28 @@ onUnmounted(() => {
   if (timer) clearInterval(timer);
 });
 
-const handleBottleHelper = () => {
+const handleBottleHelper = async () => {
   if (!tokenStore.selectedToken) {
     message.warning("请先选择Token");
     return;
   }
   const tokenId = tokenStore.selectedToken.id;
   isBusy.value = true;
-  if (!tokenStore.sendMessage(tokenId, "bottlehelper_stop")) {
+  try {
+    message.info("正在处理盐罐机器人...");
+    const result = await runStandaloneDailyAction({
+      tokenStore,
+      tokenId,
+      action: "bottle",
+    });
+    message.success(
+      result.wasRunning ? "盐罐机器人已重启" : "盐罐机器人已启动",
+    );
+  } catch (error) {
+    message.error(`盐罐操作未完成：${error.message || "未知错误"}`);
+  } finally {
     isBusy.value = false;
-    message.error("盐罐操作失败，请检查连接状态");
-    return;
   }
-  setTimeout(() => {
-    if (!tokenStore.sendMessage(tokenId, "bottlehelper_start"))
-      message.error("盐罐启动请求发送失败，请检查运行状态");
-    tokenStore.sendMessage(tokenId, "role_getroleinfo");
-    setTimeout(() => {
-      isBusy.value = false;
-    }, 1000);
-  }, 500);
-  message.info(state.value.isRunning ? "重启盐罐机器人" : "启动盐罐机器人");
 };
 </script>
 

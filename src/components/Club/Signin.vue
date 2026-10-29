@@ -58,10 +58,6 @@ const clubInfo = computed(() => {
   return tokenStore.gameData?.legionInfo?.info || {};
 });
 
-onMounted(() => {
-  console.log("clubInfo", tokenStore.gameData);
-});
-
 // 俱乐部签到
 const signInLegion = () => {
   if (!tokenStore.selectedToken || isSignedIn.value) return;
