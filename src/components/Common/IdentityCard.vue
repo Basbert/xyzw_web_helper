@@ -63,7 +63,13 @@
           {{ isExpanded ? "收起" : "展开全部" }}
         </n-button>
       </div>
-      <div v-else class="loading">正在获取角色信息...</div>
+      <div v-if="!hasRole" class="loading">
+        {{
+          wsStatus === "connected"
+            ? "正在获取角色信息..."
+            : "连接后查看角色与资源"
+        }}
+      </div>
     </div>
   </div>
   <transition v-else name="drop">

@@ -88,7 +88,14 @@
           <ThemeToggle />
 
           <n-dropdown :options="userMenuOptions" @select="handleUserAction">
-            <div class="user-info">
+            <div
+              class="user-info"
+              role="button"
+              tabindex="0"
+              aria-label="打开账号菜单"
+              @keydown.enter.prevent="$event.currentTarget.click()"
+              @keydown.space.prevent="$event.currentTarget.click()"
+            >
               <n-avatar
                 :src="selectedToken?.avatar || '/icons/xiaoyugan.png'"
                 size="medium"
@@ -348,6 +355,7 @@ const handleUserAction = (key) => {
   display: flex;
   align-items: center;
   gap: var(--spacing-md);
+  min-width: 0;
 }
 
 .user-info {
@@ -358,6 +366,7 @@ const handleUserAction = (key) => {
   border-radius: var(--border-radius-medium);
   cursor: pointer;
   transition: background var(--transition-fast);
+  min-width: 0;
 
   &:hover {
     background: var(--bg-tertiary);
@@ -367,9 +376,19 @@ const handleUserAction = (key) => {
 .username {
   font-weight: var(--font-weight-medium);
   color: var(--text-primary);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 768px) {
+  .nav-user {
+    gap: 4px;
+  }
+  .username {
+    max-width: 24vw;
+  }
   .nav-item span {
     display: none;
   }

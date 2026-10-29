@@ -3,49 +3,98 @@
     <!-- 主要内容 -->
     <main class="dashboard-main">
       <div class="main-container">
-        <!-- 欢迎区域 -->
-        <section class="welcome-section">
-          <div class="welcome-content">
-            <div class="welcome-text">
-              <h1>
-                欢迎回来，{{ tokenStore.selectedToken?.name || "游戏玩家" }}！
-              </h1>
-              <p>今天是 {{ currentDate }}，继续您的游戏管理之旅吧</p>
-            </div>
-            <div class="welcome-actions">
-              <n-button
-                type="primary"
-                size="large"
-                @click="router.push('/admin/game-features')"
-              >
-                进入游戏功能
-              </n-button>
-              <n-button size="large" @click="handleManageTokens">
-                管理Token
-              </n-button>
-            </div>
+        <div class="dashboard-heading">
+          <div>
+            <p class="dashboard-date">{{ currentDate }}</p>
+            <h1>今天的操作</h1>
+            <p>从常用任务开始，其他功能随时可以打开。</p>
           </div>
+          <button
+            class="account-link"
+            type="button"
+            @click="handleManageTokens"
+          >
+            切换账号
+          </button>
+        </div>
+
+        <div class="account-strip">
+          <img src="/icons/173746572831736.png" alt="" />
+          <div class="account-name">
+            <strong>{{
+              tokenStore.selectedToken?.name || "尚未选择账号"
+            }}</strong>
+            <span>{{
+              tokenStore.selectedToken?.server || "在账号管理中选择角色"
+            }}</span>
+          </div>
+          <span class="connection-pill" :class="{ connected: isConnected }">{{
+            connectionLabel
+          }}</span>
+        </div>
+
+        <section class="today-grid" aria-label="今日常用操作">
+          <article class="today-panel daily-panel">
+            <div class="panel-heading">
+              <img src="/icons/174023274867420.png" alt="" />
+              <div>
+                <h2>每日任务</h2>
+                <p>使用当前角色保存的任务设置</p>
+              </div>
+            </div>
+            <div class="daily-progress">
+              <span>当前进度</span><strong>{{ dailyProgress }}</strong>
+            </div>
+            <n-button
+              type="primary"
+              size="large"
+              @click="router.push('/admin/game-features')"
+              >打开每日任务</n-button
+            >
+          </article>
+          <article class="today-panel maintenance-summary">
+            <div class="panel-heading">
+              <img src="/icons/173746572831736.png" alt="" />
+              <div>
+                <h2>盐罐与挂机</h2>
+                <p>领奖励、补挂机时间和处理盐罐</p>
+              </div>
+            </div>
+            <p class="panel-note">
+              {{
+                isConnected
+                  ? "可在日常页查看两项状态。"
+                  : "连接后可查看两项状态。"
+              }}
+            </p>
+            <n-button size="large" @click="router.push('/admin/game-features')"
+              >前往处理</n-button
+            >
+          </article>
         </section>
 
-        <!-- 快速操作 -->
-        <section class="quick-actions-section">
-          <h2 class="section-title">快速操作</h2>
-          <div class="actions-grid">
-            <div
-              v-for="action in quickActions"
-              :key="action.id"
-              class="action-card"
-              @click="handleQuickAction(action)"
+        <section class="other-actions" aria-label="其他功能">
+          <h2>其他功能</h2>
+          <div class="other-action-list">
+            <button
+              type="button"
+              @click="router.push('/admin/batch-daily-tasks')"
             >
-              <div class="action-icon">
-                <component :is="action.icon" />
-              </div>
-              <div class="action-content">
-                <h3>{{ action.title }}</h3>
-                <p>{{ action.description }}</p>
-              </div>
-            </div>
+              <strong>批量日常</strong><span>管理多账号与定时计划</span>
+            </button>
+            <button type="button" @click="openGame">
+              <strong>打开游戏</strong><span>使用当前账号进入游戏</span>
+            </button>
+            <button type="button" @click="handleManageTokens">
+              <strong>账号管理</strong><span>添加或切换账号</span>
+            </button>
           </div>
+          <details class="advanced-links">
+            <summary>高级工具</summary>
+            <button type="button" @click="router.push('/websocket-test')">
+              WebSocket 测试
+            </button>
+          </details>
         </section>
       </div>
     </main>
@@ -53,16 +102,9 @@
 </template>
 
 <script setup>
-import {
-  Add,
-  CheckmarkCircle,
-  Cloud,
-  Cube,
-  GameController,
-} from "@vicons/ionicons5";
 import lz4 from "lz4js";
 import { useMessage } from "naive-ui";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import { useTokenStore } from "@/stores/tokenStore";
@@ -179,43 +221,31 @@ const currentDate = computed(() => {
   });
 });
 
-const quickActions = ref([
-  {
-    id: 1,
-    icon: GameController,
-    title: "打开游戏",
-    description: "使用当前Token直接进入游戏",
-    action: "open-game",
-  },
-  {
-    id: 2,
-    icon: Cube,
-    title: "游戏功能",
-    description: "访问所有游戏功能模块",
-    action: "game-features",
-  },
-  {
-    id: 3,
-    icon: Add,
-    title: "添加Token",
-    description: "快速添加新的游戏Token",
-    action: "add-token",
-  },
-  {
-    id: 4,
-    icon: CheckmarkCircle,
-    title: "批量任务",
-    description: "批量执行任务",
-    action: "batch-daily-tasks",
-  },
-  {
-    id: 5,
-    icon: Cloud,
-    title: "WebSocket测试",
-    description: "测试WebSocket连接和游戏命令",
-    action: "websocket-test",
-  },
-]);
+const isConnected = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  return (
+    Boolean(tokenId) && tokenStore.getWebSocketStatus(tokenId) === "connected"
+  );
+});
+
+const connectionLabel = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId) return "未选择账号";
+  const status = tokenStore.getWebSocketStatus(tokenId);
+  return status === "connected"
+    ? "已连接"
+    : status === "connecting"
+      ? "连接中"
+      : "未连接";
+});
+
+const dailyProgress = computed(() => {
+  if (!isConnected.value) return "连接后查看";
+  const point = tokenStore.gameData?.roleInfo?.role?.dailyTask?.dailyPoint;
+  return Number.isFinite(point)
+    ? `${Math.min(Math.max(point, 0), 100)}%`
+    : "等待更新";
+});
 
 const handleManageTokens = () => {
   // 降噪
@@ -231,32 +261,6 @@ const handleManageTokens = () => {
   } catch (error) {
     console.error("❌ 导航失败:", error);
     message.error("导航到Token管理页面失败");
-  }
-};
-
-const handleQuickAction = (action) => {
-  switch (action.action) {
-    case "open-game":
-      openGame();
-      break;
-    case "game-features":
-      router.push("/admin/game-features");
-      break;
-    case "add-token":
-      handleManageTokens();
-      break;
-    case "execute-tasks":
-      router.push("/admin/game-features");
-      break;
-    case "websocket-test":
-      router.push("/websocket-test");
-      break;
-    case "open-settings":
-      router.push("/admin/profile");
-      break;
-    case "batch-daily-tasks":
-      router.push("/admin/batch-daily-tasks");
-      break;
   }
 };
 
@@ -306,302 +310,251 @@ onMounted(async () => {
 
 <style scoped lang="scss">
 .dashboard-page {
-  min-height: 100vh;
+  min-height: 100dvh;
   background: var(--bg-secondary);
+  color: var(--text-primary);
 }
 
-// 主要内容
 .dashboard-main {
-  padding: var(--spacing-xl);
+  padding: 36px 28px 64px;
 }
 
 .main-container {
-  max-width: 1400px;
+  max-width: 1160px;
   margin: 0 auto;
 }
 
-// 欢迎区域
-.welcome-section {
-  background: linear-gradient(
-    135deg,
-    var(--primary-color) 0%,
-    var(--secondary-color) 100%
-  );
-  border-radius: var(--border-radius-xl);
-  padding: var(--spacing-2xl);
-  margin-bottom: var(--spacing-xl);
-  color: white;
-}
-
-.welcome-content {
+.dashboard-heading {
   display: flex;
+  align-items: end;
   justify-content: space-between;
-  align-items: center;
-  gap: var(--spacing-lg);
-}
+  gap: 20px;
+  margin-bottom: 24px;
 
-.welcome-text {
   h1 {
-    font-size: var(--font-size-3xl);
-    font-weight: var(--font-weight-bold);
-    margin-bottom: var(--spacing-sm);
+    margin: 4px 0 6px;
+    font-size: 28px;
+    line-height: 1.25;
   }
 
   p {
-    font-size: var(--font-size-lg);
-    opacity: 0.9;
     margin: 0;
-  }
-}
-
-.welcome-actions {
-  display: flex;
-  gap: var(--spacing-md);
-}
-
-// 统计区域
-.stats-section {
-  margin-bottom: var(--spacing-xl);
-}
-
-.stats-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: var(--spacing-lg);
-}
-
-.stat-card {
-  background: var(--bg-primary);
-  border-radius: var(--border-radius-large);
-  padding: var(--spacing-lg);
-  box-shadow: var(--shadow-light);
-  transition: all var(--transition-normal);
-
-  &:hover {
-    box-shadow: var(--shadow-medium);
-    transform: translateY(-2px);
-  }
-}
-
-.stat-icon {
-  width: 48px;
-  height: 48px;
-  margin-bottom: var(--spacing-md);
-
-  :deep(svg) {
-    width: 100%;
-    height: 100%;
-  }
-}
-
-.stat-number {
-  font-size: var(--font-size-2xl);
-  font-weight: var(--font-weight-bold);
-  color: var(--text-primary);
-  margin-bottom: var(--spacing-xs);
-}
-
-.stat-label {
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  margin-bottom: var(--spacing-xs);
-}
-
-.stat-change {
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-medium);
-
-  &.positive {
-    color: var(--success-color);
-  }
-
-  &.negative {
-    color: var(--error-color);
-  }
-}
-
-// 快速操作区域
-.quick-actions-section {
-  margin-bottom: var(--spacing-xl);
-}
-
-.section-title {
-  font-size: var(--font-size-xl);
-  font-weight: var(--font-weight-semibold);
-  color: var(--text-primary);
-  margin-bottom: var(--spacing-lg);
-}
-
-.actions-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: var(--spacing-lg);
-}
-
-.action-card {
-  background: var(--bg-primary);
-  border-radius: var(--border-radius-large);
-  padding: var(--spacing-lg);
-  box-shadow: var(--shadow-light);
-  cursor: pointer;
-  transition: all var(--transition-normal);
-
-  &:hover {
-    box-shadow: var(--shadow-medium);
-    transform: translateY(-2px);
-  }
-}
-
-.action-icon {
-  width: 40px;
-  height: 40px;
-  color: var(--primary-color);
-  margin-bottom: var(--spacing-md);
-
-  :deep(svg) {
-    width: 100%;
-    height: 100%;
-  }
-}
-
-.action-content {
-  h3 {
-    font-size: var(--font-size-md);
-    font-weight: var(--font-weight-semibold);
-    color: var(--text-primary);
-    margin-bottom: var(--spacing-xs);
-  }
-
-  p {
     color: var(--text-secondary);
-    font-size: var(--font-size-sm);
-    margin: 0;
+    font-size: 14px;
   }
 }
 
-// 最近活动区域
-.recent-activity-section {
+.dashboard-date {
+  font-variant-numeric: tabular-nums;
+}
+
+.account-link,
+.advanced-links button {
+  border: 0;
+  padding: 6px 0;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.account-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  margin-bottom: 20px;
   background: var(--bg-primary);
-  border-radius: var(--border-radius-large);
-  padding: var(--spacing-xl);
-  box-shadow: var(--shadow-light);
-}
+  border: 1px solid var(--border-light);
+  border-radius: 12px;
 
-.activity-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: var(--spacing-lg);
-}
-
-.activity-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-md);
-}
-
-.activity-item {
-  display: flex;
-  gap: var(--spacing-md);
-  padding: var(--spacing-md);
-  border-radius: var(--border-radius-medium);
-  transition: background var(--transition-fast);
-
-  &:hover {
-    background: var(--bg-tertiary);
+  img {
+    width: 36px;
+    height: 36px;
+    object-fit: contain;
   }
 }
 
-.activity-icon {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
+.account-name {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
 
-  &.success {
+  strong {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 15px;
+  }
+  span {
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+}
+
+.connection-pill {
+  padding: 5px 10px;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  font-size: 13px;
+
+  &.connected {
     background: rgba(24, 160, 88, 0.1);
     color: var(--success-color);
   }
+}
 
-  &.warning {
-    background: rgba(240, 160, 32, 0.1);
-    color: var(--warning-color);
+.today-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 1fr;
+  gap: 16px;
+}
+
+.today-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 20px;
+  min-width: 0;
+  padding: 24px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-radius: 14px;
+
+  :deep(.n-button) {
+    min-width: 180px;
+    margin-top: auto;
   }
+}
 
-  &.info {
-    background: rgba(32, 128, 240, 0.1);
-    color: var(--info-color);
+.daily-panel {
+  border-top: 3px solid var(--primary-color);
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+
+  img {
+    width: 40px;
+    height: 40px;
+    object-fit: contain;
   }
-
-  :deep(svg) {
-    width: 16px;
-    height: 16px;
+  h2 {
+    margin: 0 0 4px;
+    font-size: 18px;
+  }
+  p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 13px;
   }
 }
 
-.activity-content {
-  flex: 1;
+.daily-progress {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 14px 0;
+  border-top: 1px solid var(--border-light);
+  border-bottom: 1px solid var(--border-light);
+  color: var(--text-secondary);
+  font-size: 14px;
+
+  strong {
+    color: var(--text-primary);
+    font-size: 18px;
+    font-variant-numeric: tabular-nums;
+  }
 }
 
-.activity-text {
-  color: var(--text-primary);
-  font-size: var(--font-size-sm);
-  margin-bottom: var(--spacing-xs);
+.panel-note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
 }
 
-.activity-time {
-  color: var(--text-tertiary);
-  font-size: var(--font-size-xs);
+.other-actions {
+  margin-top: 30px;
+
+  h2 {
+    margin: 0 0 12px;
+    font-size: 16px;
+  }
 }
 
-.empty-activity {
-  text-align: center;
-  padding: var(--spacing-xl) 0;
-}
+.other-action-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
 
-// 响应式设计
-@media (max-width: 1024px) {
-  .welcome-content {
+  button {
+    display: flex;
     flex-direction: column;
-    text-align: center;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 18px;
+    text-align: left;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-light);
+    border-radius: 10px;
+    color: var(--text-primary);
+    cursor: pointer;
   }
 
-  .stats-grid {
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  button:hover {
+    border-color: var(--primary-color);
+  }
+  span {
+    color: var(--text-secondary);
+    font-size: 13px;
   }
 }
 
-@media (max-width: 768px) {
+.advanced-links {
+  margin-top: 18px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  summary {
+    cursor: pointer;
+  }
+}
+
+button:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 3px;
+}
+
+@media (max-width: 700px) {
   .dashboard-main {
-    padding: var(--spacing-md);
+    padding: 22px 16px 52px;
   }
-
-  .nav-menu {
-    display: none;
+  .dashboard-heading {
+    align-items: flex-start;
   }
-
-  .welcome-section {
-    padding: var(--spacing-xl);
+  .dashboard-heading h1 {
+    font-size: 24px;
   }
-
-  .welcome-text h1 {
-    font-size: var(--font-size-2xl);
+  .today-grid,
+  .other-action-list {
+    grid-template-columns: minmax(0, 1fr);
   }
-
-  .welcome-actions {
-    flex-direction: column;
+  .today-panel {
+    padding: 20px;
+    gap: 16px;
+  }
+  .today-panel :deep(.n-button) {
     width: 100%;
   }
-
-  .stats-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .actions-grid {
-    grid-template-columns: 1fr;
+  .other-action-list button {
+    padding: 14px 16px;
   }
 }
 </style>

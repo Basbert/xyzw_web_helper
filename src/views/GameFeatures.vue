@@ -18,6 +18,13 @@
               </n-icon>
               <span>{{ connectionStatusText }}</span>
             </div>
+            <n-button
+              text
+              :disabled="connectionStatus === 'connecting'"
+              @click="toggleConnection"
+            >
+              {{ isConnected ? "断开连接" : "重新连接" }}
+            </n-button>
           </div>
         </div>
       </div>
@@ -34,32 +41,31 @@
     </div>
 
     <!-- WebSocket 连接状态 -->
-    <div class="ws-status-section">
-      <div class="container">
-        <div class="ws-status-card">
-          <div class="status-header">
-            <h3>连接状态</h3>
-            <n-button text @click="toggleConnection">
-              {{ isConnected ? "断开连接" : "重新连接" }}
-            </n-button>
+    <details class="ws-status-section container">
+      <summary class="connection-details-toggle">连接详情</summary>
+      <div class="ws-status-card">
+        <div class="status-header">
+          <h3>连接状态</h3>
+          <n-button text @click="toggleConnection">
+            {{ isConnected ? "断开连接" : "重新连接" }}
+          </n-button>
+        </div>
+        <div class="status-content">
+          <div class="status-item">
+            <span>WebSocket状态:</span>
+            <span :class="connectionClass">{{ connectionStatusText }}</span>
           </div>
-          <div class="status-content">
-            <div class="status-item">
-              <span>WebSocket状态:</span>
-              <span :class="connectionClass">{{ connectionStatusText }}</span>
-            </div>
-            <div v-if="tokenStore.selectedToken" class="status-item">
-              <span>当前Token:</span>
-              <span>{{ tokenStore.selectedToken.name }}</span>
-            </div>
-            <div v-if="lastActivity" class="status-item">
-              <span>最后活动:</span>
-              <span>{{ lastActivity }}</span>
-            </div>
+          <div v-if="tokenStore.selectedToken" class="status-item">
+            <span>当前Token:</span>
+            <span>{{ tokenStore.selectedToken.name }}</span>
+          </div>
+          <div v-if="lastActivity" class="status-item">
+            <span>最后活动:</span>
+            <span>{{ lastActivity }}</span>
           </div>
         </div>
       </div>
-    </div>
+    </details>
   </div>
 </template>
 
@@ -82,13 +88,17 @@ const lastActivity = ref(null);
 const connectionStatus = computed(() => {
   if (!tokenStore.selectedToken) return "disconnected";
   const status = tokenStore.getWebSocketStatus(tokenStore.selectedToken.id);
-  return status === "connected" ? "connected" : "disconnected";
+  return ["connected", "connecting"].includes(status) ? status : "disconnected";
 });
 
 const connectionStatusText = computed(() => {
   if (!tokenStore.selectedToken) return "未选择Token";
   const status = tokenStore.getWebSocketStatus(tokenStore.selectedToken.id);
-  return status === "connected" ? "已连接" : "未连接";
+  return status === "connected"
+    ? "已连接"
+    : status === "connecting"
+      ? "连接中"
+      : "未连接";
 });
 
 const connectionClass = computed(() => {
@@ -117,18 +127,12 @@ const connectWebSocket = () => {
     const token = tokenStore.selectedToken.token;
 
     // 使用 tokenStore 的 WebSocket 连接管理
-    tokenStore.createWebSocketConnection(tokenId, token);
+    tokenStore.createWebSocketConnection(
+      tokenId,
+      token,
+      tokenStore.selectedToken.wsUrl,
+    );
     message.info("正在建立 WebSocket 连接...");
-
-    // 等待连接建立
-    setTimeout(async () => {
-      const status = tokenStore.getWebSocketStatus(tokenId);
-      if (status === "connected") {
-        message.success("WebSocket 连接成功");
-        // 连接成功后自动初始化游戏数据
-        await initializeGameData();
-      }
-    }, 2000);
   } catch (error) {
     console.error("WebSocket连接失败:", error);
     message.error("WebSocket连接失败");
@@ -158,13 +162,17 @@ onMounted(() => {
   // 检查是否需要连接 WebSocket
   if (tokenStore.selectedToken) {
     const status = tokenStore.getWebSocketStatus(tokenStore.selectedToken.id);
-    if (status !== "connected") {
+    if (status !== "connected" && status !== "connecting") {
       connectWebSocket();
-    } else {
+    } else if (status === "connected") {
       // 如果已连接，立即获取初始数据
       initializeGameData();
     }
   }
+});
+
+watch(connectionStatus, (status, previous) => {
+  if (status === "connected" && previous !== "connected") initializeGameData();
 });
 
 // 监听当前选中 Token 的连接错误（如 token 过期）并给出明确提示
@@ -228,13 +236,13 @@ onUnmounted(() => {
 <style scoped lang="scss">
 .game-features-page {
   min-height: 100dvh;
-  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  background: var(--bg-secondary);
   padding-bottom: calc(var(--spacing-md) + env(safe-area-inset-bottom));
 }
 
 /* 深色主题下背景 */
 [data-theme="dark"] .game-features-page {
-  background: linear-gradient(135deg, #0f172a 0%, #1f2937 100%);
+  background: var(--bg-secondary);
 }
 
 // 页面头部
@@ -257,12 +265,9 @@ onUnmounted(() => {
 
   .page-header {
     padding: var(--spacing-md) 0;
-    margin-bottom: var(--spacing-md);
 
     .header-content {
-      flex-direction: column;
       gap: var(--spacing-sm);
-      text-align: center;
     }
 
     .page-title {
@@ -271,7 +276,7 @@ onUnmounted(() => {
   }
 
   .features-grid-section {
-    padding: var(--spacing-md) 0;
+    padding: var(--spacing-sm) 0;
   }
 
   .ws-status-section {
@@ -289,8 +294,17 @@ onUnmounted(() => {
   align-items: center;
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .header-left {
   flex: 1;
+  min-width: 0;
 }
 
 .page-title {
@@ -304,6 +318,9 @@ onUnmounted(() => {
   color: var(--text-secondary);
   font-size: var(--font-size-md);
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .connection-status {
@@ -324,16 +341,27 @@ onUnmounted(() => {
     background: rgba(208, 48, 80, 0.1);
     color: var(--error-color);
   }
+
+  &.connecting {
+    background: rgba(245, 158, 11, 0.1);
+    color: var(--warning-color);
+  }
 }
 
 // 反馈提示区域
 .feedback-section {
-  padding: var(--spacing-md) 0;
+  display: none;
 }
 
 // 功能模块网格
 .features-grid-section {
-  padding: var(--spacing-xl) 0;
+  padding: var(--spacing-md) 0;
+}
+
+.connection-details-toggle {
+  padding: 8px 0;
+  color: var(--text-secondary);
+  cursor: pointer;
 }
 
 .features-grid {
@@ -570,9 +598,9 @@ onUnmounted(() => {
   }
 
   .header-content {
-    flex-direction: column;
-    gap: var(--spacing-md);
-    text-align: center;
+    flex-direction: row;
+    gap: var(--spacing-sm);
+    text-align: left;
   }
 
   .features-grid {

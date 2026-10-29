@@ -8,22 +8,24 @@
       />
       <div class="status-info">
         <h3>每日任务</h3>
-        <p>当前进度</p>
+        <p>按当前角色的设置执行</p>
       </div>
       <div class="header-right">
-        <div
+        <button
+          type="button"
           class="status-badge"
           :class="{ completed: isFull }"
           @click="showTaskDetails = true"
         >
           <div class="status-dot" :class="{ completed: isFull }" />
           <span>任务详情</span>
-        </div>
+        </button>
 
         <button
           class="settings-gear"
           @click="showSettings = true"
           title="任务设置"
+          aria-label="任务设置"
         >
           <svg
             viewBox="0 0 24 24"
@@ -45,6 +47,7 @@
       <!-- 进度条 -->
       <div class="progress-container">
         <n-progress
+          v-if="isProgressKnown"
           type="line"
           :percentage="dailyPoint"
           :height="8"
@@ -52,10 +55,14 @@
           :color="progressColor"
           rail-color="#f3f4f6"
         />
+        <span v-else class="progress-unavailable">连接后显示每日进度</span>
       </div>
 
       <!-- 提示信息 -->
-      <div class="info-container">右上角小齿轮有惊喜</div>
+      <div class="info-container">
+        竞技场阵容 {{ settings.arenaFormation }} · BOSS
+        {{ settings.bossTimes }} 次
+      </div>
     </div>
 
     <!-- 一键执行按钮 -->
@@ -74,8 +81,8 @@
           </svg>
           执行中...
         </span>
-        <span v-else-if="!isConnected">WebSocket未连接</span>
-        <span v-else>一键补差</span>
+        <span v-else-if="!isConnected">连接后执行每日任务</span>
+        <span v-else>执行每日任务</span>
       </button>
     </div>
 
@@ -373,6 +380,11 @@ const isConnected = computed(() => {
   const status = tokenStore.getWebSocketStatus(tokenStore.selectedToken.id);
   return status === "connected";
 });
+const isProgressKnown = computed(
+  () =>
+    isConnected.value &&
+    Number.isFinite(roleInfo.value?.role?.dailyTask?.dailyPoint),
+);
 
 // 日志系统
 const logList = ref([]);
@@ -597,7 +609,7 @@ onBeforeUnmount(() => {
   border-left: 4px solid #f0a020; // 每日任务专用颜色
   display: flex;
   flex-direction: column;
-  min-height: 240px; // 继续缩小整体高度
+  min-height: 0;
   padding: var(--spacing-lg);
   gap: var(--spacing-md);
 
@@ -617,14 +629,14 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: flex-start;
   gap: var(--spacing-md);
-  margin-bottom: var(--spacing-lg);
+  margin-bottom: 0;
 }
 
 .daily-task .card-content {
-  flex: 1;
+  flex: 0;
   display: flex;
   flex-direction: column;
-  justify-content: center; // 使进度和提示在可用空间内居中
+  justify-content: flex-start;
 }
 
 .progress-container {
@@ -634,7 +646,12 @@ onBeforeUnmount(() => {
 .info-container {
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
-  text-align: center;
+  text-align: left;
+}
+
+.progress-unavailable {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
 }
 
 // 使用GameStatus中的统一按钮样式
@@ -655,6 +672,16 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: var(--spacing-sm);
   margin-left: auto;
+}
+
+.header-right .status-badge {
+  border: 0;
+  cursor: pointer;
+}
+
+.header-right button:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 3px;
 }
 
 .settings-gear {
@@ -704,6 +731,15 @@ onBeforeUnmount(() => {
     color: #9ca3af;
     cursor: not-allowed;
   }
+}
+
+:global(html[data-theme="dark"]) .action-button:disabled {
+  background: #374151;
+  color: #cbd5e1;
+}
+
+:global(html[data-theme="dark"]) .action-button:disabled span {
+  color: #cbd5e1 !important;
 }
 
 .loading-text {
@@ -891,13 +927,18 @@ onBeforeUnmount(() => {
   }
 
   .card-header {
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
   }
 
   .header-right {
-    width: 100%;
-    justify-content: space-between;
-    margin-top: var(--spacing-sm);
+    width: auto;
+    flex-shrink: 0;
+    margin-top: 0;
+  }
+
+  .status-info {
+    flex: 1;
+    min-width: 0;
   }
 }
 </style>

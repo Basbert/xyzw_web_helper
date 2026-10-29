@@ -1,5 +1,11 @@
 <template>
-  <n-button circle size="medium" class="theme-toggle" @click="toggleTheme">
+  <n-button
+    circle
+    size="medium"
+    class="theme-toggle"
+    :aria-label="isDark ? '切换浅色模式' : '切换深色模式'"
+    @click="toggleTheme"
+  >
     <template #icon>
       <n-icon v-if="isDark">
         <Sunny />

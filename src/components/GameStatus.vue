@@ -12,9 +12,6 @@
       'club-mode': activeSection === 'club',
     }"
   >
-    <!-- 身份牌常驻（嵌入式，Tabs 上方） -->
-    <IdentityCard embedded />
-
     <!-- 下方选卡分区切换（Tabs）：日常｜俱乐部｜活动 -->
     <n-tabs
       class="section-tabs"
@@ -35,49 +32,55 @@
       <n-tab-pane name="fightPvp" tab="切磋" />
     </n-tabs>
 
-    <!-- 阵容（仅日常） -->
-    <TeamFormation v-show="activeSection === 'daily'" />
-
-    <!-- 每日任务状态（仅日常） -->
-    <DailyTaskStatus v-show="activeSection === 'daily'" />
-
-    <!-- 咸将塔状态 -->
-    <TowerStatus v-show="activeSection === 'daily' && isShowTowerStatus" />
-
-    <!-- 怪异塔状态 -->
-    <WeirdTowerStatus v-show="activeSection === 'daily'" />
-
-    <!-- 盐罐机器人状态（提取组件） -->
-    <BottleHelperCard
-      ref="bottleHelperCard"
+    <section
       v-show="activeSection === 'daily'"
-      :disabled="combinedBusy"
-    />
+      class="daily-workspace"
+      aria-label="每日常用操作"
+    >
+      <DailyTaskStatus />
+      <section class="maintenance-panel" aria-label="盐罐与挂机">
+        <div class="maintenance-heading">
+          <h2>盐罐与挂机</h2>
+          <p>启动盐罐后，先领奖励，再补足挂机时间</p>
+        </div>
+        <div class="maintenance-cards">
+          <BottleHelperCard ref="bottleHelperCard" :disabled="combinedBusy" />
+          <HangUpStatusCard ref="hangUpStatusCard" :disabled="combinedBusy" />
+        </div>
+        <div class="combined-daily-action">
+          <n-button
+            type="primary"
+            size="large"
+            block
+            :loading="combinedBusy"
+            :disabled="
+              !combinedConnected ||
+              combinedBusy ||
+              bottleHelperCard?.isBusy ||
+              hangUpStatusCard?.isBusy
+            "
+            @click="runCombinedDailyAction"
+          >
+            {{ combinedBusy ? combinedProgress : "一键处理盐罐和挂机" }}
+          </n-button>
+        </div>
+      </section>
+    </section>
 
-    <!-- 挂机状态（提取组件） -->
-    <HangUpStatusCard
-      ref="hangUpStatusCard"
+    <section
       v-show="activeSection === 'daily'"
-      :disabled="combinedBusy"
-    />
+      class="daily-extras"
+      aria-label="爬塔和阵容"
+    >
+      <WeirdTowerStatus />
+      <TowerStatus v-show="isShowTowerStatus" />
+      <TeamFormation />
+    </section>
 
-    <div v-show="activeSection === 'daily'" class="combined-daily-action">
-      <n-button
-        type="primary"
-        size="large"
-        block
-        :loading="combinedBusy"
-        :disabled="
-          !combinedConnected ||
-          combinedBusy ||
-          bottleHelperCard?.isBusy ||
-          hangUpStatusCard?.isBusy
-        "
-        @click="runCombinedDailyAction"
-      >
-        {{ combinedBusy ? combinedProgress : "一键处理盐罐和挂机" }}
-      </n-button>
-    </div>
+    <details class="role-details">
+      <summary>角色资料与资源</summary>
+      <IdentityCard embedded />
+    </details>
 
     <!-- 无限阵容助手（提取组件） -->
     <Unlimitedlineup v-show="activeSection === 'tools'" />
@@ -780,8 +783,111 @@ onUnmounted(() => {
   display: none;
 }
 
+.daily-workspace,
+.daily-extras {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--spacing-lg);
+  min-width: 0;
+}
+
+.daily-workspace {
+  grid-template-columns: minmax(270px, 0.8fr) minmax(0, 1.5fr);
+  align-items: stretch;
+}
+
+.maintenance-panel {
+  min-width: 0;
+  padding: 20px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-light);
+  border-radius: var(--border-radius-xl);
+}
+
+.maintenance-heading {
+  margin-bottom: 16px;
+
+  h2 {
+    margin: 0 0 4px;
+    color: var(--text-primary);
+    font-size: 16px;
+    font-weight: 600;
+  }
+
+  p {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+  }
+}
+
+.maintenance-cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+
+  :deep(.status-card) {
+    min-width: 0;
+    min-height: 0;
+    padding: 16px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-light);
+    border-radius: var(--border-radius-medium);
+    box-shadow: none;
+    transform: none;
+  }
+
+  :deep(.card-header) {
+    margin-bottom: 12px;
+  }
+
+  :deep(.card-content) {
+    margin-bottom: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.daily-extras {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.role-details {
+  grid-column: 1 / -1;
+  min-width: 0;
+
+  summary {
+    padding: 10px 2px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 14px;
+  }
+
+  summary:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 3px;
+  }
+}
+
 .combined-daily-action {
   grid-column: 1 / -1;
+}
+
+@media (max-width: 900px) {
+  .daily-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 600px) {
+  .maintenance-panel {
+    padding: 16px;
+  }
+
+  .maintenance-cards,
+  .daily-extras {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .warrank-full-container {
