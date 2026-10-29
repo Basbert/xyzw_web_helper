@@ -2056,7 +2056,9 @@
             >
               <label class="setting-label">选择任务</label>
               <n-space size="small">
-                <n-button size="small" @click="selectAllTasks"> 全选 </n-button>
+                <n-button size="small" @click="selectAllTasks">
+                  全选（不含赠送）
+                </n-button>
                 <n-button size="small" @click="deselectAllTasks">
                   全不选
                 </n-button>
@@ -2110,6 +2112,16 @@
                 </n-tab-pane>
               </n-tabs>
             </n-checkbox-group>
+            <n-alert
+              v-if="
+                taskForm.selectedTasks.includes('batchLegacyGiftSendEnhanced')
+              "
+              type="warning"
+              style="margin-top: 12px"
+            >
+              定时赠送会将每个账号当前持有的功法残卷赠送给设置中的接收者，每次最多
+              9999 个。
+            </n-alert>
           </div>
           <div
             v-if="taskForm.selectedTasks.includes('batchApplyLegion')"
@@ -4186,7 +4198,14 @@ const deselectAllTokens = () => {
 
 // Select all tasks
 const selectAllTasks = () => {
-  taskForm.selectedTasks = availableTasks.map((task) => task.value);
+  const giftSelected = taskForm.selectedTasks.includes(
+    "batchLegacyGiftSendEnhanced",
+  );
+  taskForm.selectedTasks = availableTasks
+    .filter(
+      (task) => task.value !== "batchLegacyGiftSendEnhanced" || giftSelected,
+    )
+    .map((task) => task.value);
 };
 
 // Deselect all tasks

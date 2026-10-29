@@ -143,6 +143,86 @@ test("scheduled legacy gifting rejects a missing recipient before any game comma
   assert.equal(f.deps.isRunning.value, false);
 });
 
+test("parallel scheduled gifts use each account's own fragment count", async () => {
+  const f = fixture();
+  f.deps.recipientIdInput = { value: "" };
+  f.deps.recipientInfo = { value: null };
+  f.deps.securityPassword = { value: "" };
+  f.deps.giftQuantity = { value: 10 };
+  f.deps.batchSettings.receiverId = 123;
+  f.deps.batchSettings.password = "test-only";
+  f.roles.alpha.items[37007] = { quantity: 2 };
+  f.roles.beta.items[37007] = { quantity: 7 };
+  let releaseAlpha;
+  let alphaReady;
+  let betaDone;
+  const alphaGate = new Promise((resolve) => {
+    releaseAlpha = resolve;
+  });
+  const alphaStarted = new Promise((resolve) => {
+    alphaReady = resolve;
+  });
+  const betaSent = new Promise((resolve) => {
+    betaDone = resolve;
+  });
+  f.deps.tokenStore.sendMessageWithPromise = async (id, cmd, params) => {
+    f.calls.push({ id, cmd, params });
+    if (cmd === "rank_getroleinfo")
+      return { roleInfo: { roleId: 123, name: "Target" } };
+    if (cmd === "role_commitpassword") {
+      if (id === "alpha") {
+        alphaReady();
+        await alphaGate;
+      }
+      return { role: { statistics: { "que:wh:tm": 1 } } };
+    }
+    if (cmd === "legacy_sendgift" && id === "beta") betaDone();
+    return {};
+  };
+  const pending = createTasksLegacy(f.deps).batchLegacyGiftSendEnhanced(true);
+  await alphaStarted;
+  await betaSent;
+  f.deps.selectedTokens.value = ["beta"];
+  releaseAlpha();
+  await pending;
+  assert.deepEqual(
+    f.calls
+      .filter((call) => call.cmd === "legacy_sendgift")
+      .map((call) => [call.id, call.params.itemCnt]),
+    [
+      ["beta", 7],
+      ["alpha", 2],
+    ],
+  );
+  assert.deepEqual(f.closed, ["alpha"]);
+  assert.equal(f.statuses.value.alpha, "completed");
+  assert.equal(f.statuses.value.beta, "completed");
+});
+
+test("an unconfirmed gift is never retried and is reported as pending", async () => {
+  const f = fixture();
+  f.deps.selectedTokens.value = ["beta"];
+  f.deps.recipientIdInput = { value: 123 };
+  f.deps.recipientInfo = { value: { name: "Target" } };
+  f.deps.securityPassword = { value: "test-only" };
+  f.deps.giftQuantity = { value: 2 };
+  f.roles.beta.items[37007] = { quantity: 10 };
+  f.deps.tokenStore.sendMessageWithPromise = async (id, cmd, params) => {
+    f.calls.push({ id, cmd, params });
+    if (cmd === "role_commitpassword")
+      return { role: { statistics: { "que:wh:tm": 1 } } };
+    if (cmd === "legacy_sendgift") throw new Error("timeout");
+    return {};
+  };
+  await createTasksLegacy(f.deps).batchLegacyGiftSendEnhanced();
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "legacy_sendgift").length,
+    1,
+  );
+  assert.equal(f.statuses.value.beta, "pending");
+  assert.deepEqual(f.closed, []);
+});
+
 test("batch arena checks each account's own ticket count and preserves existing connections", async () => {
   const { calls, closed, statuses, deps, getReleases } = fixture();
   await createTasksArena(deps).batcharenafight();

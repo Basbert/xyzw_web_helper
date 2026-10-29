@@ -28,6 +28,7 @@ const names = new Set([
   "enqueueScheduledTask",
   "readScheduledSettings",
   "createTaskDeps",
+  "selectAllTasks",
 ]);
 const declarations = source.statements
   .filter(
@@ -123,7 +124,7 @@ function fixture() {
   });
   vm.createContext(context);
   vm.runInContext(
-    `${declarations}\nglobalThis.api = { enqueueScheduledTask, executeScheduledTask, createTaskDeps, scheduledQueue };`,
+    `${declarations}\nglobalThis.api = { enqueueScheduledTask, executeScheduledTask, createTaskDeps, scheduledQueue, selectAllTasks };`,
     context,
   );
   const deps = context.api.createTaskDeps();
@@ -238,4 +239,23 @@ test("a missing account prevents an otherwise successful plan from claiming full
     selectedTasks: ["first"],
   });
   assert.equal(result.status, "partial");
+});
+
+test("selecting all scheduled tasks does not silently enable fragment gifting", () => {
+  const f = fixture();
+  f.context.availableTasks = [
+    { value: "startBatch" },
+    { value: "batchLegacyGiftSendEnhanced" },
+  ];
+  f.context.taskForm = { selectedTasks: [] };
+  f.selectAllTasks();
+  assert.deepEqual(Array.from(f.context.taskForm.selectedTasks), [
+    "startBatch",
+  ]);
+  f.context.taskForm.selectedTasks.push("batchLegacyGiftSendEnhanced");
+  f.selectAllTasks();
+  assert.deepEqual(Array.from(f.context.taskForm.selectedTasks), [
+    "startBatch",
+    "batchLegacyGiftSendEnhanced",
+  ]);
 });
