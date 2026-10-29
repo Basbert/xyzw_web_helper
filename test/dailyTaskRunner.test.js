@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { reactive } from "vue";
 import * as settingsHelpers from "../src/utils/dailyTaskSettings.js";
 import * as stateHelpers from "../src/utils/dailyTaskState.js";
 import { loadModule } from "./helpers/loadModule.js";
@@ -866,4 +867,29 @@ test("pending counts include distinct supplemental failures without counting a f
   assert.equal(result.failed, 2);
   assert.equal(result.remainingTasks, 1);
   assert.equal(result.incomplete, 2);
+});
+
+test("a running account keeps its initial options when the settings form changes", async () => {
+  const f = fixture();
+  const form = reactive({ ...settings, claimEmail: true });
+  const runner = f.runner();
+  let resume;
+  const serverWait = new Promise((resolve) => {
+    resume = resolve;
+  });
+  runner.loadConfig = async () => {
+    await serverWait;
+    return config;
+  };
+
+  const run = runner.run("account-a", {}, form);
+  form.claimEmail = false;
+  resume();
+  await run;
+
+  assert.equal(form.claimEmail, false);
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "mail_claimallattachment").length,
+    1,
+  );
 });

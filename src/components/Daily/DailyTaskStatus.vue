@@ -514,7 +514,7 @@ const runDailyFix = async () => {
         },
       },
       settings,
-    ); // 传入当前组件的响应式 settings
+    ); // 执行器会固定本次任务的设置
 
     const incomplete = result.incomplete;
     if (incomplete) {

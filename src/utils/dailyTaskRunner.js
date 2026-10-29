@@ -289,8 +289,11 @@ export class DailyTaskRunner {
    * @returns {Promise<object>} Execution counts without any local completion record.
    */
   async run(tokenId, callbacks = {}, customSettings = null) {
+    // A settings form can change while this run is waiting for the server.
+    // Keep the flat task options tied to the account that started this run.
+    const runSettings = customSettings ? { ...customSettings } : null;
     return runWithDailyTaskLock(tokenId, () =>
-      this.runTasks(tokenId, callbacks, customSettings),
+      this.runTasks(tokenId, callbacks, runSettings),
     );
   }
 
