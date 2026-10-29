@@ -52,7 +52,11 @@
                 <n-button size="small" @click="showTasksModal = true">
                   查看定时任务
                 </n-button>
-                <n-dropdown :options="exportOptions" @select="exportConfig">
+                <n-dropdown
+                  trigger="click"
+                  :options="exportOptions"
+                  @select="exportConfig"
+                >
                   <n-button size="small">导出配置</n-button>
                 </n-dropdown>
                 <n-upload
