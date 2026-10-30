@@ -53,7 +53,7 @@ function fixture({ running = true, occupiedSlots = 1 } = {}) {
   };
 }
 
-test("one click restarts the bottle, claims the reward, then fills empty slots", async () => {
+test("one click handles the bottle and hang-up, then claims fragments once", async () => {
   const f = fixture();
   const result = await f.run();
   const commands = f.calls.map((call) => call.command);
@@ -67,6 +67,7 @@ test("one click restarts the bottle, claims the reward, then fills empty slots",
     "system_mysharecallback",
     "system_mysharecallback",
     "role_getroleinfo",
+    "legacy_claimhangup",
   ]);
   for (const call of f.calls.filter(
     (item) => item.command === "system_mysharecallback",
@@ -74,6 +75,7 @@ test("one click restarts the bottle, claims the reward, then fills empty slots",
     assert.deepEqual(call.params, { isSkipShareCard: true, type: 2 });
   assert.equal(result.sent, 3);
   assert.equal(result.remaining, 0);
+  assert.equal(result.legacy.status, "acknowledged");
   assert.equal(f.tokenStore.gameData.roleInfo.role.hangUp.helpFriend.length, 4);
 });
 
@@ -102,10 +104,17 @@ test("a failed reward claim never proceeds to add time", async () => {
     if (args[1] === "system_claimhangupreward") throw new Error("请求失败");
     return send(...args);
   };
-  await assert.rejects(f.run(), /挂机奖励领取失败/);
+  await assert.rejects(
+    f.run(),
+    /挂机奖励领取失败.*功法残卷领取请求已完成/,
+  );
   assert.equal(
     f.calls.some((call) => call.command === "system_mysharecallback"),
     false,
+  );
+  assert.equal(
+    f.calls.filter((call) => call.command === "legacy_claimhangup").length,
+    1,
   );
 });
 
@@ -148,13 +157,13 @@ test("the combined operation shares the lock with the daily task runner", async 
   assert.equal(f.calls.length, 0);
 });
 
-test("missing bottle state stops before any operation", async () => {
+test("missing bottle state still allows the independent fragment claim", async () => {
   const f = fixture();
   delete f.role.bottleHelpers.helperStopTime;
   await assert.rejects(f.run(), /未提供盐罐状态/);
   assert.deepEqual(
     f.calls.map((call) => call.command),
-    ["role_getroleinfo"],
+    ["role_getroleinfo", "legacy_claimhangup"],
   );
 });
 
@@ -169,5 +178,68 @@ test("failure to start the bottle is reported before the reward is claimed", asy
   assert.equal(
     f.calls.some((call) => call.command === "system_claimhangupreward"),
     false,
+  );
+  assert.equal(
+    f.calls.filter((call) => call.command === "legacy_claimhangup").length,
+    1,
+  );
+});
+
+test("fragment responses preserve a server-reported amount", async () => {
+  const f = fixture();
+  const send = f.tokenStore.sendMessageWithPromise;
+  f.tokenStore.sendMessageWithPromise = async (...args) => {
+    const response = await send(...args);
+    return args[1] === "legacy_claimhangup"
+      ? { reward: [{ value: 6 }] }
+      : response;
+  };
+  const result = await f.run();
+  assert.deepEqual(result.legacy, { status: "acknowledged", received: 6 });
+});
+
+test("an uncertain fragment response is reported without an automatic retry", async () => {
+  const f = fixture();
+  const send = f.tokenStore.sendMessageWithPromise;
+  f.tokenStore.sendMessageWithPromise = async (...args) => {
+    const response = await send(...args);
+    if (args[1] === "legacy_claimhangup") throw new Error("请求超时");
+    return response;
+  };
+  const result = await f.run();
+  assert.equal(result.remaining, 0);
+  assert.equal(result.legacy.status, "unconfirmed");
+  assert.match(result.legacy.error, /请求超时/);
+  assert.equal(
+    f.calls.filter((call) => call.command === "legacy_claimhangup").length,
+    1,
+  );
+});
+
+test("a changed account while claiming leaves the fragment result unconfirmed", async () => {
+  const f = fixture();
+  const send = f.tokenStore.sendMessageWithPromise;
+  f.tokenStore.sendMessageWithPromise = async (...args) => {
+    const response = await send(...args);
+    if (args[1] === "legacy_claimhangup")
+      f.tokenStore.selectedToken = { id: "other" };
+    return response;
+  };
+  const result = await f.run();
+  assert.equal(result.legacy.status, "unconfirmed");
+  assert.match(result.legacy.error, /账号或连接已变化/);
+  assert.equal(
+    f.calls.filter((call) => call.command === "legacy_claimhangup").length,
+    1,
+  );
+});
+
+test("each separate click may claim newly accumulated fragments once", async () => {
+  const f = fixture();
+  await f.run();
+  await f.run();
+  assert.equal(
+    f.calls.filter((call) => call.command === "legacy_claimhangup").length,
+    2,
   );
 });

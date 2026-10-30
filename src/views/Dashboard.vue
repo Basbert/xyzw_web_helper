@@ -37,7 +37,7 @@
           <div class="today-heading">
             <div>
               <h2>日常操作</h2>
-              <p>在日常页分别处理每日任务与盐罐挂机</p>
+              <p>在日常页分别处理每日任务与日常补给</p>
             </div>
           </div>
           <div class="today-items">
@@ -54,8 +54,8 @@
             <div class="today-item">
               <img src="/icons/173746572831736.png" alt="" />
               <div class="today-item-name">
-                <strong>盐罐与挂机</strong>
-                <span>处理盐罐、领奖励并补充挂机时间</span>
+                <strong>盐罐、挂机与残卷</strong>
+                <span>一键处理盐罐、挂机和功法残卷</span>
               </div>
             </div>
           </div>

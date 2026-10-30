@@ -38,14 +38,10 @@
       aria-label="每日常用操作"
     >
       <DailyTaskStatus />
-      <section class="maintenance-panel" aria-label="盐罐与挂机">
+      <section class="maintenance-panel" aria-label="盐罐、挂机与功法残卷">
         <div class="maintenance-heading">
-          <h2>盐罐与挂机</h2>
-          <p>启动盐罐后，先领奖励，再补足挂机时间</p>
-        </div>
-        <div class="maintenance-cards">
-          <BottleHelperCard ref="bottleHelperCard" :disabled="combinedBusy" />
-          <HangUpStatusCard ref="hangUpStatusCard" :disabled="combinedBusy" />
+          <h2>盐罐、挂机与功法残卷</h2>
+          <p>处理盐罐、先领取挂机奖励再加钟，并领取功法残卷</p>
         </div>
         <div class="combined-daily-action">
           <n-button
@@ -61,9 +57,16 @@
             "
             @click="runCombinedDailyAction"
           >
-            {{ combinedBusy ? combinedProgress : "一键处理盐罐和挂机" }}
+            {{ combinedBusy ? combinedProgress : "一键处理盐罐、挂机与残卷" }}
           </n-button>
         </div>
+        <details class="maintenance-details">
+          <summary>查看盐罐、挂机状态及单独操作</summary>
+          <div class="maintenance-cards">
+            <BottleHelperCard ref="bottleHelperCard" :disabled="combinedBusy" />
+            <HangUpStatusCard ref="hangUpStatusCard" :disabled="combinedBusy" />
+          </div>
+        </details>
       </section>
     </section>
 
@@ -451,6 +454,7 @@ const runCombinedDailyAction = async () => {
   const tokenId = tokenStore.selectedToken?.id;
   if (!tokenId) return message.warning("请先选择Token");
   if (combinedBusy.value) return;
+  const accountName = tokenStore.selectedToken?.name || "当前角色";
   combinedBusy.value = true;
   try {
     const result = await runBottleAndHangUp({
@@ -458,17 +462,21 @@ const runCombinedDailyAction = async () => {
       tokenId,
       onProgress: (text) => (combinedProgress.value = text),
     });
-    if (result.remaining) {
-      message.warning(
-        `盐罐与挂机奖励已处理，仍有 ${result.remaining} 个加钟槽位未确认`,
-      );
-    } else {
-      message.success(
-        `盐罐已启动，挂机奖励已领取，加钟已补满（本次加钟 ${result.sent} 次）`,
-      );
-    }
+    const legacyText =
+      result.legacy.status === "acknowledged"
+        ? result.legacy.received == null
+          ? "功法残卷领取请求已完成"
+          : `功法残卷领取 ${result.legacy.received} 个`
+        : `功法残卷领取未确认：${result.legacy.error}`;
+    const hangUpText = result.remaining
+      ? `还有 ${result.remaining} 个加钟槽位未确认`
+      : `加钟已补满（本次加钟 ${result.sent} 次）`;
+    const summary = `${accountName}：盐罐已启动，挂机奖励已领取，${hangUpText}；${legacyText}`;
+    if (result.remaining || result.legacy.status !== "acknowledged")
+      message.warning(summary);
+    else message.success(summary);
   } catch (error) {
-    message.error(`一键处理未完成：${error.message || "未知错误"}`);
+    message.error(`${accountName}的一键处理未完成：${error.message || "未知错误"}`);
   } finally {
     combinedBusy.value = false;
     combinedProgress.value = "";
@@ -825,7 +833,7 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  margin-bottom: 16px;
+  margin-top: 12px;
 
   :deep(.status-card) {
     min-width: 0;
@@ -871,6 +879,30 @@ onUnmounted(() => {
 
 .combined-daily-action {
   grid-column: 1 / -1;
+
+  :deep(.n-button) {
+    min-height: 52px;
+    font-size: 15px;
+    font-weight: 600;
+  }
+}
+
+.maintenance-details {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-light);
+
+  summary {
+    width: fit-content;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 13px;
+  }
+
+  summary:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 3px;
+  }
 }
 
 @media (max-width: 900px) {
