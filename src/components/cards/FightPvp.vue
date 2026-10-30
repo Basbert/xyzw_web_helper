@@ -157,7 +157,7 @@
                       <span class="red-count">红数: {{ memberData.red }}</span>
                       <span class="separator">/</span>
                       <span class="hole-count"
-                        >孔数: {{ memberData.hole }}</span
+                        >已返回词条: {{ memberData.hole }}</span
                       >
                     </td>
                   </tr>
@@ -403,7 +403,7 @@
             <n-descriptions-item label="星级">
               {{ heroModealTemp.star }}
             </n-descriptions-item>
-            <n-descriptions-item label="开孔数">
+            <n-descriptions-item label="已返回词条">
               {{ heroModealTemp.hole }}
             </n-descriptions-item>
             <n-descriptions-item label="红孔数">
@@ -460,11 +460,12 @@
               <div class="equipment-slots">
                 <div
                   v-for="(item, idx) in Object.values(
-                    Object.values(heroModealTemp.equipment)[0]?.quenches || {},
+                    Object.values(heroModealTemp.equipment || {})[0]
+                      ?.quenches || {},
                   )"
                   :key="idx"
                   class="equipment-slot"
-                  :class="{ 'red-slot': item.colorId === 6 }"
+                  :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
                 ></div>
               </div>
             </div>
@@ -473,11 +474,12 @@
               <div class="equipment-slots">
                 <div
                   v-for="(item, idx) in Object.values(
-                    Object.values(heroModealTemp.equipment)[1]?.quenches || {},
+                    Object.values(heroModealTemp.equipment || {})[1]
+                      ?.quenches || {},
                   )"
                   :key="idx"
                   class="equipment-slot"
-                  :class="{ 'red-slot': item.colorId === 6 }"
+                  :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
                 ></div>
               </div>
             </div>
@@ -486,11 +488,12 @@
               <div class="equipment-slots">
                 <div
                   v-for="(item, idx) in Object.values(
-                    Object.values(heroModealTemp.equipment)[2]?.quenches || {},
+                    Object.values(heroModealTemp.equipment || {})[2]
+                      ?.quenches || {},
                   )"
                   :key="idx"
                   class="equipment-slot"
-                  :class="{ 'red-slot': item.colorId === 6 }"
+                  :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
                 ></div>
               </div>
             </div>
@@ -499,11 +502,12 @@
               <div class="equipment-slots">
                 <div
                   v-for="(item, idx) in Object.values(
-                    Object.values(heroModealTemp.equipment)[3]?.quenches || {},
+                    Object.values(heroModealTemp.equipment || {})[3]
+                      ?.quenches || {},
                   )"
                   :key="idx"
                   class="equipment-slot"
-                  :class="{ 'red-slot': item.colorId === 6 }"
+                  :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
                 ></div>
               </div>
             </div>
@@ -530,8 +534,8 @@ import { useMessage } from "naive-ui";
 import { onMounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { isSameGameValue } from "@/utils/gameValue.js";
-
 import { gettoday } from "@/utils/goldWarrankUtils";
+
 import {
   formatWeapon,
   HERO_DICT,
@@ -539,6 +543,7 @@ import {
   legacycolor,
 } from "@/utils/HeroList";
 import { downloadCanvasAsImage } from "@/utils/imageExport";
+import { countQuenchRecords } from "@/utils/quenchCounts";
 
 defineProps({
   visible: {
@@ -847,19 +852,7 @@ const getHeroInfo = (heroObj) => {
 
 //获取装备信息红数和孔数
 const getEquipment = (equipment) => {
-  let redCount = 0;
-  let holeCount = 0;
-
-  //此处遍历4件装备
-  Object.values(equipment).forEach((equ) => {
-    //遍历每件装备的属性
-    Object.values(equ.quenches).forEach((item) => {
-      holeCount++;
-      if (isSameGameValue(item.colorId, 6)) {
-        redCount++;
-      }
-    });
-  });
+  const { redCount, recordCount: holeCount } = countQuenchRecords(equipment);
   return { redCount, holeCount };
 };
 

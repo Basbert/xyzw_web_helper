@@ -466,19 +466,24 @@
           </div>
           <div class="detail-row">
             <span
-              >总红数:
-              <span class="red-text">{{ playerInfo.totalRedCount }}</span></span
+              >红数:
+              <span class="red-text">{{
+                playerInfo.totalRedCount ?? "无法确认"
+              }}</span></span
             >
             <span
               >总开孔:
               <span class="blue-text">{{
-                playerInfo.totalHoleCount
+                playerInfo.totalHoleCount ?? "无法确认"
               }}</span></span
             >
             <span
               >四圣:
               <span class="green-text">{{ playerInfo.holyBeast }}</span></span
             >
+          </div>
+          <div v-if="playerInfo.totalHoleCount == null" class="detail-row">
+            <span>接口未确认完整孔位，暂无法统计总开孔。</span>
           </div>
         </div>
       </div>
@@ -513,8 +518,8 @@
               <div class="hero-stats">
                 <span>战力: {{ formatNumber(hero.power || 0) }}</span>
                 <span>星级: {{ hero.star || 0 }}</span>
-                <span>红数: {{ hero.red || 0 }}</span>
-                <span>开孔: {{ hero.hole || 0 }}</span>
+                <span>红数: {{ hero.red ?? "无法确认" }}</span>
+                <span>开孔: {{ hero.hole ?? "无法确认" }}</span>
                 <span :class="hero.HolyBeast ? 'opened' : 'closed'">
                   {{ hero.HolyBeast ? "已开四圣" : "未开四圣" }}
                 </span>
@@ -590,10 +595,10 @@
             {{ heroModealTemp.star }}
           </NDescriptionsItem>
           <NDescriptionsItem label="开孔数">
-            {{ heroModealTemp.hole }}
+            {{ heroModealTemp.hole ?? "无法确认" }}
           </NDescriptionsItem>
           <NDescriptionsItem label="红孔数">
-            {{ heroModealTemp.red }}
+            {{ heroModealTemp.red ?? "无法确认" }}
           </NDescriptionsItem>
           <NDescriptionsItem label="四圣状态">
             {{ heroModealTemp.HolyBeast ? "已激活" : "未激活" }}
@@ -643,11 +648,12 @@
             <div class="equipment-slots">
               <div
                 v-for="(item, idx) in Object.values(
-                  Object.values(heroModealTemp.equipment)[0]?.quenches || {},
+                  Object.values(heroModealTemp.equipment || {})[0]?.quenches ||
+                    {},
                 )"
                 :key="idx"
                 class="equipment-slot"
-                :class="{ 'red-slot': item.colorId === 6 }"
+                :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
               ></div>
             </div>
           </div>
@@ -656,11 +662,12 @@
             <div class="equipment-slots">
               <div
                 v-for="(item, idx) in Object.values(
-                  Object.values(heroModealTemp.equipment)[1]?.quenches || {},
+                  Object.values(heroModealTemp.equipment || {})[1]?.quenches ||
+                    {},
                 )"
                 :key="idx"
                 class="equipment-slot"
-                :class="{ 'red-slot': item.colorId === 6 }"
+                :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
               ></div>
             </div>
           </div>
@@ -669,11 +676,12 @@
             <div class="equipment-slots">
               <div
                 v-for="(item, idx) in Object.values(
-                  Object.values(heroModealTemp.equipment)[2]?.quenches || {},
+                  Object.values(heroModealTemp.equipment || {})[2]?.quenches ||
+                    {},
                 )"
                 :key="idx"
                 class="equipment-slot"
-                :class="{ 'red-slot': item.colorId === 6 }"
+                :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
               ></div>
             </div>
           </div>
@@ -682,11 +690,12 @@
             <div class="equipment-slots">
               <div
                 v-for="(item, idx) in Object.values(
-                  Object.values(heroModealTemp.equipment)[3]?.quenches || {},
+                  Object.values(heroModealTemp.equipment || {})[3]?.quenches ||
+                    {},
                 )"
                 :key="idx"
                 class="equipment-slot"
-                :class="{ 'red-slot': item.colorId === 6 }"
+                :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
               ></div>
             </div>
           </div>
@@ -745,6 +754,7 @@ import {
   LINEUP_RULES,
 } from "@/utils/HeroList";
 import { downloadCanvasAsImage } from "@/utils/imageExport";
+import { countQuenchRecords, findOwnHeroEquipment } from "@/utils/quenchCounts";
 import ClubHistoryRecords from "./ClubHistoryRecords.vue";
 import ClubIslandPanel from "./ClubIslandPanel.vue";
 import ClubWeirdTowerInfo from "./ClubWeirdTowerInfo.vue";
@@ -810,10 +820,7 @@ const isExporting = ref(false);
 const exportDom = ref(null);
 
 // 提取英雄信息
-const getHeroInfo = (heroObj) => {
-  //统计总红数
-  let redCount = 0;
-  let holeCount = 0;
+const getHeroInfo = (heroObj, targetRoleId, ownRole) => {
   let heroList = [];
 
   try {
@@ -828,7 +835,7 @@ const getHeroInfo = (heroObj) => {
       heroesToProcess = Object.values(heroObj);
     } else {
       console.error("英雄数据格式错误:", typeof heroObj);
-      return { redCount, holeCount, heroList };
+      return { redCount: null, holeCount: null, heroList };
     }
 
     heroesToProcess.forEach((hero, index) => {
@@ -839,9 +846,9 @@ const getHeroInfo = (heroObj) => {
       const id = hero.heroId || hero.id;
 
       const heroInfo = HERO_DICT[id] || {};
-      const equipmentInfo = hero.equipment
-        ? getEquipment(hero.equipment)
-        : { redCount: 0, holeCount: 0 };
+      const ownEquipment = findOwnHeroEquipment(targetRoleId, ownRole, id);
+      const equipment = ownEquipment || hero.equipment || {};
+      const equipmentInfo = countQuenchRecords(equipment);
 
       // 检查英雄基本信息
       const heroId = id || `unknown_${index}`;
@@ -853,12 +860,12 @@ const getHeroInfo = (heroObj) => {
         artifactId: hero.artifactId || "", //英雄装备ID，用于匹配鱼灵信息
         power: hero.power || 0, //英雄战力
         star: hero.star || 0, //英雄星级
-        equipment: hero.equipment, //英雄具体孔数和红数
+        equipment,
         heroName, //英雄姓名
         heroAvate: hero.heroAvate || hero.headImg || heroInfo.avatar || "",
         level: hero.level || 0, //英雄等级
-        hole: equipmentInfo.holeCount, //英雄开孔数量
-        red: equipmentInfo.redCount, //英雄红数
+        hole: ownEquipment ? equipmentInfo.recordCount : null,
+        red: equipmentInfo.hasRecords ? equipmentInfo.redCount : null,
         // 兼容 hB 和 fourBasest
         HolyBeast: hero.hB?.active === true || hero.fourBasest?.level > 0, //激活四圣
         HBlevel: hero.hB?.order || hero.fourBasest?.level || 0, //四圣等级
@@ -870,8 +877,6 @@ const getHeroInfo = (heroObj) => {
 
       // 只添加有效的英雄
       if (heroId) {
-        redCount += tempObj.red;
-        holeCount += tempObj.hole;
         heroList.push(tempObj);
       }
     });
@@ -882,24 +887,11 @@ const getHeroInfo = (heroObj) => {
   // 按站位排序
   heroList.sort((a, b) => a.battleTeamSlot - b.battleTeamSlot);
 
-  return { redCount, holeCount, heroList };
-};
-
-// 获取装备信息红数和孔数
-const getEquipment = (equipment) => {
-  let redCount = 0;
-  let holeCount = 0;
-  //遍历4件装备
-  Object.values(equipment).forEach((equ) => {
-    //遍历每件装备的属性
-    Object.values(equ.quenches).forEach((item) => {
-      holeCount++;
-      if (isSameGameValue(item.colorId, 6)) {
-        redCount++;
-      }
-    });
-  });
-  return { redCount, holeCount };
+  const sumKnown = (key) =>
+    heroList.length > 0 && heroList.every((hero) => hero[key] != null)
+      ? heroList.reduce((total, hero) => total + hero[key], 0)
+      : null;
+  return { redCount: sumKnown("red"), holeCount: sumKnown("hole"), heroList };
 };
 
 const selectHeroInfo = (heroInfo) => {
@@ -1116,13 +1108,17 @@ const fetchTargetInfo = async (roleId) => {
     const fishInfo = HeroFillInfo(result.roleInfo);
 
     // 获取英雄信息
-    let heroAndholdAndRed = { redCount: 0, holeCount: 0, heroList: [] };
+    let heroAndholdAndRed = { redCount: null, holeCount: null, heroList: [] };
     if (result.roleInfo.heroes) {
       try {
-        heroAndholdAndRed = getHeroInfo(result.roleInfo.heroes);
+        heroAndholdAndRed = getHeroInfo(
+          result.roleInfo.heroes,
+          roleId,
+          tokenStore.gameData?.roleInfo?.role,
+        );
       } catch (error) {
         console.error("处理英雄信息失败:", error);
-        heroAndholdAndRed = { redCount: 0, holeCount: 0, heroList: [] };
+        heroAndholdAndRed = { redCount: null, holeCount: null, heroList: [] };
       }
     }
 

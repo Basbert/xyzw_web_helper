@@ -197,9 +197,12 @@
             </p>
             <p>俱乐部: {{ playerInfo.legionName || "无" }}</p>
             <p>
-              总红数: {{ playerInfo.totalRedCount || 0 }} | 总开孔数:
+              总红数: {{ playerInfo.totalRedCount || 0 }} | 已返回词条:
               {{ playerInfo.totalHoleCount || 0 }} | 四圣数:
               {{ playerInfo.holyBeast || 0 }}
+            </p>
+            <p style="font-size: 12px; color: #777">
+              已返回词条可能少于实际开孔数。
             </p>
           </div>
         </div>
@@ -411,7 +414,7 @@
                   <span>战力: {{ formatPower(hero.power || 0) }}</span>
                   <span>星级: {{ hero.star || 0 }}</span>
                   <span>红数: {{ hero.red || 0 }}</span>
-                  <span>开孔: {{ hero.hole || 0 }}</span>
+                  <span>已返回词条: {{ hero.hole || 0 }}</span>
                   <span :class="hero.HolyBeast ? 'opened' : 'closed'">
                     {{ hero.HolyBeast ? "已开四圣" : "未开四圣" }}
                   </span>
@@ -483,7 +486,7 @@
             <NDescriptionsItem label="星级">
               {{ heroModealTemp.star }}
             </NDescriptionsItem>
-            <NDescriptionsItem label="开孔数">
+            <NDescriptionsItem label="已返回词条">
               {{ heroModealTemp.hole }}
             </NDescriptionsItem>
             <NDescriptionsItem label="红孔数">
@@ -537,11 +540,12 @@
               <div class="equipment-slots">
                 <div
                   v-for="(item, idx) in Object.values(
-                    Object.values(heroModealTemp.equipment)[0]?.quenches || {},
+                    Object.values(heroModealTemp.equipment || {})[0]
+                      ?.quenches || {},
                   )"
                   :key="idx"
                   class="equipment-slot"
-                  :class="{ 'red-slot': item.colorId === 6 }"
+                  :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
                 ></div>
               </div>
             </div>
@@ -550,11 +554,12 @@
               <div class="equipment-slots">
                 <div
                   v-for="(item, idx) in Object.values(
-                    Object.values(heroModealTemp.equipment)[1]?.quenches || {},
+                    Object.values(heroModealTemp.equipment || {})[1]
+                      ?.quenches || {},
                   )"
                   :key="idx"
                   class="equipment-slot"
-                  :class="{ 'red-slot': item.colorId === 6 }"
+                  :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
                 ></div>
               </div>
             </div>
@@ -563,11 +568,12 @@
               <div class="equipment-slots">
                 <div
                   v-for="(item, idx) in Object.values(
-                    Object.values(heroModealTemp.equipment)[2]?.quenches || {},
+                    Object.values(heroModealTemp.equipment || {})[2]
+                      ?.quenches || {},
                   )"
                   :key="idx"
                   class="equipment-slot"
-                  :class="{ 'red-slot': item.colorId === 6 }"
+                  :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
                 ></div>
               </div>
             </div>
@@ -576,11 +582,12 @@
               <div class="equipment-slots">
                 <div
                   v-for="(item, idx) in Object.values(
-                    Object.values(heroModealTemp.equipment)[3]?.quenches || {},
+                    Object.values(heroModealTemp.equipment || {})[3]
+                      ?.quenches || {},
                   )"
                   :key="idx"
                   class="equipment-slot"
-                  :class="{ 'red-slot': item.colorId === 6 }"
+                  :class="{ 'red-slot': isSameGameValue(item?.colorId, 6) }"
                 ></div>
               </div>
             </div>
@@ -618,6 +625,7 @@ import { gettoday } from "@/utils/clubWarrankUtils";
 import { isSameGameValue } from "@/utils/gameValue.js";
 import { HERO_DICT, HeroFillInfo, legacycolor } from "@/utils/HeroList";
 import { downloadCanvasAsImage } from "@/utils/imageExport";
+import { countQuenchRecords } from "@/utils/quenchCounts";
 
 const props = defineProps({
   visible: {
@@ -729,18 +737,7 @@ const selectHeroInfo = (heroInfo) => {
 
 // 获取装备信息红数和孔数
 const getEquipment = (equipment) => {
-  let redCount = 0;
-  let holeCount = 0;
-  //遍历4件装备
-  Object.values(equipment).forEach((equ) => {
-    //遍历每件装备的属性
-    Object.values(equ.quenches).forEach((item) => {
-      holeCount++;
-      if (isSameGameValue(item.colorId, 6)) {
-        redCount++;
-      }
-    });
-  });
+  const { redCount, recordCount: holeCount } = countQuenchRecords(equipment);
   return { redCount, holeCount };
 };
 
