@@ -109,3 +109,23 @@ for (const [file, name] of [
     assert.deepEqual(errors, []);
   });
 }
+
+test("game client notifies additional subscribers without replacing the store listener", async () => {
+  const { client } = await createClient(
+    "xyzwWebSocket.js",
+    "XyzwWebSocketClient",
+  );
+  const received = [];
+  client.setMessageListener((packet) => received.push(`store:${packet.cmd}`));
+  const unsubscribe = client.subscribeMessages((packet) =>
+    received.push(`extra:${packet.cmd}`),
+  );
+  client._dispatchMessage({ cmd: "pkroom_fightnotify" });
+  unsubscribe();
+  client._dispatchMessage({ cmd: "other" });
+  assert.deepEqual(received, [
+    "store:pkroom_fightnotify",
+    "extra:pkroom_fightnotify",
+    "store:other",
+  ]);
+});

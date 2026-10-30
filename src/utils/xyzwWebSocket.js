@@ -337,6 +337,15 @@ export function registerDefaultCommands(reg) {
 
     // 梦魇相关
     .register("nightmare_getroleinfo")
+    // 免费对战房间（十殿模拟）
+    .register("pkroom_create")
+    .register("pkroom_getroominfo")
+    .register("pkroom_calcteam")
+    .register("pkroom_setpkteam")
+    .register("pkroom_setready")
+    .register("pkroom_startbattle")
+    .register("pkroom_cancelqueue")
+    .register("pkroom_dismiss")
     .register("dungeon_selecthero")
     .register("bosstower_gethelprank")
     .register("dungeon_buymerchant")
@@ -500,6 +509,7 @@ export class XyzwWebSocketClient {
 
     this.dialogStatus = false;
     this.messageListener = null;
+    this.messageSubscribers = new Set();
     this.showMsg = false;
     this.connected = false;
     this.isReconnecting = false; // 重连状态标志
@@ -620,9 +630,7 @@ export class XyzwWebSocketClient {
                 }
 
                 // 回调处理
-                if (this.messageListener) {
-                  this.messageListener(packet);
-                }
+                this._dispatchMessage(packet);
 
                 // Promise 响应处理
                 if (this.socket === socket) this._handlePromiseResponse(packet);
@@ -696,9 +704,7 @@ export class XyzwWebSocketClient {
         }
 
         // 回调处理
-        if (this.messageListener) {
-          this.messageListener(packet);
-        }
+        this._dispatchMessage(packet);
 
         // Promise 响应处理
         if (this.socket === socket) this._handlePromiseResponse(packet);
@@ -737,6 +743,23 @@ export class XyzwWebSocketClient {
   /** 注册消息回调 */
   setMessageListener(fn) {
     this.messageListener = fn;
+  }
+
+  /** Observe incoming packets without replacing the store's message listener. */
+  subscribeMessages(fn) {
+    this.messageSubscribers.add(fn);
+    return () => this.messageSubscribers.delete(fn);
+  }
+
+  _dispatchMessage(packet) {
+    if (this.messageListener) this.messageListener(packet);
+    for (const subscriber of this.messageSubscribers) {
+      try {
+        subscriber(packet);
+      } catch (error) {
+        wsLogger.warn("消息订阅回调失败:", error);
+      }
+    }
   }
 
   /** 控制台消息开关 */

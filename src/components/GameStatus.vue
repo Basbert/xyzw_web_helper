@@ -2,7 +2,7 @@
   <div
     class="game-status-container"
     :class="{
-      'full-grid': activeSection === 'fightPvp',
+      'full-grid': activeSection === 'fightPvp' || activeSection === 'tenHall',
       'full-page-mode':
         activeSection === 'saltFieldGroup' ||
         activeSection === 'campChallengeGroup' ||
@@ -30,6 +30,7 @@
       <n-tab-pane name="peachGroup" tab="蟠桃园" />
       <n-tab-pane name="rankGroup" tab="排行榜" />
       <n-tab-pane name="fightPvp" tab="切磋" />
+      <n-tab-pane name="tenHall" tab="模拟十殿" />
     </n-tabs>
 
     <section
@@ -80,7 +81,7 @@
       <TeamFormation />
     </section>
 
-    <details class="role-details">
+    <details v-if="activeSection !== 'tenHall'" class="role-details">
       <summary>角色资料与资源</summary>
       <IdentityCard embedded />
     </details>
@@ -394,6 +395,7 @@
     </div>
     <!-- 切磋（提取组件） -->
     <FightPvp v-if="activeSection === 'fightPvp'" />
+    <TenHallSimulator v-if="activeSection === 'tenHall'" />
   </div>
 </template>
 
@@ -421,6 +423,7 @@ import ServerRankList from "./cards/ServerRankListPageCard.vue";
 import SkinChallengeCard from "./cards/SkinChallengeCard.vue";
 import StarUpgradeCard from "./cards/StarUpgradeCard.vue";
 import StudyChallengeCard from "./cards/StudyChallengeCard.vue";
+import TenHallSimulator from "./cards/TenHallSimulator.vue";
 import TopClubList from "./cards/TopClubListPageCard.vue";
 import TopRankList from "./cards/TopRankListPageCard.vue";
 import Unlimitedlineup from "./cards/Unlimitedlineup.vue";
@@ -476,7 +479,9 @@ const runCombinedDailyAction = async () => {
       message.warning(summary);
     else message.success(summary);
   } catch (error) {
-    message.error(`${accountName}的一键处理未完成：${error.message || "未知错误"}`);
+    message.error(
+      `${accountName}的一键处理未完成：${error.message || "未知错误"}`,
+    );
   } finally {
     combinedBusy.value = false;
     combinedProgress.value = "";

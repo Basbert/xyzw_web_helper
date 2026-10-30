@@ -71,6 +71,7 @@ declare module 'vue' {
     StudyChallengeCard: typeof import('./src/components/cards/StudyChallengeCard.vue')['default']
     TeamFormation: typeof import('./src/components/Team/TeamFormation.vue')['default']
     TeamStatus: typeof import('./src/components/Team/TeamStatus.vue')['default']
+    TenHallSimulator: typeof import('./src/components/cards/TenHallSimulator.vue')['default']
     ThemeToggle: typeof import('./src/components/Common/ThemeToggle.vue')['default']
     TokenManager: typeof import('./src/components/TokenManager.vue')['default']
     TopClubListPageCard: typeof import('./src/components/cards/TopClubListPageCard.vue')['default']
