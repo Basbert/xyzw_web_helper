@@ -105,6 +105,21 @@ export function makeTenHallTeam(role, roomId) {
   };
 }
 
+function teamSignature(team, petId) {
+  const slots = [...team.battleTeam.keys()].sort((a, b) => a - b);
+  return JSON.stringify({
+    heroes: slots.map((slot) => [
+      slot,
+      team.battleTeam.get(slot),
+      team.heroLevel.get(slot),
+      team.newHeroArtifact.get(slot),
+    ]),
+    weapon: team.lordWeaponId,
+    pet: team.petUId,
+    petId: Number(petId) || 0,
+  });
+}
+
 function isOwnedSimulationRoom(room, roleId, hall) {
   return (
     !!room?.roomId &&
@@ -127,6 +142,7 @@ function createMailbox(client, onQueue) {
         "pkroom_queuenotify",
         "pkroom_queuecreatenotify",
         "pkroom_fightnotify",
+        "pkroom_endnotify",
       ].includes(command) ||
       packet.code
     ) {
@@ -199,6 +215,10 @@ export async function runTenHallSimulation({
   hall,
   signal,
   onProgress = () => {},
+  onBattleResult = () => {},
+  confirmLoadout,
+  expectedLoadout,
+  waitForRoomEnd = false,
 }) {
   const client = tokenStore.getWebSocketClient(tokenId);
   const assertConnection = () => {
@@ -241,8 +261,27 @@ export async function runTenHallSimulation({
     const role = response?.role;
     roleId = role?.roleId;
     if (!roleId) throw new Error("无法读取当前角色信息");
-    // Validate the team before creating any room.
-    makeTenHallTeam(role, "");
+    // Freeze the confirmed team before creating a room.
+    const team = makeTenHallTeam(role, "");
+    const petId = role.pet?.petId;
+    const signature = teamSignature(team, petId);
+    if (expectedLoadout && expectedLoadout !== signature) {
+      throw new Error("当前阵容、玩具或宠物已变化，请重新确认后再模拟");
+    }
+    if (confirmLoadout) {
+      const confirmed = await confirmLoadout({
+        roleName: role.name,
+        hall,
+        heroes: [...team.battleTeam]
+          .sort(([a], [b]) => a - b)
+          .map(([slot, heroId]) => ({ slot, heroId })),
+        weaponId: team.lordWeaponId,
+        petId,
+        hasPet: !!team.petUId,
+      });
+      if (!confirmed) throw abortError();
+    }
+    assertConnection();
     const roomRequest = makeTenHallRoomRequest(role.name, hall);
     onProgress("正在创建免费模拟房");
     let created;
@@ -265,6 +304,9 @@ export async function runTenHallSimulation({
           throw new Error(
             "游戏未能创建免费房间（错误 7300008），请检查免费房间的开放时间后重试",
           );
+        }
+        if (createError?.message?.includes("7300032")) {
+          throw new Error("服务器暂时拒绝创建免费房间（7300032），请稍后重试");
         }
         throw createError || new Error("游戏未返回模拟房间信息");
       }
@@ -289,7 +331,7 @@ export async function runTenHallSimulation({
       throw new Error("服务器返回的房间与免费模拟设置不一致");
     }
     checkAbort(signal);
-    const team = makeTenHallTeam(role, roomId);
+    team.roomId = roomId;
     onProgress("正在设置当前阵容");
     await send("pkroom_calcteam", team);
     const afterCalc = (await send("pkroom_getroominfo", { roomId }))?.roomInfo;
@@ -364,10 +406,36 @@ export async function runTenHallSimulation({
       fight.body.battleData,
       result.ownSide,
       team,
-      role.pet?.petId,
+      petId,
     );
     completed = true;
-    return { hall, ...result, loadout };
+    const battleResult = {
+      hall,
+      ...result,
+      loadout,
+      loadoutSignature: signature,
+    };
+    onBattleResult(battleResult);
+    if (waitForRoomEnd) {
+      onProgress("正在等待本场房间结束");
+      try {
+        await mailbox.wait(
+          (event) => {
+            const returnedRoomId = event.body?.roomInfo?.roomId;
+            return (
+              event.command === "pkroom_endnotify" &&
+              (!returnedRoomId || String(returnedRoomId) === String(roomId))
+            );
+          },
+          120000,
+          signal,
+        );
+      } catch (error) {
+        if (error.name === "AbortError") throw error;
+        throw new Error("战报已记录，但未收到房间结束通知，已停止后续模拟");
+      }
+    }
+    return battleResult;
   } finally {
     mailbox.close();
     const canClean =

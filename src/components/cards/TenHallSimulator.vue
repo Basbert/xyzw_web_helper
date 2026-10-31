@@ -23,8 +23,26 @@
             <span>{{ option.label }}</span>
           </label>
         </div>
+        <h3>模拟次数</h3>
+        <div
+          class="hall-options count-options"
+          role="radiogroup"
+          aria-label="模拟次数"
+        >
+          <label v-for="option in [1, 10, 20]" :key="option">
+            <input
+              v-model="count"
+              type="radio"
+              name="ten-hall-count"
+              :value="option"
+              :disabled="running"
+            />
+            <span>{{ option }} 次</span>
+          </label>
+        </div>
         <p class="setup-note">
-          使用当前主线阵容、玩具和宠物，不消耗正式十殿挑战次数。
+          读取当前主线阵容，确认后开始。不消耗正式十殿挑战次数。
+          多次模拟时，每场之间约间隔 10 秒；中断时保留已完成的战报。
         </p>
         <n-button
           type="primary"
@@ -38,7 +56,7 @@
             running
               ? "模拟进行中"
               : connected
-                ? "开始模拟"
+                ? "查看阵容并模拟"
                 : "连接角色后开始模拟"
           }}
         </n-button>
@@ -59,9 +77,67 @@
 
       <section class="result" aria-label="模拟结果">
         <template v-if="result">
+          <div v-if="runCount > 1" class="series-summary" aria-live="polite">
+            <strong
+              >已完成 {{ seriesResults.length }} / {{ runCount }} 场</strong
+            >
+            <p>
+              胜 {{ summary.wins }} · 负 {{ summary.losses
+              }}<template v-if="summary.unknown">
+                · 未知 {{ summary.unknown }}</template
+              >
+            </p>
+            <p v-if="summary.wins + summary.losses">
+              已确认场次胜率
+              {{
+                Math.round(
+                  (summary.wins / (summary.wins + summary.losses)) * 100,
+                )
+              }}%
+            </p>
+            <p v-if="summary.averageRounds !== null">
+              胜利平均 {{ summary.averageRounds }} 回合<span
+                v-if="summary.roundSamples < summary.wins"
+                >（{{ summary.roundSamples }} 场有回合数据）</span
+              >
+              · 无下将胜利 {{ summary.noDownWins }} 场
+            </p>
+            <p v-if="summary.best">
+              最佳样本：第 {{ summary.best.index }} 场 · 下将
+              {{ summary.best.downCount }} · {{ summary.best.rounds }} 回合
+            </p>
+            <p v-if="summary.best" class="summary-note">
+              优先比较胜利场次的下将数，再比较回合数
+            </p>
+            <details>
+              <summary>查看每场结果</summary>
+              <ol>
+                <li v-for="(item, index) in seriesResults" :key="index">
+                  第 {{ index + 1 }} 场：{{
+                    item.isWin === null
+                      ? "胜负未知"
+                      : item.isWin
+                        ? "胜利"
+                        : "失败"
+                  }}
+                  · {{ item.rounds ?? "—" }} 回合 ·
+                  {{
+                    item.downCount === null
+                      ? "下将未知"
+                      : `下将 ${item.downCount}`
+                  }}
+                </li>
+              </ol>
+            </details>
+          </div>
           <div class="result-heading">
             <div>
-              <span>{{ hallLabel(result.hall) }} · 模拟结果</span>
+              <span
+                >{{ hallLabel(result.hall) }} ·
+                {{
+                  runCount > 1 ? `第 ${seriesResults.length} 场` : "模拟结果"
+                }}</span
+              >
               <h3
                 :class="
                   result.isWin === null ? '' : result.isWin ? 'win' : 'lose'
@@ -146,6 +222,58 @@
         </div>
       </section>
     </div>
+    <n-modal
+      :show="!!confirmation"
+      preset="card"
+      title="确认出战阵容"
+      :closable="false"
+      :mask-closable="false"
+      :close-on-esc="false"
+      style="width: min(520px, calc(100vw - 32px))"
+    >
+      <template v-if="confirmation">
+        <p class="confirm-intro">
+          {{ confirmation.roleName || "当前角色" }} ·
+          {{ hallLabel(confirmation.hall) }} · {{ confirmation.count }} 次
+        </p>
+        <p class="confirm-note">
+          这是刚从游戏读取的当前主线阵容。确认后会按此阵容模拟；如需调整，请先取消并在游戏中换阵。
+        </p>
+        <ul class="confirm-heroes">
+          <li v-for="hero in confirmation.heroes" :key="hero.slot">
+            <span>{{ hero.slot + 1 }} 号位</span>
+            <strong>{{
+              heroInfo(hero.heroId)?.name || `武将 ${hero.heroId}`
+            }}</strong>
+          </li>
+        </ul>
+        <div class="confirm-equipment">
+          <span
+            >玩具
+            <strong>{{
+              confirmation.weaponId
+                ? weapon[confirmation.weaponId] ||
+                  `玩具 ${confirmation.weaponId}`
+                : "未携带"
+            }}</strong></span
+          >
+          <span
+            >宠物
+            <strong>{{
+              confirmation.hasPet
+                ? PET_DICT[confirmation.petId]?.name || "已携带（名称未知）"
+                : "未携带"
+            }}</strong></span
+          >
+        </div>
+        <div class="confirm-actions">
+          <n-button @click="settleConfirmation?.(false)">取消</n-button>
+          <n-button type="primary" @click="settleConfirmation?.(true)"
+            >确认并开始</n-button
+          >
+        </div>
+      </template>
+    </n-modal>
   </section>
 </template>
 
@@ -154,7 +282,10 @@ import { computed, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { HERO_DICT, weapon } from "@/utils/HeroList";
 import { PET_DICT } from "@/utils/PetList";
-import { runTenHallSimulation } from "@/utils/tenHallSimulation";
+import {
+  runTenHallSeries,
+  summarizeTenHallResults,
+} from "@/utils/tenHallSeries";
 
 const tokenStore = useTokenStore();
 const labels = ["一", "二", "三", "四", "五", "六", "七", "八"];
@@ -166,11 +297,17 @@ const hallLabel = (value) =>
   halls.find((item) => item.value === value)?.label || `第${value}殿`;
 const heroInfo = (id) => HERO_DICT[id];
 const hall = ref(1);
+const count = ref(1);
+const runCount = ref(1);
 const running = ref(false);
 const cancelling = ref(false);
 const progress = ref("");
 const errorText = ref("");
 const result = ref(null);
+const seriesResults = ref([]);
+const confirmation = ref(null);
+const summary = computed(() => summarizeTenHallResults(seriesResults.value));
+let settleConfirmation = null;
 let controller = null;
 
 const connected = computed(() => {
@@ -214,32 +351,69 @@ function loadoutClass(item) {
   return ["mismatch", "unknown"].includes(item.status) ? "loadout-issue" : "";
 }
 
+function requestConfirmation(loadout, signal, selectedCount) {
+  return new Promise((resolve) => {
+    const onAbort = () => finish(false);
+    function finish(confirmed) {
+      signal.removeEventListener("abort", onAbort);
+      confirmation.value = null;
+      settleConfirmation = null;
+      resolve(confirmed);
+    }
+    settleConfirmation = finish;
+    signal.addEventListener("abort", onAbort, { once: true });
+    if (signal.aborted) return finish(false);
+    confirmation.value = { ...loadout, count: selectedCount };
+  });
+}
+
 async function startSimulation() {
   if (running.value || !connected.value) return;
   const tokenId = tokenStore.selectedToken.id;
   const chosenHall = hall.value;
+  const chosenCount = count.value;
+  runCount.value = chosenCount;
   controller = new AbortController();
+  const signal = controller.signal;
   running.value = true;
   cancelling.value = false;
   progress.value = "";
   errorText.value = "";
   result.value = null;
+  seriesResults.value = [];
   try {
-    const nextResult = await runTenHallSimulation({
+    const completed = await runTenHallSeries({
       tokenStore,
       tokenId,
       hall: chosenHall,
-      signal: controller.signal,
+      count: chosenCount,
+      signal,
+      confirmLoadout: (loadout) =>
+        requestConfirmation(loadout, signal, chosenCount),
       onProgress: (value) => (progress.value = value),
+      onResult: (results) => {
+        if (tokenStore.selectedToken?.id !== tokenId) return;
+        seriesResults.value = results;
+        result.value = results.at(-1);
+      },
     });
     if (tokenStore.selectedToken?.id === tokenId) {
-      result.value = nextResult;
-      progress.value = "模拟完成";
+      if (completed.error?.name === "AbortError") {
+        progress.value = `已停止，保留 ${completed.results.length} 场结果`;
+      } else if (completed.error) {
+        progress.value = `已完成 ${completed.results.length} / ${chosenCount} 场`;
+        errorText.value = completed.error.message || "后续模拟未完成";
+      } else {
+        progress.value = `模拟完成，共 ${completed.results.length} 场`;
+      }
     }
   } catch (error) {
     if (tokenStore.selectedToken?.id === tokenId) {
-      progress.value = "";
-      errorText.value = error.message || "模拟失败，请稍后重试";
+      progress.value = error.name === "AbortError" ? "已取消模拟" : "";
+      errorText.value =
+        error.name === "AbortError"
+          ? ""
+          : error.message || "模拟失败，请稍后重试";
     }
   } finally {
     running.value = false;
@@ -259,6 +433,7 @@ watch(
   () => {
     controller?.abort();
     result.value = null;
+    seriesResults.value = [];
     progress.value = "";
     errorText.value = "";
   },
@@ -329,6 +504,9 @@ onUnmounted(() => controller?.abort());
   gap: 8px;
   margin: 14px 0;
 }
+.count-options {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
 .hall-options label {
   position: relative;
 }
@@ -394,6 +572,70 @@ onUnmounted(() => controller?.abort());
   border-radius: 12px;
   background: var(--bg-secondary);
   padding: 20px;
+}
+.series-summary {
+  border-bottom: 1px solid var(--border-light);
+  padding-bottom: 16px;
+  margin-bottom: 18px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.result .series-summary p {
+  margin-top: 4px;
+}
+.series-summary .summary-note,
+.series-summary details {
+  color: var(--text-secondary);
+}
+.series-summary details {
+  margin-top: 8px;
+}
+.series-summary summary {
+  cursor: pointer;
+}
+.series-summary ol {
+  max-height: 200px;
+  overflow-y: auto;
+  padding-left: 22px;
+}
+.confirm-intro {
+  font-weight: 700;
+}
+.confirm-note {
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.confirm-heroes {
+  list-style: none;
+  margin: 16px 0;
+  padding: 0;
+  border-top: 1px solid var(--border-light);
+}
+.confirm-heroes li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border-light);
+}
+.confirm-heroes li span {
+  color: var(--text-secondary);
+}
+.confirm-equipment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 28px;
+  color: var(--text-secondary);
+}
+.confirm-equipment strong {
+  margin-left: 6px;
+  color: var(--text-primary);
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
 }
 .result-heading span,
 .roster-title span {

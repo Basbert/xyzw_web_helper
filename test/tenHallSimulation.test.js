@@ -26,6 +26,8 @@ function mockGame({
   unavailable = false,
   roomChange = {},
   battleChange = {},
+  roleResponse = role,
+  roomEndNotify = false,
 } = {}) {
   const calls = [];
   const listeners = new Set();
@@ -65,7 +67,7 @@ function mockGame({
     getWebSocketStatus: () => "connected",
     async sendMessageWithPromise(_id, command, params) {
       calls.push({ command, params });
-      if (command === "role_getroleinfo") return { role };
+      if (command === "role_getroleinfo") return { role: roleResponse };
       if (command === "pkroom_create") {
         if (unavailable) throw new Error("服务器错误: 7300008 - 未知错误");
         activeHall = params.roomRule.nM;
@@ -115,6 +117,10 @@ function mockGame({
             },
           },
         });
+        if (roomEndNotify)
+          client.emit("pkroom_endnotify", {
+            roomInfo: { roomId: "test-room" },
+          });
         return { roomInfo: {} };
       }
       if (command === "pkroom_cancelqueue" || command === "pkroom_dismiss")
@@ -194,6 +200,99 @@ test("captures an early fight notification and interprets the actual result", as
     ],
   );
   assert.equal(game.calls.at(-1).params.battleVersion, 240521);
+});
+
+test("shows the current team for confirmation before creating a room", async () => {
+  const game = mockGame();
+  let shown;
+  const result = await run(game, {
+    confirmLoadout: async (value) => {
+      shown = value;
+      assert.deepEqual(
+        game.calls.map((call) => call.command),
+        ["role_getroleinfo"],
+      );
+      return true;
+    },
+  });
+  assert.deepEqual(shown.heroes, [
+    { slot: 0, heroId: 104 },
+    { slot: 1, heroId: 105 },
+  ]);
+  assert.equal(shown.weaponId, 2);
+  assert.equal(shown.petId, 501);
+  assert.equal(shown.hasPet, true);
+  assert.ok(result.isWin);
+});
+
+test("cancelling confirmation or switching roles does not create a room", async () => {
+  const cancelled = mockGame();
+  await assert.rejects(run(cancelled, { confirmLoadout: async () => false }), {
+    name: "AbortError",
+  });
+  assert.ok(!cancelled.calls.some((call) => call.command === "pkroom_create"));
+  const switched = mockGame();
+  await assert.rejects(
+    run(switched, {
+      confirmLoadout: async () => {
+        switched.tokenStore.selectedToken = { id: "other" };
+        return true;
+      },
+    }),
+    /角色已切换/,
+  );
+  assert.ok(!switched.calls.some((call) => call.command === "pkroom_create"));
+});
+
+test("stops before opening a later room if the confirmed configuration changed", async () => {
+  const first = await run(mockGame());
+  for (const altered of [
+    { ...role, battleTeam: { 0: { heroId: 105 }, 1: { heroId: 104 } } },
+    { ...role, lordWeaponId: 3 },
+    { ...role, pet: { petId: 501, petUId: "other" } },
+    {
+      ...role,
+      heroes: { ...role.heroes, 104: { ...role.heroes[104], level: 6001 } },
+    },
+  ]) {
+    const game = mockGame({ roleResponse: altered });
+    await assert.rejects(
+      run(game, { expectedLoadout: first.loadoutSignature }),
+      /已变化/,
+    );
+    assert.ok(!game.calls.some((call) => call.command === "pkroom_create"));
+  }
+});
+
+test("captures the room-end notification even when it arrives before the request completes", async () => {
+  const game = mockGame({ roomEndNotify: true });
+  let seen;
+  const result = await run(game, {
+    waitForRoomEnd: true,
+    onBattleResult: (value) => {
+      seen = value;
+    },
+  });
+  assert.equal(seen.rounds, 12);
+  assert.equal(result.isWin, true);
+  assert.equal(game.listeners.size, 0);
+});
+
+test("cancelling while waiting for room end keeps the result and does not dismiss a completed battle", async () => {
+  const game = mockGame();
+  let seen;
+  await assert.rejects(
+    run(game, {
+      waitForRoomEnd: true,
+      onBattleResult: (value) => {
+        seen = value;
+        game.controller.abort();
+      },
+    }),
+    { name: "AbortError" },
+  );
+  assert.equal(seen.rounds, 12);
+  assert.ok(!game.calls.some((call) => call.command === "pkroom_dismiss"));
 });
 
 test("does not start if the room did not apply the selected heroes, toy or pet", async (t) => {
