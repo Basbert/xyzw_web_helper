@@ -24,7 +24,7 @@
           </label>
         </div>
         <p class="setup-note">
-          使用当前主线阵容、咸王武器和宠物，不消耗正式十殿挑战次数。
+          使用当前主线阵容、玩具和宠物，不消耗正式十殿挑战次数。
         </p>
         <n-button
           type="primary"
@@ -81,6 +81,31 @@
               ><span>回合</span>
             </div>
           </div>
+          <div
+            v-if="result.loadout"
+            class="battle-loadout"
+            aria-label="实际出战配置"
+          >
+            <div>
+              <span>玩具</span>
+              <strong>{{
+                loadoutName(result.loadout.weapon, "weapon")
+              }}</strong>
+              <small :class="loadoutClass(result.loadout.weapon)">{{
+                loadoutStatus(result.loadout.weapon)
+              }}</small>
+            </div>
+            <div>
+              <span>宠物</span>
+              <strong>{{ loadoutName(result.loadout.pet, "pet") }}</strong>
+              <small :class="loadoutClass(result.loadout.pet)">{{
+                loadoutStatus(result.loadout.pet)
+              }}</small>
+            </div>
+          </div>
+          <p v-if="loadoutWarning" class="loadout-warning" role="status">
+            {{ loadoutWarning }}
+          </p>
           <div class="roster-title">
             <h4>我方武将</h4>
             <span>{{
@@ -127,7 +152,8 @@
 <script setup>
 import { computed, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
-import { HERO_DICT } from "@/utils/HeroList";
+import { HERO_DICT, weapon } from "@/utils/HeroList";
+import { PET_DICT } from "@/utils/PetList";
 import { runTenHallSimulation } from "@/utils/tenHallSimulation";
 
 const tokenStore = useTokenStore();
@@ -151,6 +177,42 @@ const connected = computed(() => {
   const id = tokenStore.selectedToken?.id;
   return !!id && tokenStore.getWebSocketStatus(id) === "connected";
 });
+const loadoutWarning = computed(() => {
+  const loadout = result.value?.loadout;
+  if (!loadout) return "";
+  const unconfirmed = [];
+  if (loadout.heroes === "unknown") unconfirmed.push("武将阵容");
+  if (loadout.weapon.status === "unknown") unconfirmed.push("玩具");
+  if (loadout.pet.status === "unknown") unconfirmed.push("宠物");
+  const mismatch = [];
+  if (loadout.heroes === "mismatch") mismatch.push("武将阵容");
+  if (loadout.weapon.status === "mismatch") mismatch.push("玩具");
+  if (loadout.pet.status === "mismatch") mismatch.push("宠物");
+  return [
+    mismatch.length ? `${mismatch.join("、")}与所选配置不一致` : "",
+    unconfirmed.length ? `战报未能确认${unconfirmed.join("、")}` : "",
+  ]
+    .filter(Boolean)
+    .join("；");
+});
+function loadoutName(item, type) {
+  if (item.status === "none") return "未携带";
+  if (!item.actualId) return item.status === "mismatch" ? "未携带" : "未知";
+  return type === "weapon"
+    ? weapon[item.actualId] || `玩具 ${item.actualId}`
+    : PET_DICT[item.actualId]?.name || `宠物 ${item.actualId}`;
+}
+function loadoutStatus(item) {
+  return {
+    matched: "已上阵",
+    none: "",
+    mismatch: "与配置不一致",
+    unknown: "未能确认",
+  }[item.status];
+}
+function loadoutClass(item) {
+  return ["mismatch", "unknown"].includes(item.status) ? "loadout-issue" : "";
+}
 
 async function startSimulation() {
   if (running.value || !connected.value) return;
@@ -353,6 +415,37 @@ onUnmounted(() => controller?.abort());
 .rounds strong {
   font-size: 28px;
   font-variant-numeric: tabular-nums;
+}
+.battle-loadout {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  border-top: 1px solid var(--border-light);
+  padding-top: 16px;
+  margin-top: 18px;
+}
+.battle-loadout div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.battle-loadout span,
+.battle-loadout small {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.battle-loadout strong {
+  overflow-wrap: anywhere;
+  font-size: 14px;
+}
+.battle-loadout .loadout-issue,
+.loadout-warning {
+  color: var(--error-color);
+}
+.result .loadout-warning {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 1.5;
 }
 .roster-title {
   align-items: center;

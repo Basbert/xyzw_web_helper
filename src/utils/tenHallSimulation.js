@@ -1,4 +1,5 @@
 import { parseTenHallBattleResult } from "./tenHallBattleResult.js";
+import { inspectBattleLoadout, inspectRoomLoadout } from "./tenHallLoadout.js";
 
 const FREE_ROOM = 0;
 const TEN_HALL_ROOM = 201;
@@ -91,6 +92,9 @@ export function makeTenHallTeam(role, roomId) {
     });
   }
   if (!battleTeam.size) throw new Error("当前阵容为空，请先在游戏中布阵");
+  if (Number(role.pet?.petId) > 0 && !role.pet?.petUId) {
+    throw new Error("当前宠物信息不完整，请刷新角色后重试");
+  }
   return {
     roomId,
     lordWeaponId: Number(role.lordWeaponId) || 0,
@@ -318,6 +322,12 @@ export async function runTenHallSimulation({
     ) {
       throw new Error("模拟房间尚未准备好，请稍后重试");
     }
+    const roomLoadout = inspectRoomLoadout(current, roleId, team);
+    if (roomLoadout.issues.length) {
+      throw new Error(
+        `房间内的${roomLoadout.issues.join("、")}与当前配置不一致或无法确认，已停止模拟`,
+      );
+    }
     const version = tokenStore.gameData?.battleVersion;
     if (!version) throw new Error("战斗版本未加载，请重新连接后重试");
     mailbox.clear("pkroom_fightnotify");
@@ -350,8 +360,14 @@ export async function runTenHallSimulation({
     if (result.ownSide === null) {
       throw new Error("已收到战报，但无法识别当前角色的阵营");
     }
+    const loadout = inspectBattleLoadout(
+      fight.body.battleData,
+      result.ownSide,
+      team,
+      role.pet?.petId,
+    );
     completed = true;
-    return { hall, ...result };
+    return { hall, ...result, loadout };
   } finally {
     mailbox.close();
     const canClean =

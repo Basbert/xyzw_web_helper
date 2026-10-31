@@ -10,7 +10,7 @@ const role = {
   roleId: 123,
   name: "小鱼",
   lordWeaponId: 2,
-  pet: { petUId: "pet-1" },
+  pet: { petUId: "pet-1", petId: 501 },
   battleTeam: { 0: { heroId: 104 }, 1: { heroId: 105 } },
   heroes: {
     104: { level: 6000, artifactId: 20, pearlId: 3 },
@@ -24,6 +24,8 @@ function mockGame({
   abortOnQueue = false,
   abortAfterCreate = false,
   unavailable = false,
+  roomChange = {},
+  battleChange = {},
 } = {}) {
   const calls = [];
   const listeners = new Set();
@@ -43,6 +45,14 @@ function mockGame({
     roomId: "test-room",
     leaderId: role.roleId,
     rule: { roleNum: 2, clientRoleNum: wrongRoom ? 2 : 201, nM: activeHall },
+    watchRoles: {
+      123: {
+        battleTeam: { 0: 104, 1: 105 },
+        lordWeaponId: 2,
+        petUId: "pet-1",
+        ...roomChange,
+      },
+    },
     fightRoleBase: [
       { roleId: 123, state: ready ? 1 : 0 },
       { roleId: 1, state: 1 },
@@ -83,7 +93,14 @@ function mockGame({
       if (command === "pkroom_startbattle") {
         client.emit("pkroom_fightnotify", {
           battleData: {
-            leftTeam: { roleId: 123 },
+            leftTeam: {
+              roleId: 123,
+              team: { 0: { id: 104 }, 1: { id: 105 } },
+              weaponId: 2,
+              petUId: "pet-1",
+              petId: 501,
+              ...battleChange,
+            },
             result: {
               isWin: true,
               round: 12,
@@ -148,6 +165,10 @@ test("maps the current formation, hero equipment and pet into the room format", 
     () => makeTenHallTeam({ ...role, heroes: {} }, "room"),
     /阵容信息不完整/,
   );
+  assert.throws(
+    () => makeTenHallTeam({ ...role, pet: { petId: 501 } }, "room"),
+    /宠物信息不完整/,
+  );
 });
 
 test("captures an early fight notification and interprets the actual result", async () => {
@@ -156,6 +177,9 @@ test("captures an early fight notification and interprets the actual result", as
   assert.equal(result.isWin, true);
   assert.equal(result.rounds, 12);
   assert.equal(result.downCount, 1);
+  assert.equal(result.loadout.heroes, "matched");
+  assert.deepEqual(result.loadout.weapon, { status: "matched", actualId: 2 });
+  assert.deepEqual(result.loadout.pet, { status: "matched", actualId: 501 });
   assert.equal(game.listeners.size, 0);
   assert.deepEqual(
     game.calls.map((c) => c.command),
@@ -170,6 +194,36 @@ test("captures an early fight notification and interprets the actual result", as
     ],
   );
   assert.equal(game.calls.at(-1).params.battleVersion, 240521);
+});
+
+test("does not start if the room did not apply the selected heroes, toy or pet", async (t) => {
+  for (const [change, label] of [
+    [{ battleTeam: { 0: 105, 1: 104 } }, "武将阵容"],
+    [{ lordWeaponId: 3 }, "玩具"],
+    [{ petUId: "other-pet" }, "宠物"],
+    [{ petUId: undefined }, "宠物"],
+  ]) {
+    await t.test(label, async () => {
+      const game = mockGame({ roomChange: change });
+      await assert.rejects(run(game), new RegExp(label));
+      assert.ok(!game.calls.some((c) => c.command === "pkroom_startbattle"));
+      assert.ok(game.calls.some((c) => c.command === "pkroom_dismiss"));
+    });
+  }
+});
+
+test("reports an actual battle mismatch or missing fields instead of confirming them", async () => {
+  const game = mockGame({
+    battleChange: {
+      team: { 0: { id: 105 }, 1: { id: 104 } },
+      weaponId: 3,
+      petUId: undefined,
+    },
+  });
+  const result = await run(game);
+  assert.equal(result.loadout.heroes, "mismatch");
+  assert.equal(result.loadout.weapon.status, "mismatch");
+  assert.equal(result.loadout.pet.status, "unknown");
 });
 
 test("waits for the server's queue-ready push and creates once with notifyCreate", async () => {
