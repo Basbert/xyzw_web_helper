@@ -395,52 +395,117 @@
     </div>
     <!-- 切磋（提取组件） -->
     <FightPvp v-if="activeSection === 'fightPvp'" />
-    <TenHallSimulator v-if="activeSection === 'tenHall'" />
+    <TenHallSimulator
+      v-if="tenHallVisited"
+      v-show="activeSection === 'tenHall'"
+    />
   </div>
 </template>
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import {
+  computed,
+  defineAsyncComponent,
+  h,
+  onMounted,
+  onUnmounted,
+  ref,
+  watch,
+} from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { runBottleAndHangUp } from "@/utils/bottleAndHangUp";
 
-import ApexChallenge from "./Apex/ApexChallenge.vue";
 import BottleHelperCard from "./cards/BottleHelperCard.vue";
 import BoxHelperCard from "./cards/BoxHelperCard.vue";
-import ConsumptionProgressCard from "./cards/ConsumptionProgressCard.vue";
-import DreamHelperCard from "./cards/DreamHelperCard.vue";
-import FightHelperCard from "./cards/FightHelperCard.vue";
-import FightPvp from "./cards/FightPvp.vue";
 import FishHelperCard from "./cards/FishHelperCard.vue";
-import GoldClubList from "./cards/GoldRankListPageCard.vue";
 import HangUpStatusCard from "./cards/HangUpStatusCard.vue";
-import HeroUpgradeCard from "./cards/HeroUpgradeCard.vue";
 import MonthlyTasksCard from "./cards/MonthlyTasksCard.vue";
 import RecruitHelperCard from "./cards/RecruitHelperCard.vue";
-import RefineHelperCard from "./cards/RefineHelperCard.vue";
-import ServerRankList from "./cards/ServerRankListPageCard.vue";
 import SkinChallengeCard from "./cards/SkinChallengeCard.vue";
-import StarUpgradeCard from "./cards/StarUpgradeCard.vue";
 import StudyChallengeCard from "./cards/StudyChallengeCard.vue";
-import TenHallSimulator from "./cards/TenHallSimulator.vue";
-import TopClubList from "./cards/TopClubListPageCard.vue";
-import TopRankList from "./cards/TopRankListPageCard.vue";
 import Unlimitedlineup from "./cards/Unlimitedlineup.vue";
-import CampChallenge from "./Club/CampChallenge.vue";
-import ClubBattleRecords from "./Club/ClubBattleRecords.vue";
-import ClubMonthBattleRecords from "./Club/ClubMonthBattleRecords.vue";
-import ClubWarrank from "./Club/ClubWarrank.vue";
-import ClubWarrankV2 from "./Club/ClubWarrankV2.vue";
-import GreatRouteRankList from "./Club/GreatRouteRankListPageCard.vue";
-import LegionWarMap from "./Club/LegionWarMap.vue";
-import LegionWarStatistics from "./Club/LegionWarStatistics.vue";
-import PeachBattleRecords from "./Club/PeachBattleRecords.vue";
-import PeachInfo from "./Club/PeachInfo.vue";
-import PeachInfoV2 from "./Club/PeachInfoV2.vue";
-import BossTower from "./Tower/BossTower.vue";
 import TowerStatus from "./Tower/TowerStatus.vue";
 import WeirdTowerStatus from "./Tower/WeirdTowerStatus.vue";
+
+const loadingSection = {
+  render: () =>
+    h("p", { class: "lazy-section-state", role: "status" }, "正在加载…"),
+};
+const failedSection = {
+  render: () =>
+    h(
+      "p",
+      { class: "lazy-section-state", role: "alert" },
+      "加载失败，请刷新页面后重试。",
+    ),
+};
+const lazySection = (loader) =>
+  defineAsyncComponent({
+    loader,
+    delay: 200,
+    timeout: 30000,
+    loadingComponent: loadingSection,
+    errorComponent: failedSection,
+  });
+
+const ApexChallenge = lazySection(() => import("./Apex/ApexChallenge.vue"));
+const ConsumptionProgressCard = lazySection(
+  () => import("./cards/ConsumptionProgressCard.vue"),
+);
+const DreamHelperCard = lazySection(
+  () => import("./cards/DreamHelperCard.vue"),
+);
+const FightHelperCard = lazySection(
+  () => import("./cards/FightHelperCard.vue"),
+);
+const FightPvp = lazySection(() => import("./cards/FightPvp.vue"));
+const GoldClubList = lazySection(
+  () => import("./cards/GoldRankListPageCard.vue"),
+);
+const HeroUpgradeCard = lazySection(
+  () => import("./cards/HeroUpgradeCard.vue"),
+);
+const RefineHelperCard = lazySection(
+  () => import("./cards/RefineHelperCard.vue"),
+);
+const ServerRankList = lazySection(
+  () => import("./cards/ServerRankListPageCard.vue"),
+);
+const StarUpgradeCard = lazySection(
+  () => import("./cards/StarUpgradeCard.vue"),
+);
+const TenHallSimulator = lazySection(
+  () => import("./cards/TenHallSimulator.vue"),
+);
+const TopClubList = lazySection(
+  () => import("./cards/TopClubListPageCard.vue"),
+);
+const TopRankList = lazySection(
+  () => import("./cards/TopRankListPageCard.vue"),
+);
+const CampChallenge = lazySection(() => import("./Club/CampChallenge.vue"));
+const ClubBattleRecords = lazySection(
+  () => import("./Club/ClubBattleRecords.vue"),
+);
+const ClubMonthBattleRecords = lazySection(
+  () => import("./Club/ClubMonthBattleRecords.vue"),
+);
+const ClubWarrank = lazySection(() => import("./Club/ClubWarrank.vue"));
+const ClubWarrankV2 = lazySection(() => import("./Club/ClubWarrankV2.vue"));
+const GreatRouteRankList = lazySection(
+  () => import("./Club/GreatRouteRankListPageCard.vue"),
+);
+const LegionWarMap = lazySection(() => import("./Club/LegionWarMap.vue"));
+const LegionWarStatistics = lazySection(
+  () => import("./Club/LegionWarStatistics.vue"),
+);
+const PeachBattleRecords = lazySection(
+  () => import("./Club/PeachBattleRecords.vue"),
+);
+const PeachInfo = lazySection(() => import("./Club/PeachInfo.vue"));
+const PeachInfoV2 = lazySection(() => import("./Club/PeachInfoV2.vue"));
+const BossTower = lazySection(() => import("./Tower/BossTower.vue"));
 
 const tokenStore = useTokenStore();
 const message = useMessage();
@@ -495,6 +560,10 @@ const legionMatch = ref({
 // 响应式数据
 
 const activeSection = ref("daily");
+const tenHallVisited = ref(false);
+watch(activeSection, (section) => {
+  if (section === "tenHall") tenHallVisited.value = true;
+});
 const saltFieldSubTab = ref("warrank");
 const peachSubTab = ref("peach");
 const rankSubTab = ref("serverrank");
@@ -715,6 +784,11 @@ onUnmounted(() => {
 </script>
 
 <style scoped lang="scss">
+.lazy-section-state {
+  grid-column: 1 / -1;
+  padding: 20px;
+  color: var(--text-secondary);
+}
 .game-status-container {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

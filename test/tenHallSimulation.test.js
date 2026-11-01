@@ -220,6 +220,7 @@ test("shows the current team for confirmation before creating a room", async () 
     { slot: 1, heroId: 105 },
   ]);
   assert.equal(shown.weaponId, 2);
+  assert.equal(shown.roleId, 123);
   assert.equal(shown.petId, 501);
   assert.equal(shown.hasPet, true);
   assert.ok(result.isWin);

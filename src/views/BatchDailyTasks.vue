@@ -5913,6 +5913,7 @@ const getStatusText = (tokenId) => {
   const status = tokenStatus.value[tokenId];
   if (status === "completed") return "已完成";
   if (status === "failed") return "失败";
+  if (status === "skipped") return "已跳过";
   if (status === "stopped") return "已停止";
   if (status === "pending") return "待继续";
   if (status === "running") return "执行中";

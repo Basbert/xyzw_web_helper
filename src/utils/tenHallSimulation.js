@@ -270,6 +270,7 @@ export async function runTenHallSimulation({
     }
     if (confirmLoadout) {
       const confirmed = await confirmLoadout({
+        roleId,
         roleName: role.name,
         hall,
         heroes: [...team.battleTeam]

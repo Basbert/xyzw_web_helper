@@ -72,7 +72,13 @@
         <p v-if="progress" class="progress" role="status" aria-live="polite">
           {{ progress }}
         </p>
+        <p v-if="running" class="progress">
+          可切换本页的其他栏目；离开游戏功能页会停止模拟。
+        </p>
         <p v-if="errorText" class="error" role="alert">{{ errorText }}</p>
+        <p v-if="historyError" class="error" role="status">
+          {{ historyError }}
+        </p>
       </section>
 
       <section class="result" aria-label="模拟结果">
@@ -105,6 +111,13 @@
             <p v-if="summary.best">
               最佳样本：第 {{ summary.best.index }} 场 · 下将
               {{ summary.best.downCount }} · {{ summary.best.rounds }} 回合
+              <button
+                type="button"
+                class="best-result-link"
+                @click="selectBattle(summary.best.index - 1)"
+              >
+                查看
+              </button>
             </p>
             <p v-if="summary.best" class="summary-note">
               优先比较胜利场次的下将数，再比较回合数
@@ -113,19 +126,26 @@
               <summary>查看每场结果</summary>
               <ol>
                 <li v-for="(item, index) in seriesResults" :key="index">
-                  第 {{ index + 1 }} 场：{{
-                    item.isWin === null
-                      ? "胜负未知"
-                      : item.isWin
-                        ? "胜利"
-                        : "失败"
-                  }}
-                  · {{ item.rounds ?? "—" }} 回合 ·
-                  {{
-                    item.downCount === null
-                      ? "下将未知"
-                      : `下将 ${item.downCount}`
-                  }}
+                  <button
+                    type="button"
+                    class="battle-result-link"
+                    :aria-pressed="selectedBattleIndex === index"
+                    @click="selectBattle(index)"
+                  >
+                    第 {{ index + 1 }} 场：{{
+                      item.isWin === null
+                        ? "胜负未知"
+                        : item.isWin
+                          ? "胜利"
+                          : "失败"
+                    }}
+                    · {{ item.rounds ?? "—" }} 回合 ·
+                    {{
+                      item.downCount === null
+                        ? "下将未知"
+                        : `下将 ${item.downCount}`
+                    }}
+                  </button>
                 </li>
               </ol>
             </details>
@@ -135,7 +155,7 @@
               <span
                 >{{ hallLabel(result.hall) }} ·
                 {{
-                  runCount > 1 ? `第 ${seriesResults.length} 场` : "模拟结果"
+                  runCount > 1 ? `第 ${selectedBattleIndex + 1} 场` : "模拟结果"
                 }}</span
               >
               <h3
@@ -222,6 +242,64 @@
         </div>
       </section>
     </div>
+    <section
+      v-if="historyItems.length"
+      class="history"
+      aria-label="最近模拟记录"
+    >
+      <div class="history-heading">
+        <div>
+          <h3>最近模拟记录</h3>
+          <p>按角色保存在当前浏览器，最多 20 组；装备变化也会影响结果。</p>
+        </div>
+      </div>
+      <ul class="history-list">
+        <li
+          v-for="entry in visibleHistory"
+          :key="entry.id"
+          class="history-entry"
+        >
+          <button
+            type="button"
+            class="history-open"
+            :disabled="running"
+            @click="openHistory(entry)"
+          >
+            <span class="history-top"
+              ><strong
+                >{{ hallLabel(entry.hall) }} · {{ entry.results.length }} /
+                {{ entry.requestedCount }} 场
+                <small>{{ historyStatus(entry) }}</small></strong
+              ><span class="history-meta"
+                ><time>{{ historyTime(entry.time) }}</time
+                ><span>查看战报</span></span
+              ></span
+            >
+            <span class="history-metrics">{{ historyMetrics(entry) }}</span>
+            <span class="history-roster">{{ historyRoster(entry) }}</span>
+          </button>
+          <n-popconfirm @positive-click="deleteHistory(entry.id)">
+            <template #trigger
+              ><n-button
+                text
+                :disabled="running"
+                :aria-label="`删除${hallLabel(entry.hall)}的模拟记录`"
+                >删除</n-button
+              ></template
+            >
+            删除这组模拟记录？
+          </n-popconfirm>
+        </li>
+      </ul>
+      <button
+        v-if="historyItems.length > 3"
+        type="button"
+        class="history-more"
+        @click="showAllHistory = !showAllHistory"
+      >
+        {{ showAllHistory ? "收起记录" : `显示全部 ${historyItems.length} 组` }}
+      </button>
+    </section>
     <n-modal
       :show="!!confirmation"
       preset="card"
@@ -278,10 +356,16 @@
 </template>
 
 <script setup>
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { HERO_DICT, weapon } from "@/utils/HeroList";
 import { PET_DICT } from "@/utils/PetList";
+import {
+  readTenHallHistory,
+  removeTenHallHistory,
+  saveTenHallHistory,
+  TEN_HALL_HISTORY_PREFIX,
+} from "@/utils/tenHallHistory";
 import {
   runTenHallSeries,
   summarizeTenHallResults,
@@ -305,10 +389,20 @@ const progress = ref("");
 const errorText = ref("");
 const result = ref(null);
 const seriesResults = ref([]);
+const selectedBattleIndex = ref(-1);
+const historyItems = ref([]);
+const showAllHistory = ref(false);
+const visibleHistory = computed(() =>
+  showAllHistory.value ? historyItems.value : historyItems.value.slice(0, 3),
+);
+const historyRoleId = ref(null);
+const historyError = ref("");
+const activeHistoryId = ref(null);
 const confirmation = ref(null);
 const summary = computed(() => summarizeTenHallResults(seriesResults.value));
 let settleConfirmation = null;
 let controller = null;
+let manualBattleSelection = false;
 
 const connected = computed(() => {
   const id = tokenStore.selectedToken?.id;
@@ -351,6 +445,106 @@ function loadoutClass(item) {
   return ["mismatch", "unknown"].includes(item.status) ? "loadout-issue" : "";
 }
 
+function refreshHistory(roleId) {
+  historyRoleId.value = roleId || null;
+  try {
+    historyItems.value = readTenHallHistory(historyRoleId.value);
+    historyError.value = "";
+  } catch {
+    historyItems.value = [];
+    historyError.value = "无法读取本地模拟记录，请检查浏览器存储。";
+  }
+}
+
+function saveRecord(entry, tokenId) {
+  if (!entry?.results.length) return;
+  const selected = tokenStore.selectedToken;
+  const isOwner =
+    selected?.id === tokenId &&
+    (!selected.roleId || String(selected.roleId) === String(entry.roleId));
+  try {
+    const list = saveTenHallHistory(entry.roleId, entry);
+    if (isOwner) {
+      historyRoleId.value = entry.roleId;
+      historyItems.value = list;
+      historyError.value = "";
+    }
+  } catch {
+    if (isOwner) historyError.value = "模拟仍可继续，但记录未能保存到浏览器。";
+  }
+}
+
+function historyTime(value) {
+  return new Date(value).toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+function historyStatus(entry) {
+  if (entry.status === "completed") return "已完成";
+  if (
+    entry.status === "running" &&
+    running.value &&
+    activeHistoryId.value === entry.id
+  )
+    return "进行中";
+  return entry.status === "stopped" ? "已停止" : "未完成";
+}
+function historyMetrics(entry) {
+  const stats = summarizeTenHallResults(entry.results);
+  const known = stats.wins + stats.losses;
+  const rate = known
+    ? `胜率 ${Math.round((stats.wins / known) * 100)}%（${stats.wins}/${known}）`
+    : "胜率未知";
+  const rounds =
+    stats.averageRounds === null
+      ? "平均回合未知"
+      : `胜利平均 ${stats.averageRounds} 回合`;
+  return `${rate} · ${rounds} · 无下将胜利 ${stats.noDownWins} 场${stats.unknown ? ` · 胜负未知 ${stats.unknown} 场` : ""}`;
+}
+function historyRoster(entry) {
+  const heroes =
+    entry.setup.heroes
+      .map((hero) => heroInfo(hero.heroId)?.name || `武将 ${hero.heroId}`)
+      .join("、") || "阵容未知";
+  const toy = entry.setup.weaponId
+    ? weapon[entry.setup.weaponId] || `玩具 ${entry.setup.weaponId}`
+    : "无玩具";
+  const pet = entry.setup.hasPet
+    ? PET_DICT[entry.setup.petId]?.name || "宠物未知"
+    : "无宠物";
+  return `${heroes} | ${toy} | ${pet}`;
+}
+function selectBattle(index) {
+  if (!seriesResults.value[index]) return;
+  manualBattleSelection = true;
+  selectedBattleIndex.value = index;
+  result.value = seriesResults.value[index];
+}
+function openHistory(entry) {
+  if (running.value) return;
+  runCount.value = entry.requestedCount;
+  seriesResults.value = entry.results.map((item) => ({
+    ...item,
+    hall: entry.hall,
+  }));
+  selectedBattleIndex.value = seriesResults.value.length - 1;
+  result.value = seriesResults.value.at(-1);
+  manualBattleSelection = false;
+  progress.value = "已打开历史战报";
+  errorText.value = "";
+}
+function deleteHistory(id) {
+  try {
+    historyItems.value = removeTenHallHistory(historyRoleId.value, id);
+    historyError.value = "";
+  } catch {
+    historyError.value = "无法删除模拟记录，请检查浏览器存储。";
+  }
+}
+
 function requestConfirmation(loadout, signal, selectedCount) {
   return new Promise((resolve) => {
     const onAbort = () => finish(false);
@@ -372,15 +566,13 @@ async function startSimulation() {
   const tokenId = tokenStore.selectedToken.id;
   const chosenHall = hall.value;
   const chosenCount = count.value;
-  runCount.value = chosenCount;
   controller = new AbortController();
   const signal = controller.signal;
+  let record = null;
   running.value = true;
   cancelling.value = false;
   progress.value = "";
   errorText.value = "";
-  result.value = null;
-  seriesResults.value = [];
   try {
     const completed = await runTenHallSeries({
       tokenStore,
@@ -388,15 +580,63 @@ async function startSimulation() {
       hall: chosenHall,
       count: chosenCount,
       signal,
-      confirmLoadout: (loadout) =>
-        requestConfirmation(loadout, signal, chosenCount),
-      onProgress: (value) => (progress.value = value),
+      confirmLoadout: async (loadout) => {
+        const confirmed = await requestConfirmation(
+          loadout,
+          signal,
+          chosenCount,
+        );
+        if (
+          confirmed &&
+          !signal.aborted &&
+          tokenStore.selectedToken?.id === tokenId
+        ) {
+          runCount.value = chosenCount;
+          result.value = null;
+          seriesResults.value = [];
+          selectedBattleIndex.value = -1;
+          manualBattleSelection = false;
+          record = {
+            id:
+              globalThis.crypto?.randomUUID?.() ||
+              `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            time: Date.now(),
+            roleId: loadout.roleId,
+            hall: chosenHall,
+            requestedCount: chosenCount,
+            status: "running",
+            setup: loadout,
+            results: [],
+          };
+          activeHistoryId.value = record.id;
+          if (!tokenStore.selectedToken?.roleId) refreshHistory(loadout.roleId);
+        }
+        return confirmed;
+      },
+      onProgress: (value) => {
+        if (tokenStore.selectedToken?.id === tokenId) progress.value = value;
+      },
       onResult: (results) => {
+        if (record) {
+          record.results = results;
+          saveRecord(record, tokenId);
+        }
         if (tokenStore.selectedToken?.id !== tokenId) return;
         seriesResults.value = results;
-        result.value = results.at(-1);
+        if (!manualBattleSelection) {
+          selectedBattleIndex.value = results.length - 1;
+          result.value = results.at(-1);
+        }
       },
     });
+    if (record?.results.length) {
+      record.status = completed.error
+        ? completed.error.name === "AbortError"
+          ? "stopped"
+          : "incomplete"
+        : "completed";
+      saveRecord(record, tokenId);
+    }
     if (tokenStore.selectedToken?.id === tokenId) {
       if (completed.error?.name === "AbortError") {
         progress.value = `已停止，保留 ${completed.results.length} 场结果`;
@@ -408,6 +648,10 @@ async function startSimulation() {
       }
     }
   } catch (error) {
+    if (record?.results.length) {
+      record.status = error.name === "AbortError" ? "stopped" : "incomplete";
+      saveRecord(record, tokenId);
+    }
     if (tokenStore.selectedToken?.id === tokenId) {
       progress.value = error.name === "AbortError" ? "已取消模拟" : "";
       errorText.value =
@@ -419,6 +663,7 @@ async function startSimulation() {
     running.value = false;
     cancelling.value = false;
     controller = null;
+    activeHistoryId.value = null;
   }
 }
 
@@ -429,16 +674,37 @@ function cancelSimulation() {
 }
 
 watch(
-  () => tokenStore.selectedToken?.id,
-  () => {
-    controller?.abort();
-    result.value = null;
-    seriesResults.value = [];
-    progress.value = "";
-    errorText.value = "";
+  [() => tokenStore.selectedToken?.id, () => tokenStore.selectedToken?.roleId],
+  ([tokenId, roleId], previous = []) => {
+    const [previousToken, previousRole] = previous;
+    if (
+      previousToken &&
+      (tokenId !== previousToken ||
+        (previousRole && roleId && String(previousRole) !== String(roleId)))
+    ) {
+      controller?.abort();
+      result.value = null;
+      seriesResults.value = [];
+      selectedBattleIndex.value = -1;
+      manualBattleSelection = false;
+      progress.value = "";
+      errorText.value = "";
+    }
+    refreshHistory(roleId);
+    showAllHistory.value = false;
   },
+  { immediate: true, flush: "sync" },
 );
-onUnmounted(() => controller?.abort());
+const onHistoryStorage = (event) => {
+  if (event.key === null || event.key?.startsWith(TEN_HALL_HISTORY_PREFIX)) {
+    refreshHistory(historyRoleId.value);
+  }
+};
+onMounted(() => window.addEventListener("storage", onHistoryStorage));
+onUnmounted(() => {
+  window.removeEventListener("storage", onHistoryStorage);
+  controller?.abort();
+});
 </script>
 
 <style scoped>
@@ -597,6 +863,111 @@ onUnmounted(() => controller?.abort());
   max-height: 200px;
   overflow-y: auto;
   padding-left: 22px;
+}
+.battle-result-link {
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  line-height: 1.7;
+  padding: 2px 4px;
+}
+.best-result-link {
+  border: 0;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.battle-result-link[aria-pressed="true"] {
+  color: var(--primary-color);
+  font-weight: 700;
+}
+.history {
+  margin-top: 30px;
+  padding-top: 22px;
+  border-top: 1px solid var(--border-light);
+}
+.history-heading h3,
+.history-heading p {
+  margin: 0;
+}
+.history-heading h3 {
+  font-size: 17px;
+}
+.history-heading p {
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.history-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+.history-entry {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border-light);
+}
+.history-open {
+  display: grid;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 10px 4px;
+  cursor: pointer;
+}
+.history-open:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+.history-top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.history-top small,
+.history-top time,
+.history-roster {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.history-meta {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  color: var(--primary-color);
+  font-size: 12px;
+}
+.history-metrics {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.history-more {
+  margin-top: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  padding: 4px;
+}
+.history-open:focus-visible,
+.history-more:focus-visible,
+.best-result-link:focus-visible,
+.battle-result-link:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
 }
 .confirm-intro {
   font-weight: 700;

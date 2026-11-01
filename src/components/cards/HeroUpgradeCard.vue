@@ -73,20 +73,18 @@ import { computed, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { isSameGameValue } from "@/utils/gameValue.js";
 import { HERO_DICT } from "@/utils/HeroList";
+import {
+  heroUpgradeOptions,
+  selectedUpgradeHero,
+} from "@/utils/heroUpgradeData";
 import MyCard from "../Common/MyCard.vue";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
 
-const HeroOptions = computed(() => [
-  ...Object.values(tokenStore.gameData.roleInfo.role.heroes).map((item) => {
-    return {
-      label: `${HERO_DICT[item.heroId].name}(${item.level}/6000)`,
-      value: item.heroId,
-      disabled: isSameGameValue(item.level, 6000),
-    };
-  }),
-]);
+const HeroOptions = computed(() =>
+  heroUpgradeOptions(tokenStore.gameData?.roleInfo, HERO_DICT),
+);
 
 const HeroValue = ref(null);
 const HeroItem = ref(null);
@@ -101,10 +99,10 @@ const state = ref({
 });
 
 const handleUpdateValue = (value) => {
-  HeroItem.value = Object.assign(
-    {},
-    tokenStore.gameData.roleInfo.role.heroes[value],
-    HERO_DICT[value],
+  HeroItem.value = selectedUpgradeHero(
+    tokenStore.gameData?.roleInfo,
+    value,
+    HERO_DICT,
   );
 };
 
@@ -128,26 +126,24 @@ const levelOptions = [
 ];
 
 watch(
-  () => tokenStore.gameData.roleInfo.heroes,
+  () => tokenStore.gameData?.roleInfo?.role?.heroes,
   () => {
-    if (HeroValue.value) {
-      if (
-        !isSameGameValue(
-          tokenStore.gameData.roleInfo.role.heroes[HeroValue.value].level,
-          6000,
-        )
-      ) {
-        HeroItem.value = Object.assign(
-          {},
-          tokenStore.gameData.roleInfo.role.heroes[HeroValue.value],
-          HERO_DICT[HeroValue.value],
-        );
-      } else {
-        HeroItem.value = null;
-      }
-    }
+    HeroItem.value = selectedUpgradeHero(
+      tokenStore.gameData?.roleInfo,
+      HeroValue.value,
+      HERO_DICT,
+    );
   },
   { deep: true }, // 深度监听内部变化
+);
+watch(
+  () => tokenStore.selectedToken?.id,
+  (id, previous) => {
+    if (id !== previous) {
+      HeroValue.value = null;
+      HeroItem.value = null;
+    }
+  },
 );
 
 //英雄进阶
@@ -182,7 +178,7 @@ const orderHeroUpgrade = async () => {
         },
         5000,
       );
-      if (result?.role.heroes) {
+      if (result?.role?.heroes) {
         message.success("进阶成功");
         tokenStore.sendGetRoleInfo(tokenId);
       }
@@ -230,7 +226,7 @@ const levelHeroUpgrade = async () => {
         },
         5000,
       );
-      if (result?.role.heroes) {
+      if (result?.role?.heroes) {
         tokenStore.sendGetRoleInfo(tokenId);
       }
     } else {
