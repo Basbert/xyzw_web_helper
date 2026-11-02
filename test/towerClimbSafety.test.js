@@ -27,7 +27,11 @@ const declarations = source.statements
   .map((statement) => statement.getText(source))
   .join("\n");
 
-function fixture({ energy = [1, 0], read = async () => {} } = {}) {
+function fixture({
+  energy = [1, 0],
+  read = async () => {},
+  fight = async () => {},
+} = {}) {
   const calls = [];
   const tokenStore = {
     selectedToken: { id: "A" },
@@ -39,7 +43,11 @@ function fixture({ energy = [1, 0], read = async () => {} } = {}) {
         await read();
         return { role: { tower: { energy: energy.shift() } } };
       }
+      if (cmd === "fight_starttower") await fight();
       return {};
+    },
+    sendMessage(id, cmd) {
+      calls.push([id, cmd]);
     },
   };
   const context = {
@@ -68,7 +76,12 @@ test("regular tower reads each fresh server energy value before fighting", async
   await f.startTowerClimb();
   assert.deepEqual(
     f.calls.map(([, cmd]) => cmd),
-    ["role_getroleinfo", "fight_starttower", "role_getroleinfo"],
+    [
+      "role_getroleinfo",
+      "fight_starttower",
+      "role_getroleinfo",
+      "role_getroleinfo",
+    ],
   );
   assert.equal(f.context.isClimbing.value, false);
 });
@@ -125,4 +138,57 @@ test("switching account during the energy read never fights on the new account",
     f.calls.some(([, cmd]) => cmd === "fight_starttower"),
     false,
   );
+});
+
+test("stopping during a fight refreshes the same account's final tower floor", async () => {
+  let release;
+  let started;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const waiting = new Promise((resolve) => {
+    started = resolve;
+  });
+  const f = fixture({
+    fight: async () => {
+      started();
+      await gate;
+    },
+  });
+  const pending = f.startTowerClimb();
+  await waiting;
+  f.stopClimbing();
+  release();
+  await pending;
+  assert.deepEqual(f.calls, [
+    ["A", "role_getroleinfo"],
+    ["A", "fight_starttower"],
+    ["A", "role_getroleinfo"],
+  ]);
+});
+
+test("switching account during a fight does not refresh the newly selected account", async () => {
+  let release;
+  let started;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const waiting = new Promise((resolve) => {
+    started = resolve;
+  });
+  const f = fixture({
+    fight: async () => {
+      started();
+      await gate;
+    },
+  });
+  const pending = f.startTowerClimb();
+  await waiting;
+  f.context.tokenStore.selectedToken = { id: "B" };
+  release();
+  await pending;
+  assert.deepEqual(f.calls, [
+    ["A", "role_getroleinfo"],
+    ["A", "fight_starttower"],
+  ]);
 });

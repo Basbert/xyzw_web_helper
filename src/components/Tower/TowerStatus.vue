@@ -125,9 +125,54 @@
     </Teleport>
 
     <div class="card-content">
-      <div class="tower-floor">
-        <span class="label">当前层数</span>
-        <span class="floor-number">{{ currentFloor }}</span>
+      <div class="tower-details">
+        <div class="tower-floor">
+          <span class="label">当前层数</span>
+          <span class="floor-number">{{ currentFloor }}</span>
+        </div>
+        <section
+          v-if="isTowerConnected"
+          class="tower-enemies"
+          aria-label="本层敌方阵容"
+        >
+          <div class="enemies-heading">
+            <h4>本层敌方阵容</h4>
+            <span>查看不消耗次数</span>
+          </div>
+          <ul v-if="enemyLineup" class="enemy-list">
+            <li v-for="(hero, index) in enemyLineup.heroes" :key="index">
+              <img v-if="hero.avatar" :src="hero.avatar" :alt="hero.name" />
+              <span>{{ hero.name }}</span>
+            </li>
+          </ul>
+          <p v-else-if="isLoadingLineups" class="enemy-note">
+            正在加载敌方阵容…
+          </p>
+          <p v-else-if="lineupLoadFailed" class="enemy-note">
+            阵容加载失败，<button type="button" @click="loadTowerLineups">
+              重试
+            </button>
+          </p>
+          <p v-else class="enemy-note">暂无本层阵容数据</p>
+          <p
+            v-if="enemyLineup && lineupVersion === 'checking'"
+            class="enemy-note"
+          >
+            正在核对游戏配置版本…
+          </p>
+          <p
+            v-else-if="enemyLineup && lineupVersion === 'outdated'"
+            class="enemy-warning"
+          >
+            游戏配置已更新，显示的敌方阵容仅供参考。
+          </p>
+          <p
+            v-else-if="enemyLineup && lineupVersion === 'unknown'"
+            class="enemy-warning"
+          >
+            暂时无法核对游戏配置版本，阵容仅供参考。
+          </p>
+        </section>
       </div>
     </div>
 
@@ -161,8 +206,14 @@
 <script setup>
 import { useMessage } from "naive-ui";
 // 停止批量爬塔操作
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, ref, shallowRef, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import { HERO_DICT } from "@/utils/HeroList";
+import {
+  checkTowerConfigVersion,
+  getTowerEnemyLineup,
+  nextTowerStageId,
+} from "@/utils/towerEnemyLineups";
 let stopFlag = false;
 
 const stopClimbing = () => {
@@ -197,21 +248,56 @@ const isTowerConnected = computed(() => {
   );
 });
 
+const lineupData = shallowRef(null);
+const lineupVersion = ref("checking");
+const lineupLoadFailed = ref(false);
+const isLoadingLineups = ref(false);
+let lineupPromise = null;
+
+function loadTowerLineups() {
+  if (lineupData.value || lineupPromise) return lineupPromise;
+  isLoadingLineups.value = true;
+  lineupLoadFailed.value = false;
+  lineupPromise = import("@/data/towerLineups.json")
+    .then(({ default: data }) => {
+      lineupData.value = data;
+      checkTowerConfigVersion(data.configVersion).then((version) => {
+        lineupVersion.value = version;
+      });
+    })
+    .catch(() => {
+      lineupLoadFailed.value = true;
+      lineupPromise = null;
+    })
+    .finally(() => {
+      isLoadingLineups.value = false;
+    });
+  return lineupPromise;
+}
+
+const enemyLineup = computed(() =>
+  isTowerConnected.value
+    ? getTowerEnemyLineup(
+        roleInfo.value?.role?.tower?.id,
+        lineupData.value,
+        HERO_DICT,
+      )
+    : null,
+);
+watch(
+  [isTowerConnected, () => roleInfo.value?.role?.tower?.id],
+  ([connected, id]) => {
+    if (connected && nextTowerStageId(id)) loadTowerLineups();
+  },
+  { immediate: true },
+);
+
 const currentFloor = computed(() => {
   if (!isTowerConnected.value) return "—";
-  const tower = roleInfo.value?.role?.tower;
-
-  if (!tower) {
-    return "—";
-  }
-
-  if (!tower.id && tower.id !== 0) {
-    return "—";
-  }
-
-  const towerId = tower.id;
-  const floor = Math.floor(towerId / 10) + 1;
-  const layer = (towerId % 10) + 1;
+  const stageId = nextTowerStageId(roleInfo.value?.role?.tower?.id);
+  if (!stageId) return "—";
+  const floor = Math.floor((stageId - 1) / 10) + 1;
+  const layer = ((stageId - 1) % 10) + 1;
   return `${floor} - ${layer}`;
 });
 
@@ -340,9 +426,9 @@ const startTowerClimb = async () => {
     message.info("批量爬塔已超时自动停止");
   }, 60000);
 
+  const tokenId = tokenStore.selectedToken.id;
+  const client = tokenStore.wsConnections?.[tokenId]?.client;
   try {
-    const tokenId = tokenStore.selectedToken.id;
-    const client = tokenStore.wsConnections?.[tokenId]?.client;
     const checkSession = () => {
       if (
         !client ||
@@ -380,6 +466,17 @@ const startTowerClimb = async () => {
     else message.success(`已自动爬塔${climbCount}次，体力已耗尽或达到上限。`);
   } catch (error) {
     message.error(`批量爬塔失败: ${error.message || "未知错误"}`);
+  }
+
+  // A stopped batch may have completed its last fight after the preceding read.
+  if (
+    climbCount > 0 &&
+    client &&
+    tokenStore.selectedToken?.id === tokenId &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected" &&
+    tokenStore.wsConnections?.[tokenId]?.client === client
+  ) {
+    tokenStore.sendMessage(tokenId, "role_getroleinfo");
   }
 
   // 清除超时并重置状态
@@ -796,13 +893,20 @@ onMounted(() => {
   margin-bottom: var(--spacing-md);
   flex: 1; // 占据可用空间，使上下分布更均衡
   display: flex;
-  align-items: center; // 内容在中部更居中
+  align-items: center;
+  min-width: 0;
+}
+
+.tower-details {
+  width: 100%;
+  min-width: 0;
 }
 
 .tower-floor {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: var(--spacing-sm);
 
   .label {
     font-size: var(--font-size-sm);
@@ -815,6 +919,84 @@ onMounted(() => {
     color: var(--text-primary);
     font-family: "SF Mono", "Monaco", "Inconsolata", "Roboto Mono", monospace;
   }
+}
+
+.tower-enemies {
+  border-top: 1px solid var(--border-color, #e5e7eb);
+  margin-top: var(--spacing-md);
+  padding-top: var(--spacing-md);
+}
+
+.enemies-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+
+  h4 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: var(--font-size-sm);
+    font-weight: var(--font-weight-semibold);
+  }
+
+  span {
+    color: var(--text-secondary);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+}
+
+.enemy-list {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  padding: 0;
+  margin: 12px 0 0;
+  list-style: none;
+
+  li {
+    display: flex;
+    align-items: center;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.3;
+    text-align: center;
+    overflow-wrap: anywhere;
+  }
+
+  img {
+    width: min(100%, 52px);
+    aspect-ratio: 1;
+    object-fit: contain;
+  }
+}
+
+.enemy-note,
+.enemy-warning {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.enemy-note {
+  color: var(--text-secondary);
+
+  button {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: #6366f1;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+}
+
+.enemy-warning {
+  color: var(--warning-color, #b45309);
 }
 
 .card-actions {
