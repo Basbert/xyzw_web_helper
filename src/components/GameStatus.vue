@@ -76,10 +76,17 @@
       class="daily-extras"
       aria-label="爬塔和阵容"
     >
-      <ApexGuessCard @nav-to-apex="activeSection = 'apexChallengeGroup'" />
       <WeirdTowerStatus />
       <TowerStatus v-show="isShowTowerStatus" />
       <TeamFormation />
+    </section>
+
+    <section
+      v-show="activeSection === 'daily'"
+      class="daily-sub-cards"
+      aria-label="赛事与辅助"
+    >
+      <ApexGuessCard @nav-to-apex="activeSection = 'apexChallengeGroup'" />
     </section>
 
     <details v-if="activeSection !== 'tenHall'" class="role-details">
@@ -939,6 +946,18 @@ onUnmounted(() => {
 
 .daily-extras {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.daily-sub-cards {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: var(--spacing-lg);
+  min-width: 0;
+
+  &:empty {
+    display: none;
+  }
 }
 
 .role-details {
