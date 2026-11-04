@@ -58,6 +58,16 @@
                 <span>一键处理盐罐、挂机和功法残卷</span>
               </div>
             </div>
+            <div class="today-item">
+              <img src="/icons/legionCup.png" alt="" />
+              <div class="today-item-name">
+                <strong>逐鹿盐山竞猜</strong>
+                <span>一键自动选择最高票队伍竞猜</span>
+              </div>
+              <div class="today-item-status">
+                <span>{{ apexGuessTip }}</span>
+              </div>
+            </div>
           </div>
           <n-button
             type="primary"
@@ -102,6 +112,11 @@ import { computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import { useTokenStore } from "@/stores/tokenStore";
+import { resolveOpenGuesses } from "@/utils/apexGuessHelper.js";
+import {
+  calibrateServerTime,
+  getAdvanceNum,
+} from "@/utils/apexRules.js";
 
 const router = useRouter();
 const message = useMessage();
@@ -220,6 +235,26 @@ const isConnected = computed(() => {
   return (
     Boolean(tokenId) && tokenStore.getWebSocketStatus(tokenId) === "connected"
   );
+});
+
+const apexGuessTip = computed(() => {
+  if (!isConnected.value) return "未连接";
+  const apexInfo = tokenStore.gameData?.roleInfo?.role?.apexRoleInfo;
+  const guessMap = apexInfo?.guessMap || {};
+  const serverNow = calibrateServerTime(Date.now(), apexInfo?.resetTime?.day);
+  const openRounds = resolveOpenGuesses(serverNow);
+  if (!openRounds.length) return "暂无开放阶段";
+  let pending = 0;
+  for (const open of openRounds) {
+    for (const tab of open.tabs) {
+      const advanceNum = getAdvanceNum(open.round, open.season, tab.stage);
+      const guessed = new Set(guessMap[tab.scheduleId] || []);
+      if (advanceNum > 0 && guessed.size < advanceNum) {
+        pending++;
+      }
+    }
+  }
+  return pending === 0 ? "全部已竞猜" : `待竞猜 (${  pending  })`;
 });
 
 const connectionLabel = computed(() => {

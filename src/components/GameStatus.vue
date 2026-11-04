@@ -76,6 +76,7 @@
       class="daily-extras"
       aria-label="爬塔和阵容"
     >
+      <ApexGuessCard @nav-to-apex="activeSection = 'apexChallengeGroup'" />
       <WeirdTowerStatus />
       <TowerStatus v-show="isShowTowerStatus" />
       <TeamFormation />
@@ -416,6 +417,7 @@ import {
 import { useTokenStore } from "@/stores/tokenStore";
 import { runBottleAndHangUp } from "@/utils/bottleAndHangUp";
 
+import ApexGuessCard from "./cards/ApexGuessCard.vue";
 import BottleHelperCard from "./cards/BottleHelperCard.vue";
 import BoxHelperCard from "./cards/BoxHelperCard.vue";
 import FishHelperCard from "./cards/FishHelperCard.vue";
