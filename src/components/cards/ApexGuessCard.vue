@@ -1,5 +1,5 @@
 <template>
-  <div v-if="guessState.hasOpenGuesses" class="status-card apex-guess-card">
+  <div class="status-card apex-guess-card">
     <div class="card-header">
       <img
         src="/icons/legionCup.png"

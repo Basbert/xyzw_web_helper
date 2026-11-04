@@ -81,13 +81,15 @@
       <TeamFormation />
     </section>
 
-    <section
+    <details
       v-show="activeSection === 'daily'"
-      class="daily-sub-cards"
-      aria-label="赛事与辅助"
+      class="apex-guess-details"
     >
-      <ApexGuessCard @nav-to-apex="activeSection = 'apexChallengeGroup'" />
-    </section>
+      <summary>逐鹿盐山 · 竞猜（平时折叠，随时点开）</summary>
+      <div class="apex-guess-wrapper">
+        <ApexGuessCard @nav-to-apex="activeSection = 'apexChallengeGroup'" />
+      </div>
+    </details>
 
     <details v-if="activeSection !== 'tenHall'" class="role-details">
       <summary>角色资料与资源</summary>
@@ -948,15 +950,32 @@ onUnmounted(() => {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
 }
 
-.daily-sub-cards {
+.apex-guess-details {
   grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-  gap: var(--spacing-lg);
   min-width: 0;
 
-  &:empty {
-    display: none;
+  summary {
+    padding: 10px 2px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 14px;
+    user-select: none;
+    transition: color var(--transition-fast);
+
+    &:hover {
+      color: var(--primary-color);
+    }
+  }
+
+  summary:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 3px;
+  }
+
+  .apex-guess-wrapper {
+    margin-top: 12px;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 420px));
   }
 }
 
