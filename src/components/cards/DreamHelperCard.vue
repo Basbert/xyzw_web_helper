@@ -125,7 +125,7 @@
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import {
   goldItemsConfig,
@@ -155,6 +155,14 @@ const merchantData = ref({ 1: [], 2: [], 3: [] });
 const levelId = ref(0);
 
 const merchantDataLoaded = ref(false);
+watch(
+  () => tokenStore.selectedToken?.id,
+  () => {
+    merchantDataLoaded.value = false;
+    merchantData.value = { 1: [], 2: [], 3: [] };
+    levelId.value = 0;
+  },
+);
 
 // 英雄数据映射
 const heroData = {
@@ -457,41 +465,6 @@ function isGoldItem(merchantId, index) {
   );
 }
 
-// 获取角色信息（包含商品列表）
-async function getRoleInfo() {
-  if (!tokenStore.selectedToken) {
-    return;
-  }
-
-  const tokenId = tokenStore.selectedToken.id;
-
-  try {
-    const response = await tokenStore.sendMessageWithPromise(
-      tokenId,
-      "role_getroleinfo",
-      {},
-      15000,
-    );
-
-    if (response && response && response.role) {
-      // 获取商品列表
-      if (response.role.dungeon && response.role.dungeon.merchant) {
-        merchantData.value = response.role.dungeon.merchant;
-      }
-
-      // 获取关卡ID
-      if (response.role.levelId) {
-        levelId.value = response.role.levelId;
-      }
-
-      return { merchantData: merchantData.value, levelId: levelId.value };
-    }
-  } catch (error) {
-    console.error("获取角色信息失败:", error);
-    throw error;
-  }
-}
-
 // 购买商品
 async function buyItem(merchantId, index, pos) {
   if (!tokenStore.selectedToken) {
@@ -626,28 +599,36 @@ async function refreshMerchantList() {
     message.warning("当前不是梦境开放时间（周三/周四/周日/周一）");
     return;
   }
-
-  if (!tokenStore.selectedToken) {
-    message.warning("请先选择Token");
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId) {
+    message.warning("请先选择账号");
     return;
   }
-
+  merchantDataLoaded.value = false;
   try {
-    message.info("开始自动获取商品列表流程...");
-
-    // 第一步：获取默认队伍信息
-    await getDefaultTeam();
-
-    // 第二步：选择梦境阵容
-    await selectDreamTeam();
-
-    // 第三步：获取商品列表
-    await getRoleInfo();
+    const response = await tokenStore.sendMessageWithPromise(
+      tokenId,
+      "role_getroleinfo",
+      {},
+      15000,
+    );
+    if (
+      tokenStore.selectedToken?.id !== tokenId ||
+      tokenStore.getWebSocketStatus(tokenId) !== "connected"
+    )
+      return;
+    const merchant = response?.role?.dungeon?.merchant;
+    if (!merchant || typeof merchant !== "object" || Array.isArray(merchant)) {
+      message.warning("暂时没有获取到梦境商品，请先确认已完成梦境并刷新");
+      return;
+    }
+    merchantData.value = merchant;
+    levelId.value = response.role.levelId || 0;
     merchantDataLoaded.value = true;
-
-    message.success("商品列表获取完成");
+    message.success("梦境商品列表已刷新");
   } catch (error) {
-    message.error(`获取商品列表失败: ${error.message}`);
+    if (tokenStore.selectedToken?.id === tokenId)
+      message.warning(`梦境商品未能获取：${error.message || "请稍后重试"}`);
   }
 }
 
