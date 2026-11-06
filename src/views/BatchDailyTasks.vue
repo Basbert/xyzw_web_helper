@@ -6455,7 +6455,7 @@ const { batchXuanwuBlessing } = tasksXuanwuBlessing;
 const campChallengeMode = ref("pet");
 const campChallengeModeOptions = [
   { label: "挑战宠物", value: "pet" },
-  { label: "随机挑战人员", value: "random" },
+  { label: "随机挑战人员（主线阵容）", value: "random" },
   { label: "领取任务奖励", value: "claim" },
 ];
 const campChallengeModeLabel = computed(() => {

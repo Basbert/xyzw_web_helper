@@ -34,7 +34,7 @@
           size="small"
           :disabled="loading"
           :loading="loading"
-          @click="fetchCampChallengeData"
+          @click="fetchCampChallengeData()"
           class="action-btn refresh-btn"
         >
           <template #icon>
@@ -44,6 +44,15 @@
         </NButton>
       </div>
     </div>
+
+    <CampBattleControl
+      ref="campBattleControl"
+      :club="rawClubData"
+      :siege="rawSiegeData"
+      :source-token-id="loadedAccountId"
+      :loading="loading"
+      @updated="applyCampSnapshot"
+    />
 
     <!-- 双方俱乐部 VS 对决卡片 (参考蟠桃园科技倾角风) -->
     <div class="header-section" v-if="battleInfo">
@@ -74,8 +83,9 @@
               }}</span>
             </div>
             <div class="club-stats club-power-text">
-              {{ ownMembers.length }} 人 | {{ battleInfo.ownClub.quenchNum }} 红
-              | {{ formatPower(battleInfo.ownClub.power) }} 战力
+              {{ ownMembers.length }} 人 |
+              {{ battleInfo.ownClub.quenchNum ?? "—" }} 红 |
+              {{ formatPower(battleInfo.ownClub.power) }} 战力
             </div>
             <div class="club-stats announcement club-announce-text">
               {{ battleInfo.ownClub.announcement || "暂无公会公告" }}
@@ -122,7 +132,7 @@
             </div>
             <div class="club-stats club-power-text">
               {{ opponentMembers.length }} 人 |
-              {{ battleInfo.opponentClub.quenchNum }} 红 |
+              {{ battleInfo.opponentClub.quenchNum ?? "—" }} 红 |
               {{ formatPower(battleInfo.opponentClub.power) }} 战力
             </div>
             <div class="club-stats announcement club-announce-text">
@@ -241,8 +251,12 @@
             <div class="metric-card">
               <div class="metric-label">我方总体出手胜率</div>
               <div class="metric-value win-stat">
-                {{ todayCombatStats.ourClub.winRate }}%
-                <span class="sub-rate"
+                {{
+                  attackRecordsComplete
+                    ? `${todayCombatStats.ourClub.winRate}%`
+                    : "—"
+                }}
+                <span v-if="attackRecordsComplete" class="sub-rate"
                   >({{ todayCombatStats.ourClub.wins }}胜/{{
                     todayCombatStats.ourClub.totalAttacks
                   }}刀)</span
@@ -252,8 +266,12 @@
             <div class="metric-card">
               <div class="metric-label">对手总体出手胜率</div>
               <div class="metric-value opp-stat">
-                {{ todayCombatStats.oppClub.winRate }}%
-                <span class="sub-rate"
+                {{
+                  attackRecordsComplete
+                    ? `${todayCombatStats.oppClub.winRate}%`
+                    : "—"
+                }}
+                <span v-if="attackRecordsComplete" class="sub-rate"
                   >({{ todayCombatStats.oppClub.wins }}胜/{{
                     todayCombatStats.oppClub.totalAttacks
                   }}刀)</span
@@ -337,7 +355,7 @@
     </div>
 
     <!-- 加载状态 -->
-    <div v-if="loading" class="loading-state">
+    <div v-if="loading && currentMemberList.length === 0" class="loading-state">
       <n-spin size="large">
         <template #description
           >正在加载{{
@@ -346,9 +364,12 @@
         >
       </n-spin>
     </div>
+    <p v-else-if="loading" class="camp-load-progress" role="status">
+      正在加载成员阵容（{{ progressText }}），可先查看据点或选择挑战目标。
+    </p>
 
     <!-- 视图内容区域 -->
-    <div v-else-if="currentMemberList.length > 0" class="views-content-wrapper">
+    <div v-if="currentMemberList.length > 0" class="views-content-wrapper">
       <!-- ================= 视图 1：今日战场据点沙盘 (击破图表) ================= -->
       <div v-if="activeViewTab === 'battleMap'" class="battle-map-section">
         <!-- 控制栏与筛选器 -->
@@ -491,6 +512,23 @@
               </div>
               <div class="card-action-hint">
                 <span>战报流水</span>
+                <NButton
+                  v-if="
+                    selectedSide === 'opponent' &&
+                    selectedMatchDay === campClock().weekday
+                  "
+                  size="tiny"
+                  type="primary"
+                  :disabled="item.defeated"
+                  @click.stop="
+                    campBattleControl?.prepareTarget({
+                      nodeId: item.slot,
+                      roleId: item.id,
+                      mirror: item.mirror,
+                    })
+                  "
+                  >挑战</NButton
+                >
               </div>
             </div>
           </div>
@@ -502,8 +540,14 @@
         v-else-if="activeViewTab === 'todayDetails'"
         class="today-details-section"
       >
+        <p v-if="reportsLoading" class="camp-load-progress" role="status">
+          正在加载战报，请稍候…
+        </p>
+        <p v-else-if="!attackRecordsComplete" class="camp-record-note">
+          部分战报未能获取，统计可能不完整。
+        </p>
         <!-- 双方公会今日比分与总体出手胜率对决横幅 -->
-        <div class="today-versus-score-banner">
+        <div v-if="todayCombatStats.loaded" class="today-versus-score-banner">
           <div class="banner-sides-row">
             <!-- 我方公会 -->
             <div class="side-score-box own-score-box">
@@ -670,130 +714,55 @@
           </div>
         </div>
 
-        <!-- 督战催刀大卡片 (真实 0/3次未动刀 与 1~2/3次未打满 精确统计) -->
         <div class="attendance-control-panel">
           <div class="attendance-header">
             <div class="att-title-group">
               <n-icon class="att-icon"><FlameOutline /></n-icon>
-              <span class="att-title">公会今日出刀督促台</span>
-              <NTag
-                size="small"
-                :type="
-                  attendanceStats.unattackedCount === 0 &&
-                  attendanceStats.incompleteCount === 0
-                    ? 'success'
-                    : 'warning'
-                "
-                round
-                :bordered="false"
-              >
-                满刀率: {{ attendanceStats.completedRate }}% ({{
-                  attendanceStats.completedCount
-                }}/{{ attendanceStats.total }})
-              </NTag>
+              <span class="att-title">据点战报中的出手情况</span>
             </div>
-            <div class="att-actions">
-              <NButton
-                type="error"
-                size="small"
-                round
-                @click="copyUnattackedList"
-                :disabled="attendanceStats.unattackedCount === 0"
-                style="margin-right: 8px"
-              >
-                <template #icon>
-                  <n-icon><CopyOutline /></n-icon>
-                </template>
-                复制未动刀名单 (0/3次 · {{ attendanceStats.unattackedCount }}人)
-              </NButton>
-              <NButton
-                type="warning"
-                size="small"
-                round
-                @click="copyIncompleteList"
-                :disabled="attendanceStats.incompleteCount === 0"
-              >
-                <template #icon>
-                  <n-icon><CopyOutline /></n-icon>
-                </template>
-                复制未打满名单 (1~2/3次 ·
-                {{ attendanceStats.incompleteCount }}人)
-              </NButton>
-            </div>
-          </div>
-
-          <div class="attendance-body">
-            <!-- 0 刀未动成员 (0/3) -->
-            <div
-              class="unattacked-preview-box"
-              v-if="attendanceStats.unattackedCount > 0"
-              style="margin-bottom: 10px"
-            >
-              <span class="box-label error-label"
-                >🛑 0 刀未动成员（{{
-                  attendanceStats.unattackedCount
-                }}人，急需催刀）：</span
-              >
-              <div class="unattacked-tags">
-                <NTag
-                  v-for="m in attendanceStats.unattacked"
-                  :key="m.id"
-                  size="small"
-                  type="error"
-                  :bordered="false"
-                  class="member-reminder-tag"
-                  @click="openDuelModal(m)"
-                >
-                  {{ m.name }} ({{ formatPower(m.power) }} · 0/3次)
-                </NTag>
-              </div>
-            </div>
-
-            <!-- 未打满成员 (1~2/3) -->
-            <div
-              class="unattacked-preview-box"
-              v-if="attendanceStats.incompleteCount > 0"
-              style="margin-bottom: 10px"
-            >
-              <span class="box-label warning-label"
-                >⚠️ 未打满成员（{{
-                  attendanceStats.incompleteCount
-                }}人，仍有剩余免费挑战机会）：</span
-              >
-              <div class="unattacked-tags">
-                <NTag
-                  v-for="m in attendanceStats.incomplete"
-                  :key="m.id"
-                  size="small"
-                  type="warning"
-                  :bordered="false"
-                  class="member-reminder-tag"
-                  @click="openDuelModal(m)"
-                >
-                  {{ m.name }} (出战{{ m.realAttackCnt }}/3次 · 剩{{
-                    3 - m.realAttackCnt
-                  }}次)
-                </NTag>
-              </div>
-            </div>
-
-            <!-- 全员打满提示 -->
-            <div
-              class="all-attacked-box"
-              v-if="
-                attendanceStats.unattackedCount === 0 &&
-                attendanceStats.incompleteCount === 0
+            <NButton
+              size="small"
+              round
+              @click="copyUnattackedList"
+              :disabled="
+                !todayCombatStats.loaded ||
+                !attackRecordsComplete ||
+                attendanceStats.unattackedCount === 0
               "
             >
-              <NTag size="medium" type="success" :bordered="false">
-                🎉 太强了！我方 30 名成员今日免费挑战次数已全部出战打满！
-              </NTag>
-            </div>
+              复制暂无据点记录名单（{{ attendanceStats.unattackedCount }}人）
+            </NButton>
           </div>
+          <p class="camp-record-note">
+            这里只统计获取到的据点战报，可能不含守卫挑战；无记录不代表没有出手。
+            普通账号最多挑战 10 次、获胜 3 场，特权次数以游戏为准。
+          </p>
+          <p v-if="reportsLoading" class="camp-record-note">
+            正在加载据点战报…
+          </p>
+          <p v-else-if="!attackRecordsComplete" class="camp-record-note">
+            部分战报未能获取，暂不生成催战名单。
+          </p>
+          <div
+            v-else-if="attendanceStats.unattackedCount"
+            class="unattacked-tags"
+          >
+            <NTag
+              v-for="m in attendanceStats.unattacked"
+              :key="m.id"
+              size="small"
+              :bordered="false"
+              class="member-reminder-tag"
+              @click="openDuelModal(m)"
+            >
+              {{ m.name }}（暂无据点记录）
+            </NTag>
+          </div>
+          <p v-else class="camp-record-note">所有成员均有据点挑战记录。</p>
         </div>
 
         <!-- 30人今日出战详细大宽表 -->
-        <div class="table-card">
+        <div v-if="todayCombatStats.loaded" class="table-card">
           <div class="table-header-title">
             <div class="header-left">
               <span>我方俱乐部 30 人今日战绩详表</span>
@@ -835,6 +804,12 @@
         v-else-if="activeViewTab === 'weekRoster'"
         class="week-roster-section"
       >
+        <p v-if="reportsLoading" class="camp-load-progress" role="status">
+          正在加载成员战报，请稍候…
+        </p>
+        <p v-else-if="!attackRecordsComplete" class="camp-record-note">
+          部分战报未能获取，统计可能不完整。
+        </p>
         <!-- 4 公会排位天梯榜 -->
         <div class="group-rank-section" v-if="groupRankData.length > 0">
           <div class="section-title">
@@ -965,10 +940,14 @@
     </div>
 
     <!-- 空数据展示 -->
-    <div v-else class="empty-state">
+    <div v-else-if="!loading" class="empty-state">
       <n-empty :description="emptyHint" size="large">
         <template #extra>
-          <NButton size="small" type="primary" @click="fetchCampChallengeData">
+          <NButton
+            size="small"
+            type="primary"
+            @click="fetchCampChallengeData()"
+          >
             点击重新查询
           </NButton>
         </template>
@@ -1023,12 +1002,12 @@
               </NTag>
             </h3>
             <p>
-              真实战力: {{ formatPower(targetPlayer.power) }} | 总红淬:
-              {{ targetPlayer.redQuench }}
+              战力: {{ formatPower(targetPlayer.power) }} | 已返回红淬:
+              {{ targetPlayer.redQuench ?? "—" }}
             </p>
             <p>
-              玩具: {{ targetPlayer.toyName || "无" }} | 流派:
-              {{ targetPlayer.lineupType || "常规" }}
+              玩具: {{ targetPlayer.toyName || "未获取" }} | 流派:
+              {{ targetPlayer.lineupType || "未获取" }}
             </p>
           </div>
         </div>
@@ -1276,8 +1255,10 @@ import {
 } from "@vicons/ionicons5";
 import html2canvas from "html2canvas";
 import { NAvatar, NButton, NSelect, NTag, useMessage } from "naive-ui";
-import { computed, h, onMounted, ref, watch } from "vue";
+import { computed, h, onMounted, onUnmounted, ref, watch } from "vue";
+import CampBattleControl from "@/components/Club/CampBattleControl.vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import { campClock } from "@/utils/campChallenge";
 import {
   formatWeapon,
   getLineupType,
@@ -1293,7 +1274,7 @@ import {
  * @returns {string} 格式化后的战力字符串
  */
 const formatPower = (val: number | string | undefined | null) => {
-  if (!val) return "0";
+  if (val === undefined || val === null || val === "") return "—";
   const num = typeof val === "string" ? Number.parseFloat(val) : val;
   if (Number.isNaN(+num)) return "0";
   if (num >= 100000000) {
@@ -1308,6 +1289,14 @@ const formatPower = (val: number | string | undefined | null) => {
 const tokenStore = useTokenStore();
 const message = useMessage();
 const exportDom = ref<HTMLElement | null>(null);
+const campBattleControl = ref<any>(null);
+const loadedAccountId = ref<string | number | null>(null);
+const reportsLoading = ref(false);
+const reportsKey = ref("");
+const attackRecordsComplete = ref(false);
+const reportsRevision = ref(0);
+let reportSequence = 0;
+let disposed = false;
 
 // 界面状态与视图切换
 const selectedSide = ref<"own" | "opponent">("own");
@@ -1352,6 +1341,10 @@ const cachedAttackRecords = ref<any[]>([]);
 
 // 防竞态标识（比赛日数据一律实时拉取接口，不做本地缓存）
 let currentFetchToken = 0;
+const isCurrentFetch = (fetchId: number, tokenId: string) =>
+  !disposed &&
+  currentFetchToken === fetchId &&
+  tokenStore.selectedToken?.id === tokenId;
 
 // 对战数据与公会概览
 const battleInfo = ref<any>(null);
@@ -1508,12 +1501,12 @@ const currentMemberList = computed(() => {
 
 // 日程判断：当前星期几是否在营地挑战日程列表中
 const isMatchDay = computed(() => {
-  const day = new Date().getDay();
+  const day = campClock().weekday;
   return matchDayList.value.some((d) => d.day === day);
 });
 
 const scheduleText = computed(() => {
-  const day = new Date().getDay();
+  const day = campClock().weekday;
   const dayNames = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
   const currentDayName = dayNames[day];
   if (isMatchDay.value) {
@@ -1616,10 +1609,7 @@ const weeklyStats = computed(() => {
     weekAttackCnt > 0 ? ((weekWinCnt / weekAttackCnt) * 100).toFixed(1) : "0.0";
 
   // 个人今日统计
-  const now = new Date();
-  const todayKey = `${String(now.getFullYear()).slice(-2)}${String(
-    now.getMonth() + 1,
-  ).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+  const todayKey = campClock().dayKey;
   const todayData = attackMap[todayKey] || {};
   const todayAttackCnt = todayData.attackCnt || 0;
   const todayWinCnt = todayData.aSuccessCnt || 0;
@@ -1708,34 +1698,12 @@ const currentOppoDayScore = computed(() => {
   return oppo?.dayScore || 0;
 });
 
-// 督战催刀统计（按真实出刀 0/3次未动刀 与 1~2/3次未打满 精确统计）
+// 据点记录无法覆盖所有挑战类型，只展示没有据点记录的成员。
 const attendanceStats = computed(() => {
-  const members = ownMembers.value;
-  const total = members.length || 30;
-
-  // 1. 完全未动刀 (真实出刀 0 次，不论得分如何，必须催刀)
-  const unattacked = members.filter((m: any) => (m.realAttackCnt || 0) === 0);
-  // 2. 未打满 (真实出刀 1~2 次，仍有剩余免费挑战机会，不论打输打赢)
-  const incomplete = members.filter(
-    (m: any) => (m.realAttackCnt || 0) > 0 && (m.realAttackCnt || 0) < 3,
+  const unattacked = ownMembers.value.filter(
+    (m: any) => !m.mirror && (m.realAttackCnt || 0) === 0,
   );
-  // 3. 已打满 / 战意高昂 (出战 >= 3 次，打满免费机会或买刀，即使打输也是打满)
-  const completed = members.filter((m: any) => (m.realAttackCnt || 0) >= 3);
-
-  const completedCount = completed.length;
-  const completedRate =
-    total > 0 ? ((completedCount / total) * 100).toFixed(1) : "0.0";
-
-  return {
-    total,
-    unattackedCount: unattacked.length,
-    incompleteCount: incomplete.length,
-    completedCount,
-    completedRate,
-    unattacked,
-    incomplete,
-    completed,
-  };
+  return { unattacked, unattackedCount: unattacked.length };
 });
 
 // 通用剪贴板复制工具
@@ -1755,41 +1723,13 @@ const copyToClipboard = (text: string, successMsg: string) => {
   }
 };
 
-// 一键复制未动刀名单 (0/3次)
+// 复制名单时保留统计范围，避免把无据点记录误认为未出战。
 const copyUnattackedList = () => {
-  const unattacked = attendanceStats.value.unattacked;
-  if (!unattacked.length) {
-    message.success("太棒了！我方全员今日均已出战动刀！");
-    return;
-  }
-  const names = unattacked.map((m: any) => m.name).join("、");
-  const text = `【营地挑战今日催刀提醒（0刀未动）】\n截至目前，我方 0 刀未动成员（共${unattacked.length}人）：\n${names}\n请以上成员尽快上线使用免费挑战次数，为俱乐部争夺排位积分！`;
-  copyToClipboard(
-    text,
-    `未动刀催刀名单已复制到剪贴板（共${unattacked.length}人）！`,
-  );
-};
-
-// 一键复制未打满补刀名单 (1~2/3次)
-const copyIncompleteList = () => {
-  const incomplete = attendanceStats.value.incomplete;
-  if (!incomplete.length) {
-    message.success("太棒了！我方出战成员均已打满 3 刀！");
-    return;
-  }
-  const details = incomplete
-    .map(
-      (m: any) =>
-        `${m.name}(已出战${m.realAttackCnt || 0}/3次，剩${
-          3 - (m.realAttackCnt || 0)
-        }次)`,
-    )
-    .join("、");
-  const text = `【营地挑战今日补刀提醒（未打满 3 刀）】\n截至目前，我方未打满免费次数成员（共${incomplete.length}人）：\n${details}\n请以上成员及时上线补满挑战次数，助力俱乐部积分登顶！`;
-  copyToClipboard(
-    text,
-    `未打满补刀名单已复制到剪贴板（共${incomplete.length}人）！`,
-  );
+  const members = attendanceStats.value.unattacked;
+  if (!members.length || !attackRecordsComplete.value) return;
+  const names = members.map((m: any) => m.name).join("、");
+  const text = `【营地据点战报】\n当前暂无据点挑战记录（${members.length}人）：${names}\n该统计可能不含守卫挑战，请以游戏内记录为准。`;
+  copyToClipboard(text, `已复制 ${members.length} 名成员的据点记录情况`);
 };
 
 // 我方 30 人当周战功排行榜与防守胜率考核基础数据
@@ -2015,39 +1955,23 @@ const todayTableColumns = [
       ),
   },
   {
-    title: "今日出刀状态",
+    title: "据点出手记录",
     key: "participation",
-    width: 120,
+    width: 150,
     align: "center",
-    render: (row: any) => {
-      const cnt = row.realAttackCnt;
-      if (cnt === undefined || cnt === 0) {
-        return h(
-          NTag,
-          { size: "small", type: "error", bordered: false },
-          { default: () => "0/3 未出战" },
-        );
-      }
-      if (cnt < 3) {
-        return h(
-          NTag,
-          { size: "small", type: "warning", bordered: false },
-          { default: () => `${cnt}/3 未打满` },
-        );
-      }
-      if (cnt === 3) {
-        return h(
-          NTag,
-          { size: "small", type: "success", bordered: false },
-          { default: () => "3/3 已打满" },
-        );
-      }
-      return h(
+    render: (row: any) =>
+      h(
         NTag,
-        { size: "small", type: "info", bordered: false },
-        { default: () => `${cnt}次 (满战)` },
-      );
-    },
+        { size: "small", bordered: false, type: "info" },
+        {
+          default: () =>
+            row.mirror
+              ? "镜像据点"
+              : !attackRecordsComplete.value
+                ? "记录未完整获取"
+                : `${row.realAttackCnt || 0}次 / ${row.attackWins || 0}胜`,
+        },
+      ),
   },
   {
     title: "今日出刀实绩",
@@ -2188,7 +2112,7 @@ const weeklyRosterColumns = [
       h(
         "span",
         { style: { color: "#ff4d4f", fontWeight: "700" } },
-        row.redQuench || 0,
+        row.redQuench ?? "—",
       ),
   },
   {
@@ -2301,6 +2225,7 @@ const fetchMemberRealLineup = async (
     const battleTeam = roleBattleTeam?.battleTeam || teamInfo?.team;
 
     let totalRedCount = 0;
+    let redCountKnown = Boolean(battleTeam);
     const heroesInTeam: any[] = [];
 
     if (battleTeam) {
@@ -2309,9 +2234,18 @@ const fetchMemberRealLineup = async (
       );
       for (const slotKey of slotKeys) {
         const slotData = battleTeam[slotKey];
+        if (!slotData || typeof slotData !== "object") {
+          redCountKnown = false;
+          continue;
+        }
         const heroId = slotData.heroId || slotData.id;
-        const heroRed = slotData.redQuenchCnt || 0;
-        totalRedCount += heroRed;
+        const heroRed =
+          Number.isFinite(Number(slotData.redQuenchCnt)) &&
+          slotData.redQuenchCnt != null
+            ? Number(slotData.redQuenchCnt)
+            : null;
+        if (heroRed == null) redCountKnown = false;
+        else totalRedCount += heroRed;
 
         heroesInTeam.push({
           slotIndex: Number(slotKey) + 1,
@@ -2321,8 +2255,8 @@ const fetchMemberRealLineup = async (
               : `后排${Number(slotKey) + 1}号位`,
           heroId,
           heroName: HERO_DICT[heroId]?.name || `武将${heroId}`,
-          level: slotData.level || 6000,
-          star: slotData.star || 30,
+          level: slotData.level ?? null,
+          star: slotData.star ?? null,
           attack: slotData.attack || 0,
           curHp: slotData.hp || slotData.curHp || 0,
           skin: slotData.useSkin || slotData.skin || 0,
@@ -2332,10 +2266,7 @@ const fetchMemberRealLineup = async (
       }
     }
 
-    const totalPower =
-      heroesInTeam.reduce((sum, h) => sum + (h.attack || h.curHp || 0), 0) > 0
-        ? role?.power || baseInfo?.power || 0
-        : role?.power || baseInfo?.power || 0;
+    const totalPower = role?.power ?? baseInfo?.power ?? null;
 
     return {
       slot: baseInfo?.slot || 1,
@@ -2344,7 +2275,7 @@ const fetchMemberRealLineup = async (
       headImg: role?.headImg || baseInfo?.headImg || "/icons/xiaoyugan.png",
       power: totalPower,
       legacy: baseInfo?.legacy || 0,
-      redQuench: totalRedCount,
+      redQuench: redCountKnown && heroesInTeam.length ? totalRedCount : null,
       toyName:
         formatWeapon(
           role?.weaponId || role?.lordWeaponId || baseInfo?.toyName,
@@ -2352,7 +2283,7 @@ const fetchMemberRealLineup = async (
       petId: role?.petId || baseInfo?.petId || 0,
       legionName: role?.legionName || baseInfo?.legionName || "",
       heroList: heroesInTeam,
-      lineupType: getLineupType(heroesInTeam),
+      lineupType: heroesInTeam.length ? getLineupType(heroesInTeam) : "未获取",
       score: baseInfo?.score || 0,
       defeated: baseInfo?.defeated || false,
       challengeCnt: baseInfo?.challengeCnt || 0,
@@ -2365,9 +2296,9 @@ const fetchMemberRealLineup = async (
       id: roleId,
       name: baseInfo?.name || `成员${roleId}`,
       headImg: baseInfo?.headImg || "/icons/xiaoyugan.png",
-      power: baseInfo?.power || 0,
+      power: baseInfo?.power ?? null,
       legacy: 0,
-      redQuench: 0,
+      redQuench: null,
       toyName: "",
       petId: baseInfo?.petId || 0,
       heroList: [],
@@ -2393,15 +2324,18 @@ const fetchMembersInChunks = async (
   tokenId: string,
   items: { id: number; base: any }[],
   chunkSize = 5,
+  isCurrent: () => boolean = () => true,
 ) => {
   const results: any[] = [];
   const total = items.length;
   for (let i = 0; i < total; i += chunkSize) {
+    if (!isCurrent()) return [];
     const chunk = items.slice(i, i + chunkSize);
     progressText.value = `${Math.min(i + chunkSize, total)}/${total}`;
     const chunkResults = await Promise.all(
       chunk.map((it) => fetchMemberRealLineup(tokenId, it.id, it.base)),
     );
+    if (!isCurrent()) return [];
     results.push(...chunkResults);
   }
   return results;
@@ -2410,12 +2344,19 @@ const fetchMembersInChunks = async (
 /**
  * 获取营地挑战完整对战与阵容数据
  */
-const fetchCampChallengeData = async () => {
+const fetchCampChallengeData = async (preferredDay?: number) => {
   if (!tokenStore.selectedToken) {
     message.warning("请先在上方选择一个已连接账号");
     return;
   }
   const tokenId = tokenStore.selectedToken.id;
+  const fetchId = ++currentFetchToken;
+  const isCurrent = () => isCurrentFetch(fetchId, tokenId);
+  reportsKey.value = "";
+  reportSequence++;
+  reportsLoading.value = false;
+  attackRecordsComplete.value = false;
+  todayCombatStats.value.loaded = false;
   loading.value = true;
   emptyHint.value = "正在加载营地对阵信息...";
 
@@ -2427,6 +2368,7 @@ const fetchCampChallengeData = async () => {
       {},
       5000,
     );
+    if (!isCurrent()) return;
     const ownClubData =
       ownClubRes?.info || ownClubRes?.legionData || ownClubRes || {};
     const ownLegionId = ownClubData.id;
@@ -2438,9 +2380,13 @@ const fetchCampChallengeData = async () => {
       {},
       8000,
     );
-    const clubData = clubInfoRes?.club || {};
+    if (!isCurrent()) return;
+    if (!clubInfoRes?.club || !clubInfoRes?.siege)
+      throw new Error("营地战况数据不完整");
+    const clubData = clubInfoRes.club;
     rawClubData.value = clubData;
-    rawSiegeData.value = clubInfoRes?.siege || {};
+    rawSiegeData.value = clubInfoRes.siege;
+    loadedAccountId.value = tokenId;
 
     // 3. 动态解析比赛日列表（从接口 oppoMap 提取所有匹配的对手公会）
     const dayNames = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -2468,8 +2414,10 @@ const fetchCampChallengeData = async () => {
     matchDayList.value = days;
 
     // 确定当前选中的对战日（默认匹配今日星期几，不在列表中则选第一个）
-    const currentDay = new Date().getDay();
-    if (days.some((d) => d.day === currentDay)) {
+    const currentDay = campClock().weekday;
+    if (preferredDay != null && days.some((d) => d.day === preferredDay)) {
+      selectedMatchDay.value = preferredDay;
+    } else if (days.some((d) => d.day === currentDay)) {
       selectedMatchDay.value = currentDay;
     } else if (
       days.length > 0 &&
@@ -2490,7 +2438,7 @@ const fetchCampChallengeData = async () => {
         name: ownClubData.name || "我方俱乐部",
         serverId: ownClubData.serverId || "",
         logo: ownClubData.logo || "/icons/xiaoyugan.png",
-        quenchNum: 0,
+        quenchNum: null,
         power: clubData.power || ownClubData.power || 0,
         announcement:
           ownClubData.announcement || ownClubData.manifesto || "暂无公会公告",
@@ -2500,7 +2448,7 @@ const fetchCampChallengeData = async () => {
         name: displayOppName,
         serverId: currentOppo.viewId ? `${currentOppo.viewId}` : "跨服",
         logo: currentOppo.logo || "/icons/xiaoyugan.png",
-        quenchNum: 0,
+        quenchNum: null,
         power: currentOppo.power || 0,
         announcement: "营地挑战匹配对战俱乐部",
       },
@@ -2517,15 +2465,15 @@ const fetchCampChallengeData = async () => {
         id: d.roleId,
         name: d.name || `对手成员${idx + 1}`,
         headImg: d.headImg || "/icons/xiaoyugan.png",
-        power: 0,
+        power: null,
         score: d.score || 0,
         defeated: d.defeated || false,
         challengeCnt: d.challengeCnt || 0,
         failCnt: d.failCnt || 0,
         mirror: !!d.mirror,
         heroList: [],
-        lineupType: "常规",
-        redQuench: 0,
+        lineupType: "加载中",
+        redQuench: null,
         legacy: 0,
         toyName: "",
         petId: d.petId || 0,
@@ -2543,15 +2491,15 @@ const fetchCampChallengeData = async () => {
         id: m.roleId,
         name: m.name || `我方成员${idx + 1}`,
         headImg: m.headImg || "/icons/xiaoyugan.png",
-        power: 0,
+        power: null,
         score: m.score || 0,
         defeated: m.defeated || false,
         challengeCnt: m.challengeCnt || 0,
         failCnt: m.failCnt || 0,
         mirror: !!m.mirror,
         heroList: [],
-        lineupType: "常规",
-        redQuench: 0,
+        lineupType: "加载中",
+        redQuench: null,
         legacy: 0,
         toyName: "",
         petId: m.petId || 0,
@@ -2559,7 +2507,6 @@ const fetchCampChallengeData = async () => {
       }),
     );
 
-    selectedSide.value = "own";
     rankText.value = `营地挑战对决 · VS ${displayOppName}`;
 
     // 7. 分批并发拉取真实布阵
@@ -2567,12 +2514,14 @@ const fetchCampChallengeData = async () => {
       const oppDetailed = await fetchMembersInChunks(
         tokenId,
         opponentMembers.value.map((o) => ({ id: o.id, base: o })),
+        5,
+        isCurrent,
       );
+      if (!isCurrent()) return;
       opponentMembers.value = oppDetailed;
-      const totalOppRed = oppDetailed.reduce(
-        (s, m) => s + (m.redQuench || 0),
-        0,
-      );
+      const totalOppRed = oppDetailed.every((m) => m.redQuench != null)
+        ? oppDetailed.reduce((s, m) => s + m.redQuench, 0)
+        : null;
       const totalOppPower = oppDetailed.reduce((s, m) => s + (m.power || 0), 0);
       battleInfo.value.opponentClub.quenchNum = totalOppRed;
       if (totalOppPower > 0) {
@@ -2584,12 +2533,14 @@ const fetchCampChallengeData = async () => {
       const ownDetailed = await fetchMembersInChunks(
         tokenId,
         ownMembers.value.map((o) => ({ id: o.id, base: o })),
+        5,
+        isCurrent,
       );
+      if (!isCurrent()) return;
       ownMembers.value = ownDetailed;
-      const totalOwnRed = ownDetailed.reduce(
-        (s, m) => s + (m.redQuench || 0),
-        0,
-      );
+      const totalOwnRed = ownDetailed.every((m) => m.redQuench != null)
+        ? ownDetailed.reduce((s, m) => s + m.redQuench, 0)
+        : null;
       const totalOwnPower = ownDetailed.reduce((s, m) => s + (m.power || 0), 0);
       battleInfo.value.ownClub.quenchNum = totalOwnRed;
       if (totalOwnPower > 0) {
@@ -2605,6 +2556,7 @@ const fetchCampChallengeData = async () => {
         {},
         5000,
       );
+      if (!isCurrent()) return;
       if (Array.isArray(atkRes?.records)) {
         cachedAttackRecords.value = atkRes.records;
       }
@@ -2620,6 +2572,7 @@ const fetchCampChallengeData = async () => {
         {},
         5000,
       );
+      if (!isCurrent()) return;
       if (Array.isArray(grpRes?.rankList)) {
         groupRankData.value = grpRes.rankList;
       }
@@ -2627,19 +2580,13 @@ const fetchCampChallengeData = async () => {
       console.warn("未能拉取排位天梯榜:", e);
     }
 
-    // 10. 汇总全员出刀与防守战报
-    try {
-      await aggregateAllMemberAttacks(tokenId, selectedMatchDay.value);
-    } catch (e) {
-      console.warn("未能聚合全员进攻战报:", e);
-    }
-
     message.success(`营地挑战(${displayOppName})数据加载完成`);
   } catch (err: any) {
+    if (!isCurrent()) return;
     emptyHint.value = `查询失败: ${err.message || "网络异常"}`;
     message.error(emptyHint.value);
   } finally {
-    loading.value = false;
+    if (isCurrent()) loading.value = false;
   }
 };
 
@@ -2660,12 +2607,8 @@ const getMatchDayRange = (
   const m = Number.parseInt(phaseStr.slice(2, 4), 10) - 1;
   const d = Number.parseInt(phaseStr.slice(4, 6), 10);
   const offset = day >= 1 ? day - 1 : day + 6; // 周一为周期起点，周日跨到周末尾
-  const matchDt = new Date(y, m, d + offset);
-  const startMs = new Date(
-    matchDt.getFullYear(),
-    matchDt.getMonth(),
-    matchDt.getDate(),
-  ).getTime();
+  // 营地比赛日以中国时间为准，与设备所在时区无关。
+  const startMs = Date.UTC(y, m, d + offset) - 8 * 60 * 60 * 1000;
   return { startMs, endMs: startMs + 24 * 60 * 60 * 1000 };
 };
 
@@ -2696,15 +2639,20 @@ const isRecordInMatchDay = (ts: any, day: number): boolean => {
  * @param {string} tokenId 账号凭证
  * @param {number} day 比赛日编号
  */
-const aggregateAllMemberAttacks = async (tokenId: string, day: number) => {
+const aggregateAllMemberAttacks = async (
+  tokenId: string,
+  day: number,
+  isCurrent: () => boolean,
+) => {
   const oppo = matchDayList.value.find((d) => d.day === day);
   if (!oppo || !oppo.defenders) return;
 
   const oppDefenders = Object.values(oppo.defenders) as any[];
   const ourDefenders = ownMembers.value;
 
-  // 全实时策略：每次聚合前清空上一轮的当周防守统计
-  weeklyDefenseStatsMap.value = new Map();
+  // 聚合在局部完成，账号或比赛日变化后不会写回旧数据。
+  const weeklyStatsMap = new Map<any, any>();
+  let recordsComplete = Boolean(getMatchDayRange(day));
 
   const ourStats = new Map<
     number,
@@ -2798,9 +2746,11 @@ const aggregateAllMemberAttacks = async (tokenId: string, day: number) => {
               },
             });
           }
+        } else {
+          recordsComplete = false;
         }
       } catch (e) {
-        // 忽略单据点拉取失败
+        recordsComplete = false;
       }
     }),
   );
@@ -2877,18 +2827,23 @@ const aggregateAllMemberAttacks = async (tokenId: string, day: number) => {
               : "—";
           w.defWinRateNum =
             w.challengeCnt > 0 ? (w.defWins / w.challengeCnt) * 100 : -1;
-          weeklyDefenseStatsMap.value.set(`${memberRoleId}_${!!m.mirror}`, w);
-          if (!m.mirror || !weeklyDefenseStatsMap.value.has(memberRoleId)) {
-            weeklyDefenseStatsMap.value.set(memberRoleId, w);
+          weeklyStatsMap.set(`${memberRoleId}_${!!m.mirror}`, w);
+          if (!m.mirror || !weeklyStatsMap.has(memberRoleId)) {
+            weeklyStatsMap.set(memberRoleId, w);
           }
+        } else {
+          recordsComplete = false;
         }
       } catch (e) {
-        // 忽略单据点拉取失败
+        recordsComplete = false;
       }
     }),
   );
 
   await Promise.all([oppDefPromise, ourDefPromise]);
+  if (!isCurrent()) return;
+  weeklyDefenseStatsMap.value = weeklyStatsMap;
+  attackRecordsComplete.value = recordsComplete;
 
   // 对每个成员的主动出刀记录按时间倒序排序
   ourStats.forEach((entry) => {
@@ -2958,10 +2913,7 @@ const aggregateAllMemberAttacks = async (tokenId: string, day: number) => {
  * 检查当前用户出刀数以及双方据点被挑战次数。
  */
 const todayBattleStarted = computed(() => {
-  const now = new Date();
-  const todayKey = `${String(now.getFullYear()).slice(-2)}${String(
-    now.getMonth() + 1,
-  ).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}`;
+  const todayKey = campClock().dayKey;
   if ((rawSiegeData.value?.attackMap?.[todayKey]?.attackCnt || 0) > 0) {
     return true;
   }
@@ -2992,22 +2944,11 @@ const injectAttackStatsIntoOwnMembers = () => {
     const attackWinRate =
       realAttackCnt > 0 ? `${attackWinRateNum.toFixed(1)}%` : "—";
 
-    // 判定成员出战状态与出刀次数文本
-    let attackStatusText = "0/3 未出战";
-    let attackStatusType: "error" | "warning" | "success" | "info" = "error";
-    if (realAttackCnt === 0) {
-      attackStatusText = "0/3 未出战";
-      attackStatusType = "error";
-    } else if (realAttackCnt < 3) {
-      attackStatusText = `${realAttackCnt}/3 未打满`;
-      attackStatusType = "warning";
-    } else if (realAttackCnt === 3) {
-      attackStatusText = "3/3 已打满";
-      attackStatusType = "success";
-    } else {
-      attackStatusText = `${realAttackCnt}次 (满战)`;
-      attackStatusType = "info";
-    }
+    // 仅描述据点战报，不把三次挑战误判成达到上限。
+    const attackStatusText = isMirror
+      ? "镜像据点"
+      : `${realAttackCnt}次 / ${attackWins}胜`;
+    const attackStatusType = "info" as const;
 
     // 2. 防守信息：计算防守守住次数、失守次数与防守胜率
     //    failCnt 语义已用 100 条今日战报逐成员比对钉死：failCnt = 攻击方挑战失败次数 = 我方防守成功(守住)次数；
@@ -3041,6 +2982,149 @@ const injectAttackStatsIntoOwnMembers = () => {
   });
 };
 
+// 挑战或轻量刷新后，只更新战况；保留仍属于同一据点的阵容详情。
+const applyCampSnapshot = ({
+  tokenId,
+  response,
+}: {
+  tokenId: string;
+  response: any;
+}) => {
+  if (
+    disposed ||
+    tokenStore.selectedToken?.id !== tokenId ||
+    !response?.club ||
+    !response?.siege
+  )
+    return;
+  currentFetchToken++;
+  reportSequence++;
+  reportsKey.value = "";
+  reportsLoading.value = false;
+  attackRecordsComplete.value = false;
+  todayCombatStats.value.loaded = false;
+  loading.value = false;
+  rawClubData.value = response.club;
+  rawSiegeData.value = response.siege;
+  loadedAccountId.value = tokenId;
+  const names = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+  const entries =
+    response.club.oppoMap instanceof Map
+      ? [...response.club.oppoMap.entries()]
+      : Object.entries(response.club.oppoMap || {});
+  matchDayList.value = entries
+    .map(([day, item]: [any, any]) => ({
+      day: Number(day),
+      label: names[Number(day)] || `周${day}`,
+      name: item.name || `俱乐部${item.legionId}`,
+      legionId: item.legionId,
+      power: item.power || 0,
+      viewId: item.viewId,
+      dayScore: item.dayScore || 0,
+      defenders: item.defenders || {},
+      logo: item.logo || "/icons/xiaoyugan.png",
+    }))
+    .sort((a, b) => a.day - b.day);
+  if (!matchDayList.value.some((item) => item.day === selectedMatchDay.value)) {
+    selectedMatchDay.value =
+      matchDayList.value.find((item) => item.day === campClock().weekday)
+        ?.day ??
+      matchDayList.value[0]?.day ??
+      2;
+  }
+  const trueValue = (value: any) =>
+    value === true || value === 1 || value === "1" || value === "true";
+  const updateMembers = (data: any, previous: any[], legionName: string) => {
+    const rows =
+      data instanceof Map ? [...data.entries()] : Object.entries(data || {});
+    return rows.map(([slotKey, member]: [any, any]) => {
+      const slot = Number(slotKey);
+      const mirror = trueValue(member.mirror);
+      const old = previous.find(
+        (item) =>
+          item.slot === slot &&
+          String(item.id) === String(member.roleId) &&
+          item.mirror === mirror,
+      );
+      return {
+        ...(old || {
+          power: null,
+          redQuench: null,
+          heroList: [],
+          lineupType: "未获取",
+          legacy: 0,
+          toyName: "",
+        }),
+        slot,
+        id: member.roleId,
+        name: member.name || old?.name || `据点${slot}`,
+        headImg: member.headImg || old?.headImg || "/icons/xiaoyugan.png",
+        score: member.score || 0,
+        defeated: trueValue(member.defeated),
+        challengeCnt: member.challengeCnt || 0,
+        failCnt: member.failCnt || 0,
+        petId: member.petId || old?.petId || 0,
+        mirror,
+        legionName,
+      };
+    });
+  };
+  const oppo = matchDayList.value.find(
+    (item) => item.day === selectedMatchDay.value,
+  );
+  opponentMembers.value = updateMembers(
+    oppo?.defenders,
+    opponentMembers.value,
+    oppo?.name || "对手俱乐部",
+  );
+  ownMembers.value = updateMembers(
+    response.club.members,
+    ownMembers.value,
+    battleInfo.value?.ownClub?.name || "我方俱乐部",
+  );
+  if (battleInfo.value && oppo) {
+    battleInfo.value.opponentClub = {
+      ...battleInfo.value.opponentClub,
+      id: oppo.legionId,
+      name: oppo.name,
+      serverId: oppo.viewId || "跨服",
+      logo: oppo.logo,
+      power: oppo.power,
+      quenchNum: null,
+    };
+    rankText.value = `营地挑战对决 · VS ${oppo.name}`;
+  }
+  reportsRevision.value++;
+};
+
+const ensureCampReports = async () => {
+  const tokenId = loadedAccountId.value;
+  const day = selectedMatchDay.value;
+  if (!tokenId || loading.value || tokenStore.selectedToken?.id !== tokenId)
+    return;
+  const key = `${tokenId}:${day}`;
+  if (reportsLoading.value || reportsKey.value === key) return;
+  const fetchId = currentFetchToken;
+  const sequence = ++reportSequence;
+  const isCurrent = () =>
+    isCurrentFetch(fetchId, tokenId as string) &&
+    selectedMatchDay.value === day &&
+    reportSequence === sequence;
+  reportsLoading.value = true;
+  attackRecordsComplete.value = false;
+  try {
+    await aggregateAllMemberAttacks(tokenId as string, day, isCurrent);
+    if (isCurrent()) reportsKey.value = key;
+  } catch (error) {
+    if (isCurrent()) {
+      attackRecordsComplete.value = false;
+      message.warning("部分营地战报未能加载，请刷新后重试");
+    }
+  } finally {
+    if (isCurrent()) reportsLoading.value = false;
+  }
+};
+
 /**
  * 切换比赛日（周二/周三/周四）
  * 实时拉取对应比赛日的据点布阵与战报数据。
@@ -3048,106 +3132,9 @@ const injectAttackStatsIntoOwnMembers = () => {
  * @param {number} day 比赛日编号 (2, 3, 4)
  */
 const handleMatchDayChange = async (day: number) => {
+  if (!matchDayList.value.some((oppo) => oppo.day === day)) return;
   selectedMatchDay.value = day;
-
-  const oppo = matchDayList.value.find((d) => d.day === day);
-  if (!oppo || !oppo.defenders) return;
-
-  const tokenId = tokenStore.selectedToken?.id;
-  if (!tokenId) return;
-
-  const fetchId = ++currentFetchToken;
-  loading.value = true;
-
-  try {
-    // 1. 实时重拉 club_getinfo，刷新我方成员当日 challengeCnt/failCnt/score/defeated
-    const clubInfoRes: any = await tokenStore.sendMessageWithPromise(
-      tokenId,
-      "club_getinfo",
-      {},
-      8000,
-    );
-    if (currentFetchToken !== fetchId || selectedMatchDay.value !== day) return;
-    const clubData = clubInfoRes?.club || {};
-    rawClubData.value = clubData;
-    rawSiegeData.value = clubInfoRes?.siege || {};
-    const freshOwn = clubData.members || {};
-    ownMembers.value = ownMembers.value.map((m: any) => {
-      const fresh = freshOwn[m.id] || freshOwn[String(m.id)];
-      if (!fresh) return m;
-      return {
-        ...m,
-        score: fresh.score ?? m.score,
-        defeated: fresh.defeated ?? m.defeated,
-        challengeCnt: fresh.challengeCnt ?? 0,
-        failCnt: fresh.failCnt ?? 0,
-        mirror: fresh.mirror !== undefined ? !!fresh.mirror : m.mirror,
-      };
-    });
-
-    // 2. 实时重建对手据点列表
-    const oppDefendersEntries = Object.entries(oppo.defenders || {}) as [
-      string,
-      any,
-    ][];
-    const initialMembers = oppDefendersEntries.map(
-      ([slotKey, d]: [string, any], idx: number) => ({
-        slot: Number(slotKey) || idx + 1,
-        id: d.roleId,
-        name: d.name || `对手成员${idx + 1}`,
-        headImg: d.headImg || "/icons/xiaoyugan.png",
-        power: 0,
-        score: d.score || 0,
-        defeated: d.defeated || false,
-        challengeCnt: d.challengeCnt || 0,
-        failCnt: d.failCnt || 0,
-        mirror: !!d.mirror,
-        heroList: [],
-        lineupType: "常规",
-        redQuench: 0,
-        legacy: 0,
-        toyName: "",
-        petId: d.petId || 0,
-        legionName: oppo.name,
-      }),
-    );
-    const oppClubObj = {
-      id: oppo.legionId || "未知",
-      name: oppo.name,
-      serverId: oppo.viewId ? `${oppo.viewId}` : "跨服",
-      logo: oppo.logo || "/icons/xiaoyugan.png",
-      quenchNum: 0,
-      power: oppo.power || 0,
-      announcement: "营地挑战匹配对战俱乐部",
-    };
-    battleInfo.value.opponentClub = oppClubObj;
-    opponentMembers.value = initialMembers;
-    rankText.value = `营地挑战对决 · VS ${oppo.name}`;
-
-    // 3. 实时拉取对手据点布阵与全量战报聚合
-    if (initialMembers.length > 0) {
-      const detailed = await fetchMembersInChunks(
-        tokenId,
-        initialMembers.map((o) => ({ id: o.id, base: o })),
-      );
-      if (currentFetchToken !== fetchId || selectedMatchDay.value !== day)
-        return;
-      const totalOppRed = detailed.reduce((s, m) => s + (m.redQuench || 0), 0);
-      const totalOppPower = detailed.reduce((s, m) => s + (m.power || 0), 0);
-      oppClubObj.quenchNum = totalOppRed;
-      if (totalOppPower > 0) {
-        oppClubObj.power = totalOppPower;
-      }
-      opponentMembers.value = detailed;
-    }
-    await aggregateAllMemberAttacks(tokenId, day);
-  } catch (e) {
-    console.warn("切换比赛日加载失败:", e);
-  } finally {
-    if (currentFetchToken === fetchId) {
-      loading.value = false;
-    }
-  }
+  await fetchCampChallengeData(day);
 };
 
 /**
@@ -3383,7 +3370,7 @@ const columns = [
       h(
         "span",
         { style: { color: "#ff4d4f", fontWeight: "700" } },
-        row.redQuench,
+        row.redQuench ?? "—",
       ),
   },
   {
@@ -3420,14 +3407,14 @@ const columns = [
     render: (row: any) => {
       const heroes = row.heroList || [];
       if (!heroes.length)
-        return h("span", { class: "text-muted" }, "暂无出战布阵");
+        return h("span", { class: "text-muted" }, "阵容未获取或为空");
 
       // 横向并排渲染 5 张真实站位小卡片
       const cards = heroes.map((hero: any) => {
         const titleLine = [
           h("span", { class: "hero-slot-badge" }, `${hero.slotIndex}号位`),
           h("span", { class: "hero-name" }, hero.heroName),
-          h("span", { class: "hero-red" }, `(${hero.red}红)`),
+          h("span", { class: "hero-red" }, `(${hero.red ?? "—"}红)`),
         ];
 
         if (hero.HolyBeast) {
@@ -3487,18 +3474,59 @@ const columns = [
   },
 ];
 
-// 监听 Token 切换自动查询
+// 仅在进入战绩视图后拉取大量据点战报。
+watch(
+  () => [
+    activeViewTab.value,
+    loading.value,
+    selectedMatchDay.value,
+    loadedAccountId.value,
+    reportsRevision.value,
+  ],
+  () => {
+    if (
+      ["todayDetails", "weekRoster"].includes(activeViewTab.value) &&
+      !loading.value
+    )
+      ensureCampReports();
+  },
+);
+
+// 切换账号时立即清除旧战况，所有在途请求都不再写入当前页面。
 watch(
   () => tokenStore.selectedToken?.id,
   (newId) => {
+    currentFetchToken++;
+    reportSequence++;
+    loading.value = false;
+    reportsLoading.value = false;
+    reportsKey.value = "";
+    attackRecordsComplete.value = false;
+    todayCombatStats.value.loaded = false;
+    loadedAccountId.value = null;
+    rawClubData.value = null;
+    rawSiegeData.value = null;
+    battleInfo.value = null;
+    ownMembers.value = [];
+    opponentMembers.value = [];
+    matchDayList.value = [];
+    groupRankData.value = [];
+    cachedAttackRecords.value = [];
+    memberAttackStatsMap.value = new Map();
+    memberDefenseRecordsMap.value = new Map();
+    weeklyDefenseStatsMap.value = new Map();
+    showDuelModal.value = false;
     if (newId) fetchCampChallengeData();
   },
 );
 
 onMounted(() => {
-  if (tokenStore.selectedToken) {
-    fetchCampChallengeData();
-  }
+  if (tokenStore.selectedToken) fetchCampChallengeData();
+});
+onUnmounted(() => {
+  disposed = true;
+  currentFetchToken++;
+  reportSequence++;
 });
 </script>
 
@@ -3507,6 +3535,13 @@ onMounted(() => {
   padding: 16px;
   background: var(--n-color);
   min-height: calc(100vh - 120px);
+}
+
+.camp-load-progress,
+.camp-record-note {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .toolbar {
