@@ -155,6 +155,7 @@ test("a complete or confirmed empty vote board replaces the previous board", asy
 
 test("batch guessing processes every open round when schedule windows overlap", async () => {
   const requests = [];
+  const guessMap = {};
   const rules = {
     ApexScheduleStatus: { Unlocked: 1, Locked: 2 },
     calibrateServerTime: (now) => now,
@@ -169,17 +170,24 @@ test("batch guessing processes every open round when schedule windows overlap", 
       },
     ],
     getAdvanceNum: () => 1,
+    canGuessRow: () => true,
   };
+  const rate = {
+    ApexAction: { READ: "read", GUESS: "guess" },
+    runApexAction: (_action, task) => task(0),
+    isApexRateLimited: () => false,
+  };
+  const helper = await loadModule(
+    new URL("../src/utils/apexGuessHelper.js", import.meta.url),
+    {
+      "./apexRules.js": rules,
+      "./apexRateLimit.js": rate,
+    },
+  );
   const { createTasksApex } = await loadModule(
     new URL("../src/utils/batch/tasksApex.js", import.meta.url),
     {
-      "@/utils/apexRules": rules,
-      "@/utils/apexRateLimit": {
-        ApexAction: { READ: "read", GUESS: "guess" },
-        runApexAction: (_action, task) => task(0),
-        isApexRateLimited: () => false,
-        apexCooldownLeft: () => 0,
-      },
+      "@/utils/apexGuessHelper.js": helper,
     },
   );
   const deps = {
@@ -193,12 +201,12 @@ test("batch guessing processes every open round when schedule windows overlap", 
     connectionQueue: { active: 0 },
     batchSettings: { maxActive: 1 },
     addLog() {},
-    message: { success() {} },
+    message: { success() {}, warning() {} },
     currentRunningTokenId: { value: null },
     tokenStore: {
       closeWebSocketConnection() {},
       async sendMessageWithPromise(_id, cmd, params) {
-        if (cmd === "apex_getroleinfo") return { apexRoleInfo: {} };
+        if (cmd === "apex_getroleinfo") return { apexRoleInfo: { guessMap } };
         if (cmd === "apex_getguesslist") {
           requests.push(params.scheduleId);
           return {
@@ -212,6 +220,7 @@ test("batch guessing processes every open round when schedule windows overlap", 
           };
         }
         assert.equal(cmd, "apex_guess");
+        guessMap[params.teamId.slice(1)] = [params.teamId];
         return {};
       },
     },

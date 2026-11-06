@@ -694,6 +694,7 @@ import {
  */
 import { computed, h, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import { withApexGuessLock } from "@/utils/apexGuessHelper.js";
 import {
   ApexAction,
   apexCooldownLeft,
@@ -1848,26 +1849,37 @@ const doGuess = async (teamId, row, grp) => {
   pendingGuessTeamId.value = teamId;
   try {
     // 手动竞猜走 immediate：不排队、不等冷却，直接发；被 200400 打回才退避重试
-    await runApexAction(
-      ApexAction.GUESS,
-      (queuedMs) =>
-        tokenStore.sendMessageWithPromise(
-          token.id,
-          "apex_guess",
-          { teamId },
-          TIMEOUT_ACTION + queuedMs,
-        ),
-      {
-        immediate: true,
-        onWait: (ms) => startActionCooldown("guess", ms),
-      },
+    await withApexGuessLock(token.id, () =>
+      runApexAction(
+        ApexAction.GUESS,
+        (queuedMs) => {
+          if (
+            tokenStore.selectedToken?.id !== token.id ||
+            tokenStore.getWebSocketStatus(token.id) !== "connected"
+          ) {
+            throw new Error("账号已切换或连接已断开，停止竞猜");
+          }
+          return tokenStore.sendMessageWithPromise(
+            token.id,
+            "apex_guess",
+            { teamId },
+            TIMEOUT_ACTION + queuedMs,
+          );
+        },
+        {
+          immediate: true,
+          onWait: (ms) => startActionCooldown("guess", ms),
+        },
+      ),
     );
     // 业务错误码由 xyzwWebSocket.js 直接 reject，成功分支即 resolve
     message.success(`已竞猜 ${name}，等待开赛结果`);
     actionCooldown.guess = 0;
-    await fetchRoleInfo();
-    refreshCurrentBets();
-    fetchGuessHistory();
+    if (tokenStore.selectedToken?.id === token.id) {
+      await fetchRoleInfo();
+      refreshCurrentBets();
+      fetchGuessHistory();
+    }
   } catch (e) {
     if (isApexRateLimited(e)) {
       startActionCooldown("guess", apexCooldownLeft(ApexAction.GUESS));

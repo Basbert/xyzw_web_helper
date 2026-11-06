@@ -62,7 +62,7 @@
               <img src="/icons/legionCup.png" alt="" />
               <div class="today-item-name">
                 <strong>逐鹿盐山竞猜</strong>
-                <span>一键自动选择最高票队伍竞猜</span>
+                <span>每场按助威数选择队伍</span>
               </div>
               <div class="today-item-status">
                 <span>{{ apexGuessTip }}</span>
@@ -110,18 +110,15 @@ import lz4 from "lz4js";
 import { useMessage } from "naive-ui";
 import { computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
+import { useApexGuessStatus } from "@/hooks/useApexGuessStatus";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import { useTokenStore } from "@/stores/tokenStore";
-import { resolveOpenGuesses } from "@/utils/apexGuessHelper.js";
-import {
-  calibrateServerTime,
-  getAdvanceNum,
-} from "@/utils/apexRules.js";
 
 const router = useRouter();
 const message = useMessage();
 const tokenStore = useTokenStore();
 const { getArrayBuffer } = useIndexedDB();
+const { state: apexGuessState } = useApexGuessStatus(tokenStore);
 
 // ============ BIN 格式转换 ============
 
@@ -239,22 +236,16 @@ const isConnected = computed(() => {
 
 const apexGuessTip = computed(() => {
   if (!isConnected.value) return "未连接";
-  const apexInfo = tokenStore.gameData?.roleInfo?.role?.apexRoleInfo;
-  const guessMap = apexInfo?.guessMap || {};
-  const serverNow = calibrateServerTime(Date.now(), apexInfo?.resetTime?.day);
-  const openRounds = resolveOpenGuesses(serverNow);
-  if (!openRounds.length) return "暂无开放阶段";
-  let pending = 0;
-  for (const open of openRounds) {
-    for (const tab of open.tabs) {
-      const advanceNum = getAdvanceNum(open.round, open.season, tab.stage);
-      const guessed = new Set(guessMap[tab.scheduleId] || []);
-      if (advanceNum > 0 && guessed.size < advanceNum) {
-        pending++;
-      }
-    }
-  }
-  return pending === 0 ? "全部已竞猜" : `待竞猜 (${  pending  })`;
+  if (apexGuessState.value.kind === "loading") return "检查中";
+  if (
+    apexGuessState.value.kind !== "ready" ||
+    apexGuessState.value.uncertainStagesCount
+  )
+    return "状态待确认";
+  if (!apexGuessState.value.hasOpenGuesses) return "暂无开放阶段";
+  return apexGuessState.value.pendingStagesCount
+    ? `待竞猜 ${apexGuessState.value.pendingStagesCount} 阶段`
+    : "全部已竞猜";
 });
 
 const connectionLabel = computed(() => {
@@ -574,7 +565,9 @@ onMounted(async () => {
   color: #bdc8ff;
 }
 
-:global(html[data-theme="dark"] .dashboard-page .today-panel .n-button--primary-type) {
+:global(
+  html[data-theme="dark"] .dashboard-page .today-panel .n-button--primary-type
+) {
   --n-color: #167a4c !important;
   --n-color-hover: #20935b !important;
   --n-color-pressed: #10653e !important;

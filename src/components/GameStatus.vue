@@ -81,13 +81,17 @@
       <TeamFormation />
     </section>
 
-    <details
-      v-show="activeSection === 'daily'"
-      class="apex-guess-details"
-    >
-      <summary>逐鹿盐山 · 竞猜（平时折叠，随时点开）</summary>
+    <details v-show="activeSection === 'daily'" class="apex-guess-details">
+      <summary>
+        逐鹿盐山 · 竞猜
+        <span class="apex-summary-status">{{ apexGuessSummary }}</span>
+      </summary>
       <div class="apex-guess-wrapper">
-        <ApexGuessCard @nav-to-apex="activeSection = 'apexChallengeGroup'" />
+        <ApexGuessCard
+          :active="activeSection === 'daily'"
+          @nav-to-apex="activeSection = 'apexChallengeGroup'"
+          @status-change="apexGuessSummary = $event"
+        />
       </div>
     </details>
 
@@ -522,6 +526,7 @@ const tokenStore = useTokenStore();
 const message = useMessage();
 const bottleHelperCard = ref(null);
 const hangUpStatusCard = ref(null);
+const apexGuessSummary = ref("检查中");
 const combinedBusy = ref(false);
 const combinedProgress = ref("");
 const combinedConnected = computed(() => {
@@ -972,10 +977,16 @@ onUnmounted(() => {
     outline-offset: 3px;
   }
 
+  .apex-summary-status {
+    margin-left: 10px;
+    color: var(--primary-color);
+    font-size: 13px;
+  }
+
   .apex-guess-wrapper {
     margin-top: 12px;
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(320px, 420px));
+    grid-template-columns: minmax(0, 420px);
   }
 }
 
