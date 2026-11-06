@@ -3,12 +3,18 @@ import test from "node:test";
 import { createTasksCampChallenge } from "../src/utils/batch/tasksCampChallenge.js";
 
 const OPEN_TIME = Date.UTC(2026, 10, 3, 4);
-function fixture({ unknown = false, owns = false, timeout = false } = {}) {
+function fixture({
+  unknown = false,
+  owns = false,
+  timeout = false,
+  counts,
+} = {}) {
   const requests = [];
   const logs = [];
   const closed = [];
   let released = 0;
   let attacked = false;
+  let clubReads = 0;
   const role = {
     roleId: 100,
     battleTeam: { 0: { heroId: 104 } },
@@ -50,7 +56,12 @@ function fixture({ unknown = false, owns = false, timeout = false } = {}) {
     async sendMessageWithPromise(id, command, params) {
       requests.push({ id, command, params });
       if (command === "role_getroleinfo") return { role };
-      if (command === "club_getinfo") return state();
+      if (command === "club_getinfo") {
+        const response = state();
+        const current = counts?.[Math.min(clubReads++, counts.length - 1)];
+        if (current) response.siege.attackMap[261103] = current;
+        return response;
+      }
       if (command === "presetteam_getinfo") {
         return { presetTeamInfo: { 1: { teamInfo: { 0: { heroId: 104 } } } } };
       }
@@ -127,6 +138,33 @@ test("batch camp challenges only today's target and keeps an existing connection
     f.requests.filter((item) => item.command === "club_taskclaim").length,
     4,
   );
+});
+
+test("batch checks the final server snapshot before submitting at ordinary limits", async () => {
+  for (const counts of [
+    [
+      { attackCnt: 9, aSuccessCnt: 1 },
+      { attackCnt: 9, aSuccessCnt: 1 },
+      { attackCnt: 10, aSuccessCnt: 1 },
+    ],
+    [
+      { attackCnt: 5, aSuccessCnt: 2 },
+      { attackCnt: 5, aSuccessCnt: 2 },
+      { attackCnt: 6, aSuccessCnt: 3 },
+    ],
+  ]) {
+    const f = fixture({ counts });
+    await runAtGameTime(() =>
+      createTasksCampChallenge(f.deps).batchCampChallenge(),
+    );
+    assert.equal(
+      f.requests.filter((item) => item.command === "club_attack").length,
+      0,
+    );
+    assert.ok(
+      f.logs.some((item) => item.message.includes("已达到普通账号挑战上限")),
+    );
+  }
 });
 
 test("an unknown or timed-out result stops the batch without claiming or retrying", async () => {

@@ -10,6 +10,8 @@
         activeSection === 'peachGroup' ||
         activeSection === 'rankGroup',
       'club-mode': activeSection === 'club',
+      'dream-shop-priority':
+        activeSection === 'tools' && dreamInitialTab === 'buy',
     }"
   >
     <!-- 下方选卡分区切换（Tabs）：日常｜俱乐部｜活动 -->
@@ -137,7 +139,7 @@
     <FightHelperCard v-if="activeSection === 'tools'" />
 
     <!-- 梦境助手（提取组件） -->
-    <div v-if="activeSection === 'tools'" id="dream-shop-helper">
+    <div v-if="activeSection === 'tools'" id="dream-shop-helper" tabindex="-1">
       <DreamHelperCard :initial-tab="dreamInitialTab" />
     </div>
 
@@ -619,15 +621,29 @@ const legionMatch = ref({
 const activeSection = ref("daily");
 const dreamInitialTab = ref("battle");
 const route = useRoute();
+let dreamObserver;
 const openReminder = async (kind) => {
   if (kind === "camp") activeSection.value = "campChallengeGroup";
   if (kind === "dream") {
     dreamInitialTab.value = "buy";
     activeSection.value = "tools";
     await nextTick();
-    document
-      .getElementById("dream-shop-helper")
-      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    dreamObserver?.disconnect();
+    const target = document.getElementById("dream-shop-helper");
+    if (!target || activeSection.value !== "tools") return;
+    const focusWhenReady = () => {
+      if (activeSection.value !== "tools" || !target.isConnected) {
+        dreamObserver?.disconnect();
+        return;
+      }
+      if (!target.querySelector(".merchant-actions")) return;
+      dreamObserver?.disconnect();
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ behavior: "auto", block: "start" });
+    };
+    dreamObserver = new MutationObserver(focusWhenReady);
+    dreamObserver.observe(target, { childList: true, subtree: true });
+    focusWhenReady();
   }
 };
 watch(
@@ -854,6 +870,7 @@ onMounted(() => {
 
 // 组件卸载时清理定时器
 onUnmounted(() => {
+  dreamObserver?.disconnect();
   if (timer) {
     clearInterval(timer);
   }
@@ -916,6 +933,19 @@ onUnmounted(() => {
     grid-template-columns: repeat(2, 1fr);
     max-width: 100% !important;
   }
+}
+
+// Keep the selected dream card ahead of other lazily loaded tool cards so their
+// eventual height cannot move it away after the router has positioned it.
+.dream-shop-priority .section-tabs {
+  order: -2;
+}
+.dream-shop-priority #dream-shop-helper {
+  order: -1;
+}
+#dream-shop-helper {
+  min-width: 0;
+  scroll-margin-top: 76px;
 }
 
 .section-header {
@@ -1296,8 +1326,26 @@ onUnmounted(() => {
 // 响应式设计
 @media (max-width: 768px) {
   .game-status-container {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     padding: var(--spacing-sm);
+  }
+
+  .game-status-container > * {
+    min-width: 0;
+  }
+
+  .game-status-container :deep(.lineup-saver .toolbar),
+  .game-status-container :deep(.lineup-saver .team-selector),
+  .game-status-container :deep(.dream-helper .merchant-actions),
+  .game-status-container :deep(.dream-helper .team-actions) {
+    flex-wrap: wrap;
+  }
+
+  .game-status-container :deep(.dream-helper .merchant-actions .arco-btn) {
+    max-width: 100%;
+    height: auto;
+    min-height: 32px;
+    white-space: normal;
   }
 
   .status-card {

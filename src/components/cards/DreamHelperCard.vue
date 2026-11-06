@@ -69,17 +69,32 @@
           <div class="merchant-info">
             <div class="merchant-title">商品列表</div>
             <div class="merchant-actions">
-              <a-button type="primary" size="small" @click="refreshMerchantList"
+              <a-button
+                type="primary"
+                size="small"
+                :disabled="isRunning"
+                @click="refreshMerchantList"
                 >获取商品</a-button
               >
-              <a-button type="primary" size="small" @click="buyAllGoldItems"
+              <a-button
+                type="primary"
+                size="small"
+                :disabled="isRunning"
+                @click="buyAllGoldItems"
                 >一键购买金币商品</a-button
               >
-              <a-button type="primary" size="small" @click="buyAllGoldFishItems"
+              <a-button
+                type="primary"
+                size="small"
+                :disabled="isRunning"
+                @click="buyAllGoldFishItems"
                 >一键购买高级商人鱼竿</a-button
               >
             </div>
           </div>
+          <p v-if="purchaseProgress" role="status" aria-live="polite">
+            {{ purchaseProgress }}
+          </p>
           <div class="merchant-items" v-if="merchantDataLoaded">
             <div
               class="merchant-section"
@@ -125,7 +140,7 @@
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import {
   goldItemsConfig,
@@ -155,6 +170,28 @@ const merchantData = ref({ 1: [], 2: [], 3: [] });
 const levelId = ref(0);
 
 const merchantDataLoaded = ref(false);
+const purchaseProgress = ref("");
+let purchaseGeneration = 0;
+let componentDisposed = false;
+// Synchronous invalidation also catches a rapid A → B → A switch.
+watch(
+  () => {
+    const id = tokenStore.selectedToken?.id;
+    return [
+      id,
+      id ? tokenStore.getWebSocketStatus(id) : null,
+      id ? tokenStore.wsConnections?.[id]?.client : null,
+    ];
+  },
+  () => {
+    purchaseGeneration++;
+  },
+  { flush: "sync" },
+);
+onUnmounted(() => {
+  componentDisposed = true;
+  purchaseGeneration++;
+});
 watch(
   () => tokenStore.selectedToken?.id,
   () => {
@@ -465,132 +502,146 @@ function isGoldItem(merchantId, index) {
   );
 }
 
-// 购买商品
-async function buyItem(merchantId, index, pos) {
-  if (!tokenStore.selectedToken) {
-    return false;
-  }
+// Each run owns its original account and connection; never transfer queued purchases.
+function createPurchaseCheck(tokenId, generation, client) {
+  return () => {
+    if (
+      componentDisposed ||
+      purchaseGeneration !== generation ||
+      tokenStore.selectedToken?.id !== tokenId ||
+      tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
+      (client && tokenStore.wsConnections?.[tokenId]?.client !== client)
+    ) {
+      const error = new Error("账号或连接已变化，后续购买已停止");
+      error.interrupted = true;
+      throw error;
+    }
+  };
+}
 
-  const tokenId = tokenStore.selectedToken.id;
-
+async function buyItem(tokenId, merchantId, index, pos, checkActive) {
+  checkActive();
+  let response;
   try {
-    const response = await tokenStore.sendMessageWithPromise(
+    response = await tokenStore.sendMessageWithPromise(
       tokenId,
       "dungeon_buymerchant",
-      {
-        id: merchantId,
-        index,
-        pos,
-      },
+      { id: merchantId, index, pos },
       15000,
     );
-
-    return response && response.code === 0;
-  } catch (error) {
-    console.error("购买商品失败:", error);
-    return false;
+  } catch (cause) {
+    if (/^服务器错误:\s*\d+\s*-/.test(cause?.message || "")) {
+      const error = new Error(
+        `服务器拒绝本次购买：${cause.message}；后续购买已停止`,
+        { cause },
+      );
+      error.rejected = true;
+      throw error;
+    }
+    let changed = false;
+    try {
+      checkActive();
+    } catch {
+      changed = true;
+    }
+    const error = new Error(
+      changed
+        ? "账号或连接已变化，本次购买结果未确认，后续购买已停止，请核对原账号"
+        : "购买结果未确认，请核对原账号商品和资源后再决定是否重试",
+      { cause },
+    );
+    error.uncertain = true;
+    throw error;
+  }
+  // The WebSocket already checked the envelope's code and returned its raw body.
+  if (
+    !response ||
+    typeof response !== "object" ||
+    !Array.isArray(response.reward)
+  ) {
+    const error = new Error(
+      "购买结果未确认，请核对原账号商品和资源后再决定是否重试",
+    );
+    error.uncertain = true;
+    throw error;
   }
 }
 
-// 批量购买选中的商品
-
-// 一键购买所有金币商品
-async function buyAllGoldItems() {
+async function runDreamPurchases(mode) {
+  if (isRunning.value) return;
   if (!isDungeonOpen()) {
     message.warning("当前不是梦境开放时间（周三/周四/周日/周一）");
     return;
   }
-
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId || tokenStore.getWebSocketStatus(tokenId) !== "connected") {
+    message.warning("请先连接账号");
+    return;
+  }
+  if (!merchantDataLoaded.value) {
+    message.warning("请先获取当前账号的梦境商品");
+    return;
+  }
   if (levelId.value < 4000) {
     message.warning("关卡数小于4000，无法购买金币商品");
     return;
   }
-
-  isRunning.value = true;
-  let successCount = 0;
-  let failCount = 0;
-
-  // 遍历所有商人的商品
-  for (const merchantId in merchantData.value) {
-    const items = merchantData.value[merchantId];
-    const numId = Number.parseInt(merchantId);
-
-    // 从后往前购买（pos从大到小）
+  const accountName = tokenStore.selectedToken?.name || "当前角色";
+  const client = tokenStore.wsConnections?.[tokenId]?.client;
+  const generation = ++purchaseGeneration;
+  const checkActive = createPurchaseCheck(tokenId, generation, client);
+  const operations = [];
+  for (const [merchantId, items] of Object.entries(merchantData.value)) {
+    const id = Number(merchantId);
+    if (!Array.isArray(items) || (mode === "fish" && id !== 3)) continue;
     for (let pos = items.length - 1; pos >= 0; pos--) {
       const index = items[pos];
-
-      if (isGoldItem(numId, index)) {
-        try {
-          const success = await buyItem(numId, index, pos);
-          if (success) {
-            successCount++;
-          } else {
-            failCount++;
-          }
-        } catch (error) {
-          failCount++;
-        }
-
-        // 延迟避免请求过快
-        await delay(0.5);
-      }
+      if (
+        (mode === "fish" && index === 2) ||
+        (mode === "gold" && isGoldItem(id, index))
+      )
+        operations.push({ id, index, pos });
     }
   }
-
-  // 重新获取商品列表更新界面
-  await refreshMerchantList();
-
-  message.success(
-    `一键购买完成: 成功 ${successCount} 件, 失败 ${failCount} 件`,
-  );
-  isRunning.value = false;
-}
-
-// 一键购买所有高级商人鱼竿
-async function buyAllGoldFishItems() {
-  if (!isDungeonOpen()) {
-    message.warning("当前不是梦境开放时间（周三/周四/周日/周一）");
-    return;
-  }
-
-  if (levelId.value < 4000) {
-    message.warning("关卡数小于4000，无法购买金币商品");
-    return;
-  }
-
   isRunning.value = true;
   let successCount = 0;
-  let failCount = 0;
-
-  const items = merchantData.value[3];
-  // 从后往前购买（pos从大到小）
-  for (let pos = items.length - 1; pos >= 0; pos--) {
-    const index = items[pos];
-
-    if (index === 2) {
-      try {
-        const success = await buyItem(3, index, pos);
-        if (success) {
-          successCount++;
-        } else {
-          failCount++;
-        }
-      } catch (error) {
-        failCount++;
-      }
-
-      // 延迟避免请求过快
+  purchaseProgress.value = `${accountName}：准备购买 ${operations.length} 件`;
+  try {
+    for (const operation of operations) {
+      checkActive();
+      purchaseProgress.value = `${accountName}：已确认 ${successCount}/${operations.length} 件`;
+      await buyItem(
+        tokenId,
+        operation.id,
+        operation.index,
+        operation.pos,
+        checkActive,
+      );
+      successCount++;
+      checkActive();
       await delay(0.5);
+      checkActive();
     }
+    checkActive();
+    await refreshMerchantList();
+    checkActive();
+    const text = `${accountName}：已确认购买 ${successCount} 件`;
+    purchaseProgress.value = text;
+    if (!componentDisposed) message.success(text);
+  } catch (error) {
+    const text = `${accountName}：已确认购买 ${successCount} 件；${error.message || "购买未完成，请核对"}`;
+    purchaseProgress.value = text;
+    if (!componentDisposed) message.warning(text);
+  } finally {
+    isRunning.value = false;
   }
+}
 
-  // 重新获取商品列表更新界面
-  await refreshMerchantList();
-
-  message.success(
-    `一键购买完成: 成功 ${successCount} 件, 失败 ${failCount} 件`,
-  );
-  isRunning.value = false;
+async function buyAllGoldItems() {
+  return runDreamPurchases("gold");
+}
+async function buyAllGoldFishItems() {
+  return runDreamPurchases("fish");
 }
 
 // 获取商品列表（包含自动获取阵容）

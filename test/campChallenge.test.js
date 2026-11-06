@@ -300,3 +300,55 @@ test("only one attack can be in flight for the same account", async () => {
   await pending;
   assert.equal(f.calls.filter((x) => x.command === "club_attack").length, 1);
 });
+
+test("manual challenges do not inherit the batch ordinary limit", async () => {
+  const f = fixture({
+    getClub(read) {
+      const value = club();
+      if (read > 1)
+        value.siege.attackMap[261103] = { attackCnt: 10, aSuccessCnt: 3 };
+      return value;
+    },
+  });
+  const preview = await prepare(f);
+  const result = await submit(f, preview);
+  assert.equal(result.outcome, "win");
+  assert.equal(
+    f.calls.filter((item) => item.command === "club_attack").length,
+    1,
+  );
+});
+
+test("final limits guard blocks only configured ordinary limits inside the lock", async () => {
+  for (const final of [
+    { attackCnt: 10, aSuccessCnt: 1 },
+    { attackCnt: 5, aSuccessCnt: 3 },
+  ]) {
+    const f = fixture({
+      getClub(read) {
+        const value = club();
+        if (read > 1) value.siege.attackMap[261103] = final;
+        return value;
+      },
+    });
+    const preview = await prepare(f);
+    await assert.rejects(
+      submit(f, preview, { limits: { attempts: 10, wins: 3 } }),
+      (error) => error.code === "CAMP_ORDINARY_LIMIT_REACHED",
+    );
+    assert.equal(
+      f.calls.some((item) => item.command === "club_attack"),
+      false,
+    );
+  }
+  const f = fixture();
+  const preview = await prepare(f);
+  const result = await submit(f, preview, {
+    limits: { attempts: 10, wins: 3 },
+  });
+  assert.equal(result.outcome, "win");
+  assert.equal(
+    f.calls.filter((item) => item.command === "club_attack").length,
+    1,
+  );
+});

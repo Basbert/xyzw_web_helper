@@ -101,11 +101,23 @@ export function createTasksCampChallenge(deps) {
             preview.snapshot.wins >= CAMP_ORDINARY_LIMITS.wins
           )
             break;
-          const result = await submitCampAttack({
-            tokenStore,
-            preview,
-            checkActive,
-          });
+          let result;
+          try {
+            result = await submitCampAttack({
+              tokenStore,
+              preview,
+              checkActive,
+              limits: CAMP_ORDINARY_LIMITS,
+            });
+          } catch (error) {
+            if (error?.code !== "CAMP_ORDINARY_LIMIT_REACHED") throw error;
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `${name} ${error.message}`,
+              type: "info",
+            });
+            break;
+          }
           count++;
           const outcome =
             result.outcome === "win"

@@ -115,6 +115,7 @@ import { useRouter } from "vue-router";
 import DailyActivityReminders from "@/components/DailyActivityReminders.vue";
 import { useApexGuessStatus } from "@/hooks/useApexGuessStatus";
 import useIndexedDB from "@/hooks/useIndexedDB";
+import { formatShanghaiDate, useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
 import { compactApexGuessStatus } from "@/utils/apexGuessHelper.js";
 
@@ -224,14 +225,8 @@ const openGame = async () => {
 // const recentActivities = ref([]);
 
 // 计算属性
-const currentDate = computed(() => {
-  return new Date().toLocaleDateString("zh-CN", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-    weekday: "long",
-  });
-});
+const now = useShanghaiClock();
+const currentDate = computed(() => formatShanghaiDate(now.value));
 
 const isConnected = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;

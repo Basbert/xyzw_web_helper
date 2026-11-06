@@ -23,12 +23,13 @@
 </template>
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
 import { describeCampProgress, getReminderDays } from "@/utils/dailyReminders";
 
 const emit = defineEmits(["navigate"]);
 const tokenStore = useTokenStore();
-const now = ref(Date.now());
+const now = useShanghaiClock();
 const days = computed(() => getReminderDays(now.value));
 const connected = computed(() => {
   const id = tokenStore.selectedToken?.id;

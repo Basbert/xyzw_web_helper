@@ -172,6 +172,8 @@ const router = createRouter({
   history: createWebHistory(),
   routes: my_routes,
   scrollBehavior(to, from, savedPosition) {
+    // The dream section focuses itself after its async component is ready.
+    if (to.query.reminder === "dream") return false;
     if (savedPosition) {
       return savedPosition;
     } else {

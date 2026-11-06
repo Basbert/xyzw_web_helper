@@ -259,6 +259,7 @@ export async function submitCampAttack({
   preview,
   checkActive = () => {},
   now = Date.now,
+  limits = null,
 }) {
   const tokenId = preview?.tokenId;
   if (!tokenId) throw new Error("请先确认本次挑战");
@@ -275,6 +276,24 @@ export async function submitCampAttack({
     const target = requireTarget(context.snapshot, preview.target);
     if (context.team.signature !== preview.team.signature) {
       throw new Error("当前主线阵容、玩具或宠物已变化，请重新确认");
+    }
+    if (limits != null) {
+      if (
+        !Number.isSafeInteger(limits.attempts) ||
+        limits.attempts <= 0 ||
+        !Number.isSafeInteger(limits.wins) ||
+        limits.wins <= 0
+      ) {
+        throw new Error("营地挑战上限设置无效");
+      }
+      if (
+        context.snapshot.attempts >= limits.attempts ||
+        context.snapshot.wins >= limits.wins
+      ) {
+        const error = new Error("已达到普通账号挑战上限，本轮停止挑战");
+        error.code = "CAMP_ORDINARY_LIMIT_REACHED";
+        throw error;
+      }
     }
     checkActive();
     const params = {
