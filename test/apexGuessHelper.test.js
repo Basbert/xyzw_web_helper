@@ -311,3 +311,28 @@ test("acknowledgement alone cannot claim completion without refreshed server sta
   assert.equal(result.outcome, "partial");
   assert.match(result.message, /待处理/);
 });
+
+test("a stage closing before the final refresh is not labelled fully guessed", async () => {
+  let open = true;
+  let reads = 0;
+  const changingRules = {
+    ...rules,
+    getGuessTabs: () =>
+      open ? [{ stage: 5, scheduleId: 151, title: "32强赛", state: 1 }] : [],
+  };
+  const helper = await createHelper({ rules: changingRules });
+  const tokenStore = {
+    async sendMessageWithPromise(_id, cmd) {
+      assert.equal(cmd, "apex_getroleinfo");
+      reads++;
+      if (reads === 2) open = false;
+      return { apexRoleInfo: { guessMap: { 151: ["old"] } } };
+    },
+  };
+  const result = await helper.runApexAutoGuess({
+    tokenStore,
+    tokenId: "account",
+  });
+  assert.equal(result.successCount, 0);
+  assert.equal(result.message, "当前赛程内暂无开放竞猜");
+});

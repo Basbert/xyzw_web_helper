@@ -185,8 +185,10 @@ function resultMessage(result) {
     return `${prefix}；${result.reason || "已停止"}`;
   if (result.outcome === "partial")
     return `${prefix}；${result.reason || "仍有场次未完成"}`;
-  if (!result.verifiedStatus?.hasOpenGuesses && result.successCount) {
-    return `${prefix}；当前已无开放阶段`;
+  if (!result.verifiedStatus?.hasOpenGuesses) {
+    return result.successCount
+      ? `${prefix}；当前已无开放阶段`
+      : "当前赛程内暂无开放竞猜";
   }
   return result.successCount
     ? `${prefix}，当前开放阶段已完成`
