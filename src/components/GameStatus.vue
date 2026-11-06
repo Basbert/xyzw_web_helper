@@ -33,6 +33,11 @@
       <n-tab-pane name="tenHall" tab="模拟十殿" />
     </n-tabs>
 
+    <DailyActivityReminders
+      v-if="activeSection === 'daily'"
+      @navigate="openReminder"
+    />
+
     <section
       v-show="activeSection === 'daily'"
       class="daily-workspace"
@@ -132,7 +137,9 @@
     <FightHelperCard v-if="activeSection === 'tools'" />
 
     <!-- 梦境助手（提取组件） -->
-    <DreamHelperCard v-if="activeSection === 'tools'" />
+    <div v-if="activeSection === 'tools'" id="dream-shop-helper">
+      <DreamHelperCard :initial-tab="dreamInitialTab" />
+    </div>
 
     <!-- 武将升级助手（提取组件） -->
     <HeroUpgradeCard v-if="activeSection === 'tools'" />
@@ -435,11 +442,13 @@ import {
   computed,
   defineAsyncComponent,
   h,
+  nextTick,
   onMounted,
   onUnmounted,
   ref,
   watch,
 } from "vue";
+import { useRoute } from "vue-router";
 import { useTokenStore } from "@/stores/tokenStore";
 import { runBottleAndHangUp } from "@/utils/bottleAndHangUp";
 
@@ -453,6 +462,7 @@ import RecruitHelperCard from "./cards/RecruitHelperCard.vue";
 import SkinChallengeCard from "./cards/SkinChallengeCard.vue";
 import StudyChallengeCard from "./cards/StudyChallengeCard.vue";
 import Unlimitedlineup from "./cards/Unlimitedlineup.vue";
+import DailyActivityReminders from "./DailyActivityReminders.vue";
 import TowerStatus from "./Tower/TowerStatus.vue";
 import WeirdTowerStatus from "./Tower/WeirdTowerStatus.vue";
 
@@ -607,6 +617,26 @@ const legionMatch = ref({
 // 响应式数据
 
 const activeSection = ref("daily");
+const dreamInitialTab = ref("battle");
+const route = useRoute();
+const openReminder = async (kind) => {
+  if (kind === "camp") activeSection.value = "campChallengeGroup";
+  if (kind === "dream") {
+    dreamInitialTab.value = "buy";
+    activeSection.value = "tools";
+    await nextTick();
+    document
+      .getElementById("dream-shop-helper")
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+};
+watch(
+  () => route.query.reminder,
+  (kind) => {
+    if (kind === "camp" || kind === "dream") openReminder(kind);
+  },
+  { immediate: true },
+);
 const tenHallVisited = ref(false);
 watch(activeSection, (section) => {
   if (section === "tenHall") tenHallVisited.value = true;

@@ -33,6 +33,8 @@
           }}</span>
         </div>
 
+        <DailyActivityReminders @navigate="openReminder" />
+
         <section class="today-panel" aria-label="今日常用操作">
           <div class="today-heading">
             <div>
@@ -110,12 +112,15 @@ import lz4 from "lz4js";
 import { useMessage } from "naive-ui";
 import { computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
+import DailyActivityReminders from "@/components/DailyActivityReminders.vue";
 import { useApexGuessStatus } from "@/hooks/useApexGuessStatus";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import { useTokenStore } from "@/stores/tokenStore";
 import { compactApexGuessStatus } from "@/utils/apexGuessHelper.js";
 
 const router = useRouter();
+const openReminder = (kind) =>
+  router.push({ path: "/admin/game-features", query: { reminder: kind } });
 const message = useMessage();
 const tokenStore = useTokenStore();
 const { getArrayBuffer } = useIndexedDB();

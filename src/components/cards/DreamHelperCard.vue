@@ -134,6 +134,7 @@ import {
 } from "@/utils/dreamConstants";
 import MyCard from "../Common/MyCard.vue";
 
+const props = defineProps({ initialTab: { type: String, default: "battle" } });
 const tokenStore = useTokenStore();
 const message = useMessage();
 
@@ -143,7 +144,7 @@ const iconPath = computed(
 
 // 状态管理
 const isRunning = ref(false);
-const activeTab = ref("battle");
+const activeTab = ref(props.initialTab === "buy" ? "buy" : "battle");
 const isLoading = ref(false);
 const hasDefaultInfo = ref(false);
 const teamHeroes = ref([]);
