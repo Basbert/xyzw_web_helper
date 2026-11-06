@@ -128,7 +128,11 @@
             <button
               class="btn-confirm"
               :class="{ disabled: buyEnergyNum < 1 || buyEnergyNum > 100 }"
-              :disabled="buyEnergyNum < 1 || buyEnergyNum > 100"
+              :disabled="
+                !Number.isInteger(buyEnergyNum) ||
+                buyEnergyNum < 1 ||
+                buyEnergyNum > 100
+              "
               @click="confirmBuyEnergy"
             >
               确认购买
@@ -219,6 +223,10 @@ import {
   DEFAULT_WEIRD_TOWER_MAX_CLIMB,
   normalizeWeirdTowerMaxClimb,
 } from "@/utils/towerClimbLimit.js";
+import {
+  createTowerPurchaseSession,
+  purchaseTowerEnergy,
+} from "@/utils/towerEnergyPurchase";
 
 let stopFlag = false;
 let stopItemFlag = false;
@@ -252,6 +260,7 @@ const isUsingItems = ref(false);
 const isMerging = ref(false);
 const isBuying = ref(false); // 购买小鱼干状态
 const showBuyEnergyDialog = ref(false); // 购买弹窗显示
+const buyDialogSession = ref(null); // 打开弹窗时的账号和连接
 const buyEnergyNum = ref(1); // 购买数量（1-100）
 const maxClimbInput = ref(DEFAULT_WEIRD_TOWER_MAX_CLIMB);
 const climbTimeout = ref(null); // 用于超时重置状态
@@ -340,6 +349,7 @@ const canClimb = computed(() => {
   return (
     isTowerConnected.value &&
     hasEnergy &&
+    !isBuying.value &&
     !isClimbSequence.value &&
     notClimbing &&
     notUsingItems &&
@@ -368,6 +378,12 @@ const openBuyEnergyDialog = () => {
     message.warning("正在执行其他操作，请稍候");
     return;
   }
+  try {
+    buyDialogSession.value = createTowerPurchaseSession(tokenStore);
+  } catch (error) {
+    message.warning(error.message || "请先连接账号");
+    return;
+  }
   buyEnergyNum.value = 1;
   showBuyEnergyDialog.value = true;
 };
@@ -392,46 +408,39 @@ const clampBuyNum = () => {
  * @returns {Promise<void>} 无返回值，结果通过 message 提示
  */
 const confirmBuyEnergy = async () => {
-  clampBuyNum();
-  const num = buyEnergyNum.value;
-  if (num < 1 || num > 100) {
-    message.error("购买数量必须在 1-100 之间");
+  if (isBuying.value) return;
+  const session = buyDialogSession.value;
+  const quantity = buyEnergyNum.value;
+  if (!Number.isInteger(quantity) || quantity < 1 || quantity > 100) {
+    message.warning("购买数量必须是 1-100 的整数");
     return;
   }
-  const tokenId = tokenStore.selectedToken.id;
-  const beforeEnergy = towerEnergy.value;
-
+  if (!session) {
+    message.warning("请重新打开购买窗口");
+    return;
+  }
+  const { tokenId, checkSession } = session;
   isBuying.value = true;
   showBuyEnergyDialog.value = false;
   try {
-    const res = await tokenStore.sendMessageWithPromise(
+    const result = await purchaseTowerEnergy({
+      tokenStore,
       tokenId,
-      "evotower_buyenergy",
-      { energy: num },
-      8000,
-    );
-    // 刷新怪异塔信息
-    await getTowerInfo();
-    const afterEnergy = towerEnergy.value;
-    const gain = afterEnergy - beforeEnergy;
-    if (gain > 0) {
-      message.success(`购买成功！小鱼干 +${gain}（当前 ${afterEnergy}）`);
-    } else if (gain === 0) {
-      message.warning(`购买已执行（当前 ${afterEnergy}）`);
+      kind: "weird",
+      quantity,
+      checkSession,
+    });
+    if (result.status === "uncertain") {
+      message.warning(
+        "购买结果未确认，请先核对原账号的小鱼干和金砖，再决定是否重试",
+      );
+    } else if (result.status === "confirmed-unrefreshed") {
+      message.warning("购买已确认，但未能读取原账号最新体力，请返回原账号核对");
     } else {
-      message.warning(`购买已执行，能量变化 ${gain}（当前 ${afterEnergy}）`);
+      message.success(`购买已确认，当前小鱼干 ${result.energy}`);
     }
-    console.log("[购买小鱼干] 响应:", JSON.stringify(res).slice(0, 500));
   } catch (error) {
-    console.error("[购买小鱼干] 失败:", error);
-    const errMsg = error?.message || String(error);
-    if (errMsg.includes("1300050") || errMsg.includes("购买数量")) {
-      message.error("购买数量超出限制，请调整数量");
-    } else if (errMsg.includes("金砖")) {
-      message.error("金砖不足，无法购买");
-    } else {
-      message.error(`购买失败：${errMsg.slice(0, 80)}`);
-    }
+    message.warning(error.message || "无法确认购买，请重新检查账号");
   } finally {
     isBuying.value = false;
   }

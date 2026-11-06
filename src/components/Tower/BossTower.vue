@@ -7,10 +7,10 @@
       />
     </template>
     <template #title>
-      <h3>咸王功能</h3>
+      <h3>宝库战斗</h3>
     </template>
     <template #default>
-      <div class="time-display">宝库当前层数：{{ currentTower }}</div>
+      <div class="time-display">宝库当前层数：{{ currentTower ?? "—" }}</div>
     </template>
     <template #action>
       <a-button
@@ -18,6 +18,8 @@
         secondary
         size="small"
         block
+        :loading="state.isRunning"
+        :disabled="state.isRunning"
         @click="extendbosstower"
         >宝库战斗</a-button
       >
@@ -28,15 +30,18 @@
 <script setup>
 import { useMessage } from "naive-ui";
 
-import { computed, ref } from "vue";
+import { computed, onUnmounted, ref } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
-import { isSameGameValue } from "@/utils/gameValue.js";
+import { runBossTower } from "@/utils/bossTowerRunner.js";
 import MyCard from "../Common/MyCard.vue";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
 
-const dayOfWeek = new Date().getDay();
+let disposed = false;
+onUnmounted(() => {
+  disposed = true;
+});
 
 const bossTowerInfo = computed(() => {
   const data = tokenStore.gameData?.bossTowerInfo || null;
@@ -44,65 +49,41 @@ const bossTowerInfo = computed(() => {
 });
 const currentTower = computed(() => {
   const tower = bossTowerInfo.value?.bossTower;
-  return tower?.towerId ?? 1;
+  return tower?.towerId ?? null;
 });
 const state = ref({
   isRunning: false,
 });
 
 const extendbosstower = async () => {
-  if (!tokenStore.selectedToken) return message.warning("请先选择Token");
-  const tokenId = tokenStore.selectedToken.id;
-  state.value.isRunning = true;
-  if (!isSameGameValue(dayOfWeek, 1) && !isSameGameValue(dayOfWeek, 2)) {
+  if (state.value.isRunning) return;
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId) return message.warning("请先选择账号");
+  const checkActive = () => {
     if (
-      currentTower.value === 1 ||
-      currentTower.value === 2 ||
-      currentTower.value === 3
+      disposed ||
+      tokenStore.selectedToken?.id !== tokenId ||
+      tokenStore.getWebSocketStatus(tokenId) !== "connected"
     ) {
-      try {
-        state.value.isExtending = true;
-        message.info("正在战斗...");
-        for (let i = 0; i < 2; i++) {
-          tokenStore.sendMessage(tokenId, "bosstower_startboss", {});
-        }
-        for (let j = 0; j < 9; j++) {
-          tokenStore.sendMessage(tokenId, "bosstower_startbox", {});
-        }
-        await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "bosstower_getinfo",
-          {},
-          10000,
-        );
-        message.success("战斗已完成，请上线手动领取奖励");
-      } catch (e) {
-        message.error(`战斗失败: ${e?.message || "未知错误"}`);
-      }
-    } else if (currentTower.value === 4 || currentTower.value === 5) {
-      try {
-        state.value.isExtending = true;
-        message.info("正在战斗...");
-        for (let i = 0; i < 2; i++) {
-          tokenStore.sendMessage(tokenId, "bosstower_startboss", {});
-        }
-        await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "bosstower_getinfo",
-          {},
-          10000,
-        );
-        message.success("战斗已完成");
-      } catch (e) {
-        message.error(`战斗失败: ${e?.message || "未知错误"}`);
-      }
-    } else {
-      message.error("当前层数暂不支持");
+      const error = new Error("账号已切换或连接断开，已停止后续宝库操作");
+      error.interrupted = true;
+      throw error;
     }
-  } else {
-    message.error("未到活动开放时间");
+  };
+  state.value.isRunning = true;
+  try {
+    const result = await runBossTower({ tokenStore, tokenId, checkActive });
+    if (disposed || tokenStore.selectedToken?.id !== tokenId) return;
+    if (!result.refreshed)
+      message.warning("宝库指令已完成，但战况刷新失败，请手动刷新核对");
+    else if (result.towerId <= 3)
+      message.success("宝库操作已完成，请上线手动领取奖励");
+    else message.success("宝库操作已完成");
+  } catch (error) {
+    if (!disposed) message.warning(error.message || "宝库操作未完成");
+  } finally {
+    state.value.isRunning = false;
   }
-  state.value.isRunning = false;
 };
 </script>
 

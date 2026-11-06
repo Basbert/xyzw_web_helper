@@ -58,8 +58,21 @@
             "
             @click="runCombinedDailyAction"
           >
-            {{ combinedBusy ? combinedProgress : "一键处理盐罐、挂机与残卷" }}
+            {{
+              combinedBusy
+                ? `${combinedRunningName}：${combinedProgress || "正在处理…"}`
+                : "一键处理盐罐、挂机与残卷"
+            }}
           </n-button>
+          <p
+            v-if="combinedResult && !combinedBusy"
+            class="combined-daily-result"
+            :class="`is-${combinedResult.type}`"
+            role="status"
+            aria-live="polite"
+          >
+            {{ combinedResult.text }}
+          </p>
         </div>
         <details class="maintenance-details">
           <summary>查看盐罐、挂机状态及单独操作</summary>
@@ -529,6 +542,12 @@ const hangUpStatusCard = ref(null);
 const apexGuessSummary = ref("检查中");
 const combinedBusy = ref(false);
 const combinedProgress = ref("");
+const combinedRunningName = ref("");
+const combinedResults = ref({});
+const combinedResult = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  return tokenId ? combinedResults.value[tokenId] : null;
+});
 const combinedConnected = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
   return tokenId && tokenStore.getWebSocketStatus(tokenId) === "connected";
@@ -540,6 +559,7 @@ const runCombinedDailyAction = async () => {
   if (combinedBusy.value) return;
   const accountName = tokenStore.selectedToken?.name || "当前角色";
   combinedBusy.value = true;
+  combinedRunningName.value = accountName;
   try {
     const result = await runBottleAndHangUp({
       tokenStore,
@@ -556,16 +576,27 @@ const runCombinedDailyAction = async () => {
       ? `还有 ${result.remaining} 个加钟槽位未确认`
       : `加钟已补满（本次加钟 ${result.sent} 次）`;
     const summary = `${accountName}：盐罐已启动，挂机奖励已领取，${hangUpText}；${legacyText}`;
-    if (result.remaining || result.legacy.status !== "acknowledged")
-      message.warning(summary);
+    const type =
+      result.remaining || result.legacy.status !== "acknowledged"
+        ? "warning"
+        : "success";
+    combinedResults.value = {
+      ...combinedResults.value,
+      [tokenId]: { type, text: summary },
+    };
+    if (type === "warning") message.warning(summary);
     else message.success(summary);
   } catch (error) {
-    message.error(
-      `${accountName}的一键处理未完成：${error.message || "未知错误"}`,
-    );
+    const text = `${accountName}的一键处理未完成：${error.message || "未知错误"}`;
+    combinedResults.value = {
+      ...combinedResults.value,
+      [tokenId]: { type: "error", text },
+    };
+    message.error(text);
   } finally {
     combinedBusy.value = false;
     combinedProgress.value = "";
+    combinedRunningName.value = "";
   }
 };
 
@@ -1014,6 +1045,27 @@ onUnmounted(() => {
     min-height: 52px;
     font-size: 15px;
     font-weight: 600;
+  }
+}
+
+.combined-daily-result {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+
+  &.is-warning {
+    border-left: 3px solid #e09b24;
+  }
+  &.is-error {
+    border-left: 3px solid #d34c4c;
+  }
+  &.is-success {
+    border-left: 3px solid #18a058;
   }
 }
 
