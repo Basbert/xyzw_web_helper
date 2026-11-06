@@ -773,6 +773,60 @@ export const canGuessNow = (state) =>
   state === ApexScheduleStatus.Unlocked || state === ApexScheduleStatus.Locked;
 
 /**
+ * Find the next future guess window in the supplied schedule snapshot.
+ * A second match on the same day opens only after the preceding match ends.
+ * Return null when the snapshot does not contain a usable future window.
+ * @param {number} nowMs Calibrated server time in milliseconds.
+ * @returns {{startsAt:number, season:number, round:number, stage:number, title:string, scheduleId:number}|null} Next known window.
+ */
+export function getNextApexGuessWindow(nowMs) {
+  if (!Number.isFinite(nowMs)) return null;
+  const candidates = [];
+  const seenStages = new Set();
+  for (const conf of allSchedules) {
+    if (!APEX_TAOTAI_STAGES.includes(conf.stage)) continue;
+    const key = `${conf.season}:${conf.round}:${conf.stage}`;
+    if (seenStages.has(key)) continue;
+    seenStages.add(key);
+    if (getAdvanceNum(conf.round, conf.season, conf.stage) <= 0) continue;
+    const dayZero = getDateZeroTime(conf.date);
+    if (!Number.isFinite(dayZero) || !Number.isFinite(conf.fightTime)) continue;
+    const matches = getRoundSchedules(conf.round, conf.season);
+    const index = matches.findIndex((match) => match.id === conf.id);
+    const previous = index > 0 ? matches[index - 1] : null;
+    const start =
+      previous?.date === conf.date
+        ? dayZero + Math.max(0, Number(previous.endTime) || 0) * 1000
+        : dayZero;
+    const fightAt = dayZero + conf.fightTime * 1000;
+    if (start <= nowMs || start >= fightAt) continue;
+    candidates.push({
+      startsAt: start,
+      season: conf.season,
+      round: conf.round,
+      stage: conf.stage,
+      title: getStageName(conf.stage),
+      scheduleId: conf.id,
+    });
+  }
+  candidates.sort(
+    (a, b) => a.startsAt - b.startsAt || a.scheduleId - b.scheduleId,
+  );
+  return (
+    candidates.find(
+      (candidate) =>
+        getCurrentSeason(candidate.startsAt) === candidate.season &&
+        getCurrentRounds(candidate.season, candidate.startsAt).includes(
+          candidate.round,
+        ) &&
+        canGuessNow(
+          getScheduleStatus(candidate.scheduleId, candidate.startsAt),
+        ),
+    ) || null
+  );
+}
+
+/**
  * 单场是否已不可押（在 canGuessNow 基础上叠加客户端 _renderVsItem 的决赛判定：
  * 决赛阶段任一方胜负已定即停止押注）。
  * @param {number} state 单场状态

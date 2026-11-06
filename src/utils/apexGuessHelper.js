@@ -11,6 +11,7 @@ import {
   getCurrentRounds,
   getCurrentSeason,
   getGuessTabs,
+  getNextApexGuessWindow,
 } from "./apexRules.js";
 
 const TIMEOUT_READ = 10000;
@@ -94,6 +95,9 @@ async function fetchApexInfo(tokenStore, tokenId, checkInterrupted = () => {}) {
 /** Calculate status only from a response belonging to the requested account. */
 export function buildApexGuessStatus(apexInfo, nowMs = Date.now()) {
   const serverNow = calibrateServerTime(nowMs, apexInfo?.resetTime?.day);
+  const season = getCurrentSeason(serverNow);
+  const reportedSeason = Number(apexInfo?.resetTime?.season) || 0;
+  const scheduleMismatch = reportedSeason > 0 && reportedSeason !== season;
   const openRounds = resolveOpenGuesses(serverNow);
   const details = [];
   let pendingStagesCount = 0;
@@ -140,7 +144,10 @@ export function buildApexGuessStatus(apexInfo, nowMs = Date.now()) {
   }
   return {
     hasOpenGuesses: details.length > 0,
-    season: openRounds[0]?.season ?? getCurrentSeason(serverNow),
+    season: openRounds[0]?.season ?? season,
+    serverNowMs: serverNow,
+    scheduleMismatch,
+    nextGuess: scheduleMismatch ? null : getNextApexGuessWindow(serverNow),
     openRoundsCount: openRounds.length,
     openStagesCount: details.length,
     pendingStagesCount,
@@ -149,6 +156,33 @@ export function buildApexGuessStatus(apexInfo, nowMs = Date.now()) {
     summaryText,
     details,
   };
+}
+
+/** Format an upcoming configured window in the same timezone as the rules. */
+export function formatNextApexGuess(nextGuess, referenceMs = Date.now()) {
+  if (!Number.isFinite(nextGuess?.startsAt)) return "";
+  const date = new Date(nextGuess.startsAt);
+  const reference = new Date(referenceMs);
+  if (!Number.isFinite(date.getTime()) || !Number.isFinite(reference.getTime()))
+    return "";
+  const year =
+    date.getFullYear() === reference.getFullYear()
+      ? ""
+      : `${date.getFullYear()}年`;
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${year}${date.getMonth() + 1}月${date.getDate()}日 ${pad(date.getHours())}:${pad(date.getMinutes())}（${nextGuess.title || "竞猜"}）`;
+}
+
+/** Short text shared by the dashboard and the collapsed daily entry. */
+export function compactApexGuessStatus(status) {
+  const next = formatNextApexGuess(status.nextGuess, status.serverNowMs);
+  if (!status.hasOpenGuesses) {
+    if (status.scheduleMismatch) return "赛程待核对";
+    return next ? `下次预计 ${next}` : "暂无开放，后续赛程待确认";
+  }
+  if (status.pendingStagesCount)
+    return `待竞猜 ${status.pendingStagesCount} 阶段`;
+  return next ? `已竞猜 · 下次预计 ${next}` : "已竞猜";
 }
 
 export async function getApexGuessStatus(tokenStore, tokenId, options = {}) {

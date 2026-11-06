@@ -24,6 +24,12 @@
       <div class="guess-status-desc" aria-live="polite">
         <p class="summary-line">{{ guessState.summaryText }}</p>
         <p
+          v-if="guessState.kind === 'ready' && !guessState.hasOpenGuesses"
+          class="sub-line"
+        >
+          {{ upcomingDescription }}
+        </p>
+        <p
           v-if="guessState.kind === 'ready' && guessState.hasOpenGuesses"
           class="sub-line"
         >
@@ -84,7 +90,11 @@ import { useMessage } from "naive-ui";
 import { computed, onUnmounted, ref, watch } from "vue";
 import { useApexGuessStatus } from "@/hooks/useApexGuessStatus";
 import { useTokenStore } from "@/stores/tokenStore";
-import { runApexAutoGuess } from "@/utils/apexGuessHelper.js";
+import {
+  compactApexGuessStatus,
+  formatNextApexGuess,
+  runApexAutoGuess,
+} from "@/utils/apexGuessHelper.js";
 
 const props = defineProps({ active: { type: Boolean, default: true } });
 const emit = defineEmits(["navToApex", "statusChange"]);
@@ -128,6 +138,27 @@ const badgeText = computed(() => {
   if (isAllCompleted.value) return "已竞猜";
   return `待竞猜 ${guessState.value.pendingStagesCount} 阶段`;
 });
+const upcomingDescription = computed(() => {
+  if (guessState.value.scheduleMismatch)
+    return "当前赛季与赛程配置不一致，请查看对阵详情。";
+  const next = formatNextApexGuess(
+    guessState.value.nextGuess,
+    guessState.value.serverNowMs,
+  );
+  return next
+    ? `下一次预计 ${next} 开放，以游戏内赛程为准。`
+    : "后续赛程暂未确认，请稍后刷新。";
+});
+const collapsedSummary = computed(() => {
+  if (
+    isBusy.value ||
+    !isConnected.value ||
+    guessState.value.kind !== "ready" ||
+    guessState.value.uncertainStagesCount
+  )
+    return badgeText.value;
+  return compactApexGuessStatus(guessState.value);
+});
 const buttonText = computed(() => {
   if (!isConnected.value) return "连接后一键竞猜";
   if (guessState.value.kind === "loading") return "正在检查竞猜状态…";
@@ -147,7 +178,9 @@ const isButtonDisabled = computed(
 );
 const formatVotes = (value) => Number(value).toLocaleString("zh-CN");
 
-watch(badgeText, (value) => emit("statusChange", value), { immediate: true });
+watch(collapsedSummary, (value) => emit("statusChange", value), {
+  immediate: true,
+});
 watch(
   () => tokenStore.selectedToken?.id,
   () => {

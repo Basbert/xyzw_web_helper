@@ -13,6 +13,7 @@ const rules = {
   calibrateServerTime: (now) => now,
   getCurrentSeason: () => 1,
   getCurrentRounds: () => [6],
+  getNextApexGuessWindow: () => null,
   getGuessTabs: () => [
     { stage: 4, scheduleId: 150, title: "64强赛", state: 1 },
     { stage: 5, scheduleId: 151, title: "32强赛", state: 2 },
@@ -335,4 +336,39 @@ test("a stage closing before the final refresh is not labelled fully guessed", a
   });
   assert.equal(result.successCount, 0);
   assert.equal(result.message, "当前赛程内暂无开放竞猜");
+});
+
+test("next-opening text follows the account's calibrated season and is hidden when mismatched", async () => {
+  const next = {
+    startsAt: new Date(2026, 10, 9, 0, 0).getTime(),
+    title: "4强赛",
+  };
+  const custom = {
+    ...rules,
+    getGuessTabs: () => [],
+    getNextApexGuessWindow: () => next,
+  };
+  const { buildApexGuessStatus, compactApexGuessStatus } = await createHelper({
+    rules: custom,
+  });
+  const now = new Date(2026, 10, 6, 12, 0).getTime();
+  const matching = buildApexGuessStatus({ resetTime: { season: 1 } }, now);
+  assert.equal(matching.nextGuess, next);
+  assert.equal(
+    compactApexGuessStatus(matching),
+    "下次预计 11月9日 00:00（4强赛）",
+  );
+  const mismatch = buildApexGuessStatus({ resetTime: { season: 2 } }, now);
+  assert.equal(mismatch.nextGuess, null);
+  assert.equal(compactApexGuessStatus(mismatch), "赛程待核对");
+});
+
+test("unknown future schedules are not presented as a definite date", async () => {
+  const custom = { ...rules, getGuessTabs: () => [] };
+  const { buildApexGuessStatus, compactApexGuessStatus } = await createHelper({
+    rules: custom,
+  });
+  const current = buildApexGuessStatus({}, Date.now());
+  assert.equal(current.nextGuess, null);
+  assert.equal(compactApexGuessStatus(current), "暂无开放，后续赛程待确认");
 });

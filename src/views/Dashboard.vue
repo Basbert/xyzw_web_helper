@@ -113,6 +113,7 @@ import { useRouter } from "vue-router";
 import { useApexGuessStatus } from "@/hooks/useApexGuessStatus";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import { useTokenStore } from "@/stores/tokenStore";
+import { compactApexGuessStatus } from "@/utils/apexGuessHelper.js";
 
 const router = useRouter();
 const message = useMessage();
@@ -242,10 +243,7 @@ const apexGuessTip = computed(() => {
     apexGuessState.value.uncertainStagesCount
   )
     return "状态待确认";
-  if (!apexGuessState.value.hasOpenGuesses) return "暂无开放阶段";
-  return apexGuessState.value.pendingStagesCount
-    ? `待竞猜 ${apexGuessState.value.pendingStagesCount} 阶段`
-    : "全部已竞猜";
+  return compactApexGuessStatus(apexGuessState.value);
 });
 
 const connectionLabel = computed(() => {

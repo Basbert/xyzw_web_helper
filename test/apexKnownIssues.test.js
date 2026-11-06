@@ -161,6 +161,7 @@ test("batch guessing processes every open round when schedule windows overlap", 
     calibrateServerTime: (now) => now,
     getCurrentSeason: () => 1,
     getCurrentRounds: () => [1, 2, 3],
+    getNextApexGuessWindow: () => null,
     getGuessTabs: (round) => [
       {
         stage: 4,
