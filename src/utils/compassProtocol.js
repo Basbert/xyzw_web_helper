@@ -35,13 +35,25 @@ const mapGet = (map, key) =>
   map instanceof Map ? (map.get(key) ?? map.get(String(key))) : map?.[key];
 
 /** Interpret the current weekly chaos state; unknown is not zero. */
-export function parseChaosSnapshot(response) {
+export function parseChaosSnapshot(response, { full = false } = {}) {
   const week = response?.weekAward;
-  const left = integer(week?.turntableLeftCnt);
+  const left = integer(
+    full && week && week.turntableLeftCnt === undefined
+      ? 0
+      : week?.turntableLeftCnt,
+  );
   if (!week || left === null) throw new Error("混沌罗盘次数未确认，请重新刷新");
   const data = response?.nightMareData ?? response?.nightMare;
-  const bookScore = integer(data?.bookScore);
-  const turnRewardTime = integer(data?.turnRewardTime);
+  // The game's typed full role response defaults omitted numeric fields to 0.
+  // A mutation response may be partial, so do not apply defaults to it.
+  const bookScore = integer(
+    full && data && data.bookScore === undefined ? 0 : data?.bookScore,
+  );
+  const turnRewardTime = integer(
+    full && data && data.turnRewardTime === undefined
+      ? 0
+      : data?.turnRewardTime,
+  );
   return {
     left,
     bonusProgress:
@@ -84,10 +96,12 @@ export function parseCompassRewards(response) {
 
 // Bound one operation even if a malformed or unexpectedly large balance is sent.
 export const MAX_STAR_DRAWS = 200;
+export const MAX_CHAOS_REQUESTS = 200;
+export const CHAOS_BONUS_THRESHOLD = 5;
 
 /**
- * Run only after the player clicks an explicit action. Chaos makes one request
- * and may consume all remaining attempts. allStar uses all the displayed keys
+ * Run only after the player clicks an explicit action. Chaos draws until the
+ * remaining attempts and earned bonus attempts are exhausted. allStar uses all the displayed keys
  * in white/green/blue order. The balance object is copied before awaiting.
  * send returns the decoded body; assertActive throws on connection/account/page
  * changes. onDraw is notified immediately for every confirmed reward.
@@ -139,7 +153,10 @@ export async function runCompassDraw({
       throw new Error(`星级罗盘总次数须为 1 至 ${MAX_STAR_DRAWS}`);
   } else {
     confirmedCount = integer(count);
-    if (!confirmedCount || (wheel && confirmedCount > MAX_STAR_DRAWS))
+    if (
+      confirmedCount === null ||
+      (wheel && (!confirmedCount || confirmedCount > MAX_STAR_DRAWS))
+    )
       throw new Error(
         wheel
           ? `抽取次数须为 1 至 ${MAX_STAR_DRAWS}`
@@ -159,10 +176,91 @@ export async function runCompassDraw({
     assertActive();
     const initialCounts = chaos ? null : parseStarSnapshot(initial);
     if (chaos) {
-      const left = parseChaosSnapshot(initial).left;
-      if (!left) throw new Error("当前没有可用次数");
-      if (confirmedCount !== left)
+      let current = parseChaosSnapshot(initial, { full: true });
+      if (confirmedCount !== current.left)
         throw new Error("混沌罗盘剩余次数已变化，请刷新并重新确认");
+      if (!current.left && !(current.bonusProgress >= CHAOS_BONUS_THRESHOLD))
+        throw new Error("当前没有可用次数");
+
+      const readAfterMutation = async (response) => {
+        let snapshot;
+        try {
+          snapshot = parseChaosSnapshot(response);
+        } catch {
+          // A successful response can contain only a partial state update.
+        }
+        if (
+          !snapshot ||
+          (snapshot.left === 0 && snapshot.bonusProgress === null)
+        ) {
+          assertActive();
+          snapshot = parseChaosSnapshot(
+            await send(COMPASS_COMMANDS.chaosInfo, { roleId: confirmedRole }),
+            { full: true },
+          );
+        }
+        return snapshot;
+      };
+      let operations = 0;
+      while (true) {
+        assertActive();
+        if (!current.left) {
+          if (current.bonusProgress === null)
+            throw new Error("赠送次数进度无法确认，请刷新后检查");
+          if (current.bonusProgress < CHAOS_BONUS_THRESHOLD) break;
+        }
+        if (++operations > MAX_CHAOS_REQUESTS)
+          throw new Error("已达到本次操作上限，请刷新后继续");
+
+        const before = current;
+        const claiming = before.left === 0;
+        uncertainAccounts.add(accountId);
+        let response;
+        try {
+          response = await send(
+            claiming ? COMPASS_COMMANDS.chaosClaim : COMPASS_COMMANDS.chaosDraw,
+            {},
+          );
+        } catch (error) {
+          if (/^服务器错误:\s*\d+/.test(error?.message || ""))
+            uncertainAccounts.delete(accountId);
+          throw error;
+        }
+        if (!claiming) {
+          const drawn = parseCompassRewards(response);
+          rewards.push(...drawn);
+          completed +=
+            Array.isArray(response?.confIdList) && response.confIdList.length
+              ? response.confIdList.length
+              : drawn.length;
+          try {
+            onDraw({ completed, kind: "chaos", rewards: drawn, response });
+          } catch {
+            // A UI observer cannot undo confirmed rewards.
+          }
+        }
+        // The server has replied. A missing balance requires a read-only check,
+        // not another draw or an assumption about how many times were used.
+        uncertainAccounts.delete(accountId);
+        try {
+          current = await readAfterMutation(response);
+        } catch (error) {
+          throw new Error(
+            `已收到${claiming ? "领取" : "抽奖"}回包，但无法确认剩余次数：${error.message}`,
+          );
+        }
+        if (claiming) {
+          if (
+            current.left <= before.left ||
+            (current.bonusProgress !== null &&
+              current.bonusProgress >= before.bonusProgress)
+          )
+            throw new Error("赠送次数领取后的状态异常，已停止并保留奖励");
+        } else if (current.left >= before.left) {
+          throw new Error("抽奖后的剩余次数未减少，已停止并保留奖励");
+        }
+      }
+      return { completed, rewards };
     } else if (allStar) {
       if (
         STAR_WHEELS.some(
@@ -174,36 +272,55 @@ export async function runCompassDraw({
       throw new Error("抽取次数超过剩余次数，请刷新");
     }
 
-    const plan = chaos
-      ? [null]
-      : allStar
-        ? STAR_WHEELS.flatMap((entry) =>
-            Array.from({ length: confirmedCounts[entry.key] }, () => entry),
-          )
-        : Array.from({ length: confirmedCount }, () => wheel);
+    const plan = allStar
+      ? STAR_WHEELS.flatMap((entry) =>
+          Array.from({ length: confirmedCounts[entry.key] }, () => entry),
+        )
+      : Array.from({ length: confirmedCount }, () => wheel);
     let currentCounts = initialCounts;
     for (const entry of plan) {
       assertActive();
       uncertainAccounts.add(accountId);
-      const response = await send(
-        entry ? COMPASS_COMMANDS.starDraw : COMPASS_COMMANDS.chaosDraw,
-        entry ? { itemId: entry.itemId } : {},
-      );
+      let response;
+      try {
+        response = await send(COMPASS_COMMANDS.starDraw, {
+          itemId: entry.itemId,
+        });
+      } catch (error) {
+        if (/^服务器错误:\s*\d+/.test(error?.message || ""))
+          uncertainAccounts.delete(accountId);
+        throw error;
+      }
       const drawn = parseCompassRewards(response);
       rewards.push(...drawn);
       completed += 1;
       try {
         onDraw({
           completed,
-          kind: entry?.key ?? "chaos",
+          kind: entry.key,
           rewards: drawn,
           response,
         });
       } catch {
         // Observers cannot discard or duplicate a successful draw.
       }
-      if (entry) {
-        const nextCounts = parseStarSnapshot(response);
+      uncertainAccounts.delete(accountId);
+      {
+        let nextCounts;
+        try {
+          nextCounts = parseStarSnapshot(response);
+        } catch {
+          assertActive();
+          try {
+            nextCounts = parseStarSnapshot(
+              await send(COMPASS_COMMANDS.starInfo, {}),
+            );
+          } catch (error) {
+            throw new Error(
+              `已收到抽奖回包，但无法确认剩余次数：${error.message}`,
+            );
+          }
+        }
         if (
           STAR_WHEELS.some(
             (other) =>
@@ -214,8 +331,6 @@ export async function runCompassDraw({
           throw new Error("剩余次数与预期不符，已停止，请到游戏中核对");
         }
         currentCounts = nextCounts;
-      } else {
-        parseChaosSnapshot(response);
       }
       uncertainAccounts.delete(accountId);
       assertActive();

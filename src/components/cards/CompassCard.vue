@@ -26,7 +26,7 @@
         <strong>混沌罗盘</strong
         ><span>剩余 {{ showCount(state?.chaos) }} 次</span>
       </div>
-      <p>使用当前剩余的寻宝次数，额外赠送的次数请在游戏内领取。</p>
+      <p>自动抽完剩余次数，并领取可用的赠送次数后继续抽取。</p>
       <button
         class="primary-button"
         type="button"
@@ -65,7 +65,7 @@
     </div>
 
     <button
-      v-if="busy && drawing === 'star'"
+      v-if="busy && drawing"
       type="button"
       class="stop-button"
       @click="cancelRequested = true"
@@ -89,7 +89,9 @@
 import { computed, onUnmounted, reactive, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import {
+  CHAOS_BONUS_THRESHOLD,
   COMPASS_COMMANDS,
+  isCompassAccountUncertain,
   MAX_STAR_DRAWS,
   parseChaosSnapshot,
   parseStarSnapshot,
@@ -115,6 +117,13 @@ const tokenId = computed(() => tokenStore.selectedToken?.id || null);
 const result = computed(
   () => compassResultsByAccount.get(tokenId.value) || null,
 );
+const uncertain = computed(() => {
+  return (
+    !!tokenId.value &&
+    !!result.value &&
+    isCompassAccountUncertain(tokenId.value)
+  );
+});
 const connected = computed(
   () =>
     !!tokenId.value &&
@@ -132,15 +141,17 @@ const canDrawChaos = computed(
     connected.value &&
     !busy.value &&
     !loading.value &&
+    !uncertain.value &&
     !!chaosRoleId.value &&
     Number.isSafeInteger(state.value?.chaos) &&
-    state.value.chaos > 0,
+    (state.value.chaos > 0 || state.value.chaosBonus >= CHAOS_BONUS_THRESHOLD),
 );
 const canDrawStar = computed(
   () =>
     connected.value &&
     !busy.value &&
     !loading.value &&
+    !uncertain.value &&
     starTotal.value > 0 &&
     starTotal.value <= MAX_STAR_DRAWS,
 );
@@ -201,7 +212,7 @@ async function refresh() {
       if (!Number.isSafeInteger(roleId) || roleId <= 0)
         throw new Error("角色信息不完整");
       const response = await send(COMPASS_COMMANDS.chaosInfo, { roleId });
-      return { ...parseChaosSnapshot(response), roleId };
+      return { ...parseChaosSnapshot(response, { full: true }), roleId };
     };
     const [chaos, star] = await Promise.allSettled([
       getChaos(),
@@ -212,6 +223,8 @@ async function refresh() {
       chaos.status === "fulfilled" ? chaos.value.roleId : null;
     state.value = {
       chaos: chaos.status === "fulfilled" ? chaos.value.left : null,
+      chaosBonus:
+        chaos.status === "fulfilled" ? chaos.value.bonusProgress : null,
       star: star.status === "fulfilled" ? star.value : null,
     };
     const failed = [];
@@ -241,7 +254,7 @@ async function draw(type) {
   record(context.id, null);
   errorText.value = "";
   const assertActive = () => {
-    if (!context.valid() || (type === "star" && cancelRequested.value)) {
+    if (!context.valid() || cancelRequested.value) {
       throw new Error("账号、连接或页面已变化，或已停止后续抽取");
     }
   };
@@ -259,7 +272,7 @@ async function draw(type) {
         confirmedRewards.push(...rewards);
         const message =
           type === "chaos"
-            ? "混沌罗盘奖励已确认"
+            ? `混沌罗盘已确认 ${completed} 次`
             : `已确认 ${completed}/${requestedTotal} 次`;
         record(context.id, { message, rewards: confirmedRewards.slice() });
         if (context.valid()) progressText.value = message;
@@ -282,13 +295,18 @@ async function draw(type) {
         ? "混沌罗盘抽取未完成"
         : `星级罗盘已确认 ${completed} 次`;
     record(context.id, {
-      message: `${prefix}：${error.message || "请求失败"}。如果抽奖请求已发出，请先到游戏内核对次数和奖励，再决定是否重试。`,
+      message: error.compassUncertain
+        ? `${prefix}：${error.message || "请求失败"}。最后一次操作结果未确认，请到游戏内核对后重新加载页面。`
+        : `${prefix}：${error.message || "请求失败"}。已确认的奖励保留如下。`,
       rewards,
     });
   } finally {
-    if (context.valid()) state.value = null;
     busy.value = false;
     drawing.value = "";
+    if (context.valid()) {
+      state.value = null;
+      await refresh();
+    }
   }
 }
 const drawChaos = () => draw("chaos");
@@ -313,15 +331,9 @@ watch(
   { flush: "sync" },
 );
 watch(
-  () => props.active,
-  (active) => {
-    if (
-      active &&
-      connected.value &&
-      !state.value &&
-      !busy.value &&
-      !loading.value
-    )
+  [connected, () => props.active, busy],
+  ([isConnected, active, isBusy]) => {
+    if (active && isConnected && !state.value && !isBusy && !loading.value)
       refresh();
   },
   { immediate: true },
