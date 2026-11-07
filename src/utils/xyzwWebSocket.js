@@ -337,6 +337,9 @@ export function registerDefaultCommands(reg) {
 
     // 梦魇相关
     .register("nightmare_getroleinfo")
+    .register("nightmare_clickturntable")
+    .register("nmext_getinfo")
+    .register("nmext_drawturntable")
     // 免费对战房间（十殿模拟）
     .register("pkroom_create")
     .register("pkroom_getroominfo")
@@ -1209,6 +1212,9 @@ export class XyzwWebSocketClient {
       legion_getarearankresp: "legion_getarearank",
       legionwar_getgoldmonthwarrankresp: "legionwar_getgoldmonthwarrank",
       nightmare_getroleinforesp: "nightmare_getroleinfo",
+      nightmare_clickturntableresp: "nightmare_clickturntable",
+      nmext_getinforesp: "nmext_getinfo",
+      nmext_drawturntableresp: "nmext_drawturntable",
       fight_startlevelresp: "fight_startlevel",
       fight_calcleveltimeresp: "fight_calcleveltime",
       fight_levelresp: "fight_level",

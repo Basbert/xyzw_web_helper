@@ -229,6 +229,8 @@
     <!-- 俱乐部信息（仅俱乐部分区） -->
     <ClubInfo v-if="activeSection === 'club'" />
 
+    <CompassCard v-if="activeSection === 'activity'" :active="activeSection === 'activity'" />
+
     <!-- 月度任务进度（提取组件） -->
     <MonthlyTasksCard v-show="activeSection === 'activity'" />
 
@@ -489,6 +491,7 @@ const lazySection = (loader) =>
     errorComponent: failedSection,
   });
 
+const CompassCard = lazySection(() => import("./cards/CompassCard.vue"));
 const ApexChallenge = lazySection(() => import("./Apex/ApexChallenge.vue"));
 const ConsumptionProgressCard = lazySection(
   () => import("./cards/ConsumptionProgressCard.vue"),
