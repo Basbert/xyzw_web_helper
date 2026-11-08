@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 import * as vue from "vue";
+import { withDreamPurchaseLock } from "../src/utils/dailyDreamPurchase.js";
 import {
   goldItemsConfig,
   merchantConfig,
@@ -30,6 +31,8 @@ function fixture({
   mode = "gold",
   answer = { reward: [{ itemId: 1, count: 1 }] },
   onDelay,
+  lock = async (_id, operation) => operation(),
+  serverMerchant,
 } = {}) {
   const calls = [];
   const notices = [];
@@ -45,7 +48,13 @@ function fixture({
         return {
           role: {
             levelId: 5000,
-            dungeon: { merchant: { 1: [], 2: [], 3: [] } },
+            dungeon: {
+              merchant:
+                serverMerchant ||
+                (mode === "fish"
+                  ? { 1: [], 2: [], 3: [2, 2] }
+                  : { 1: [5, 6], 2: [], 3: [] }),
+            },
           },
         };
       if (answer instanceof Error) throw answer;
@@ -67,6 +76,7 @@ function fixture({
     merchantConfig,
     goldItemsConfig,
     isDungeonOpen: () => true,
+    withDreamPurchaseLock: lock,
     setTimeout: (fn) => delays.push(fn),
     console,
   };
@@ -113,6 +123,62 @@ function fixture({
   };
   return f;
 }
+test("同账号已有每日购买时，手动购买不发送请求", async () => {
+  const f = fixture({
+    lock: async () => {
+      throw new Error("当前账号已有梦境购买任务");
+    },
+  });
+  await f.run();
+  assert.equal(
+    f.calls.filter((call) => call.command === "dungeon_buymerchant").length,
+    0,
+  );
+  assert.ok(
+    f.notices.some(
+      (item) => item.key === "warning" && /已有梦境购买/.test(item.text),
+    ),
+  );
+});
+test("每日购买持有共享锁时，手动入口不能重叠购买", async () => {
+  let release;
+  const holding = withDreamPurchaseLock(
+    "a",
+    () =>
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+  );
+  try {
+    const f = fixture({ lock: withDreamPurchaseLock });
+    await f.run();
+    assert.equal(
+      f.calls.filter((call) => call.command === "dungeon_buymerchant").length,
+      0,
+    );
+    assert.ok(
+      f.notices.some(
+        (item) => item.key === "warning" && /梦境购买正在进行/.test(item.text),
+      ),
+    );
+  } finally {
+    release();
+    await holding;
+  }
+});
+test("拿到共享锁后重读商店，避免按过期位置购买", async () => {
+  const f = fixture({ serverMerchant: { 1: [], 2: [], 3: [] } });
+  await f.run();
+  assert.equal(
+    f.calls.filter((call) => call.command === "dungeon_buymerchant").length,
+    0,
+  );
+  assert.ok(
+    f.notices.some(
+      (item) => item.key === "success" && /已确认购买 0 件/.test(item.text),
+    ),
+  );
+});
 for (const mode of ["gold", "fish"]) {
   test(`${mode}: account switch and return cannot resume queued purchases`, async () => {
     const f = fixture({

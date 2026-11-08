@@ -112,7 +112,7 @@ function fixture(progress = {}) {
       return {};
     },
   };
-  const runner = () =>
+  const runner = (overrides = {}) =>
     new DailyTaskRunner(
       store,
       { commandDelay: 0, taskDelay: 0 },
@@ -120,6 +120,7 @@ function fixture(progress = {}) {
         loadConfig: async () => config,
         sleep: async () => {},
         getCurrentHour: () => 10,
+        ...overrides,
       },
     );
   return {
@@ -890,6 +891,120 @@ test("a running account keeps its initial options when the settings form changes
   assert.equal(form.claimEmail, false);
   assert.equal(
     f.calls.filter((call) => call.cmd === "mail_claimallattachment").length,
+    1,
+  );
+});
+
+test("梦境开放日完成梦境后执行可选购买步骤", async () => {
+  const f = fixture();
+  f.role.dailyTask.dailyTime = Date.parse("2026-11-11T00:00:00+08:00") / 1000;
+  let purchases = 0;
+  const runner = f.runner({
+    runDreamShopPurchases: async ({ tokenId, checkActive }) => {
+      checkActive();
+      assert.equal(tokenId, "account-a");
+      assert.ok(f.calls.some((call) => call.cmd === "dungeon_selecthero"));
+      purchases++;
+      return { status: "completed" };
+    },
+  });
+  await runner.run("account-a", {}, { ...settings, dreamShopPurchase: true });
+  assert.equal(purchases, 1);
+});
+
+test("关闭梦境购买或非开放日时不执行购买", async () => {
+  for (const [day, enabled] of [
+    ["2026-11-11", false],
+    ["2026-11-10", true],
+  ]) {
+    const f = fixture();
+    f.role.dailyTask.dailyTime = Date.parse(`${day}T00:00:00+08:00`) / 1000;
+    let purchases = 0;
+    await f
+      .runner({
+        runDreamShopPurchases: async () => {
+          purchases++;
+        },
+      })
+      .run("account-a", {}, { ...settings, dreamShopPurchase: enabled });
+    assert.equal(purchases, 0);
+  }
+});
+
+test("梦境执行被服务器拒绝时不购买并记录待处理", async () => {
+  const f = fixture();
+  f.role.dailyTask.dailyTime = Date.parse("2026-11-11T00:00:00+08:00") / 1000;
+  const originalSend = f.store.sendMessageWithPromise;
+  f.store.sendMessageWithPromise = async (id, cmd, params) => {
+    if (cmd === "dungeon_selecthero") throw new Error("服务器错误: 42 - 失败");
+    return originalSend(id, cmd, params);
+  };
+  let purchases = 0;
+  const result = await f
+    .runner({
+      runDreamShopPurchases: async () => {
+        purchases++;
+      },
+    })
+    .run("account-a", {}, { ...settings, dreamShopPurchase: true });
+  assert.equal(purchases, 0);
+  assert.ok(result.failed > 0);
+  assert.ok(result.incomplete > 0);
+});
+
+test("梦境商店未确认完成时一键每日不报告全部完成", async () => {
+  const f = fixture();
+  f.role.dailyTask.dailyTime = Date.parse("2026-11-11T00:00:00+08:00") / 1000;
+  const result = await f
+    .runner({
+      runDreamShopPurchases: async () => ({
+        status: "skipped",
+        message: "无法确认商店",
+      }),
+    })
+    .run("account-a", {}, { ...settings, dreamShopPurchase: true });
+  assert.ok(result.incomplete > 0);
+  assert.ok(result.deferred > 0);
+});
+
+test("本期梦境已完成时跳过重新选择阵容并仍检查商店", async () => {
+  const f = fixture();
+  const day = Date.parse("2026-11-12T00:00:00+08:00") / 1000;
+  f.role.dailyTask.dailyTime = day;
+  f.role.dungeon = { id: -1, beginTime: day - 86400 };
+  let purchases = 0;
+  await f
+    .runner({
+      runDreamShopPurchases: async () => {
+        purchases++;
+        return { status: "completed" };
+      },
+    })
+    .run("account-a", {}, { ...settings, dreamShopPurchase: true });
+  assert.equal(purchases, 1);
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "dungeon_selecthero").length,
+    0,
+  );
+});
+
+test("上一期已完成的梦境不能让新一期跳过梦境步骤", async () => {
+  const f = fixture();
+  const day = Date.parse("2026-11-11T00:00:00+08:00") / 1000;
+  f.role.dailyTask.dailyTime = day;
+  f.role.dungeon = { id: -1, beginTime: day - 3 * 86400 };
+  let purchases = 0;
+  await f
+    .runner({
+      runDreamShopPurchases: async () => {
+        purchases++;
+        return { status: "completed" };
+      },
+    })
+    .run("account-a", {}, { ...settings, dreamShopPurchase: true });
+  assert.equal(purchases, 1);
+  assert.equal(
+    f.calls.filter((call) => call.cmd === "dungeon_selecthero").length,
     1,
   );
 });

@@ -142,6 +142,7 @@
 import { useMessage } from "naive-ui";
 import { computed, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import { withDreamPurchaseLock } from "@/utils/dailyDreamPurchase";
 import {
   goldItemsConfig,
   isDungeonOpen,
@@ -590,44 +591,55 @@ async function runDreamPurchases(mode) {
   const client = tokenStore.wsConnections?.[tokenId]?.client;
   const generation = ++purchaseGeneration;
   const checkActive = createPurchaseCheck(tokenId, generation, client);
-  const operations = [];
-  for (const [merchantId, items] of Object.entries(merchantData.value)) {
-    const id = Number(merchantId);
-    if (!Array.isArray(items) || (mode === "fish" && id !== 3)) continue;
-    for (let pos = items.length - 1; pos >= 0; pos--) {
-      const index = items[pos];
-      if (
-        (mode === "fish" && index === 2) ||
-        (mode === "gold" && isGoldItem(id, index))
-      )
-        operations.push({ id, index, pos });
-    }
-  }
   isRunning.value = true;
   let successCount = 0;
-  purchaseProgress.value = `${accountName}：准备购买 ${operations.length} 件`;
+  purchaseProgress.value = `${accountName}：正在刷新梦境商店`;
   try {
-    for (const operation of operations) {
+    await withDreamPurchaseLock(tokenId, async () => {
       checkActive();
-      purchaseProgress.value = `${accountName}：已确认 ${successCount}/${operations.length} 件`;
-      await buyItem(
-        tokenId,
-        operation.id,
-        operation.index,
-        operation.pos,
-        checkActive,
-      );
-      successCount++;
+      // Daily automation may have changed the store since it was last opened.
+      await refreshMerchantList();
       checkActive();
-      await delay(0.5);
+      if (!merchantDataLoaded.value)
+        throw new Error("无法读取最新梦境商店，已停止购买");
+      if (levelId.value < 4000)
+        throw new Error("关卡数小于4000，无法购买梦境商品");
+      const operations = [];
+      for (const [merchantId, items] of Object.entries(merchantData.value)) {
+        const id = Number(merchantId);
+        if (!Array.isArray(items) || (mode === "fish" && id !== 3)) continue;
+        for (let pos = items.length - 1; pos >= 0; pos--) {
+          const index = items[pos];
+          if (
+            (mode === "fish" && index === 2) ||
+            (mode === "gold" && isGoldItem(id, index))
+          )
+            operations.push({ id, index, pos });
+        }
+      }
+      purchaseProgress.value = `${accountName}：准备购买 ${operations.length} 件`;
+      for (const operation of operations) {
+        checkActive();
+        purchaseProgress.value = `${accountName}：已确认 ${successCount}/${operations.length} 件`;
+        await buyItem(
+          tokenId,
+          operation.id,
+          operation.index,
+          operation.pos,
+          checkActive,
+        );
+        successCount++;
+        checkActive();
+        await delay(0.5);
+        checkActive();
+      }
       checkActive();
-    }
-    checkActive();
-    await refreshMerchantList();
-    checkActive();
-    const text = `${accountName}：已确认购买 ${successCount} 件`;
-    purchaseProgress.value = text;
-    if (!componentDisposed) message.success(text);
+      await refreshMerchantList();
+      checkActive();
+      const text = `${accountName}：已确认购买 ${successCount} 件`;
+      purchaseProgress.value = text;
+      if (!componentDisposed) message.success(text);
+    });
   } catch (error) {
     const text = `${accountName}：已确认购买 ${successCount} 件；${error.message || "购买未完成，请核对"}`;
     purchaseProgress.value = text;

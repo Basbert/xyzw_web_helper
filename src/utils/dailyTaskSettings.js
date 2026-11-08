@@ -12,6 +12,7 @@ export const DAILY_TASK_DEFAULTS = Object.freeze({
   claimLegacy: true,
   claimEmail: true,
   blackMarketPurchase: true,
+  dreamShopPurchase: true,
   commandDelay: 500,
   taskDelay: 500,
 });

@@ -41,11 +41,23 @@ function fixture(result, options = {}) {
     runSummary: ref(null),
     logList: ref([]),
     settings: { commandDelay: 0, taskDelay: 0 },
+    runConnectionGeneration: 0,
+    runDailyDreamPurchase: async (request) => {
+      context.dreamRequest = request;
+      return { status: "completed", purchases: [] };
+    },
     log: (message) => calls.push(message),
-    message: new Proxy({}, { get: (_, kind) => (text) => messages.push([kind, text]) }),
+    message: new Proxy(
+      {},
+      { get: (_, kind) => (text) => messages.push([kind, text]) },
+    ),
     console: { error() {} },
     DailyTaskRunner: class {
-      async run(tokenId) {
+      constructor(_store, _delays, runnerOptions) {
+        context.runnerOptions = runnerOptions;
+      }
+      async run(tokenId, callbacks) {
+        context.callbacks = callbacks;
         calls.push(tokenId);
         await gate;
         if (options.error) throw new Error("连接已断开");
@@ -54,7 +66,10 @@ function fixture(result, options = {}) {
     },
   };
   vm.createContext(context);
-  vm.runInContext(`${declaration.getText(source)}\nglobalThis.run = runDailyFix;`, context);
+  vm.runInContext(
+    `${declaration.getText(source)}\nglobalThis.run = runDailyFix;`,
+    context,
+  );
   return { context, calls, messages, release, run: context.run };
 }
 
@@ -71,7 +86,11 @@ test("a result remains attached to its starting account after switching roles", 
   assert.match(f.context.runSummary.value.detail, /2 项待处理或核对/);
   assert.match(f.context.runSummary.value.detail, /1 个步骤执行失败/);
   assert.equal(f.context.runSummary.value.title, "本轮结束，请核对结果");
-  assert.ok(f.messages.some(([type, text]) => type === "warning" && text.includes("角色 A")));
+  assert.ok(
+    f.messages.some(
+      ([type, text]) => type === "warning" && text.includes("角色 A"),
+    ),
+  );
 });
 
 test("a failed step is never displayed as a fully successful run", async () => {
@@ -92,4 +111,25 @@ test("an interrupted run is shown as interrupted and keeps its account", async (
   assert.equal(f.context.runSummary.value.title, "本轮执行中断");
   assert.equal(f.context.runSummary.value.tokenId, "A");
   assert.equal(f.context.busy.value, false);
+});
+
+test("daily runner receives account-bound interruption and dream purchase hooks", async () => {
+  const f = fixture({ incomplete: 0, failed: 0, skipped: 0 });
+  const run = f.run();
+  assert.equal(f.context.callbacks.shouldStop(), false);
+  const checkActive = () => {};
+  const sleep = async () => {};
+  await f.context.runnerOptions.runDreamShopPurchases({
+    tokenId: "A",
+    checkActive,
+    sleep,
+    log: () => {},
+  });
+  assert.equal(f.context.dreamRequest.accountId, "A");
+  assert.equal(f.context.dreamRequest.isOpen, true);
+  assert.equal(f.context.dreamRequest.checkActive, checkActive);
+  f.context.runConnectionGeneration++;
+  assert.equal(f.context.callbacks.shouldStop(), true);
+  f.release();
+  await run;
 });

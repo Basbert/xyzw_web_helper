@@ -57,6 +57,7 @@ const getTodayBossId = (dailyTime) => {
 export class DailyTaskRunner {
   constructor(tokenStore, delaySettings = null, options = {}) {
     this.loadConfig = options.loadConfig || loadDailyTaskConfig;
+    this.runDreamShopPurchases = options.runDreamShopPurchases || null;
     this.sleep =
       options.sleep ||
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -827,16 +828,58 @@ export class DailyTaskRunner {
     ).getUTCDay();
     if ([0, 1, 3, 4].includes(mengyandayOfWeek)) {
       const mjbattleTeam = { 0: 107 };
+      // The client considers id < 0 complete only within the current
+      // two-day dream event; a prior event's state must not skip today's run.
+      const dreamBegin = Number(roleData.dungeon?.beginTime);
+      const serverDay = Math.floor(
+        (roleData.dailyTask.dailyTime + 28800) / 86400,
+      );
+      const dreamDay = Math.floor((dreamBegin + 28800) / 86400);
+      let dreamStepCompleted =
+        Number.isInteger(roleData.dungeon?.id) &&
+        roleData.dungeon.id < 0 &&
+        Number.isFinite(dreamBegin) &&
+        dreamBegin > 0 &&
+        serverDay - dreamDay >= 0 &&
+        serverDay - dreamDay < 2;
       taskList.push({
         name: "咸王梦境",
-        execute: () =>
-          this.executeGameCommand(
+        execute: async () => {
+          if (dreamStepCompleted) {
+            this.log("服务器显示本期梦境已完成，直接检查商店");
+            return true;
+          }
+          const response = await this.executeGameCommand(
             tokenId,
             "dungeon_selecthero",
             { battleTeam: mjbattleTeam },
             "咸王梦境",
-          ),
+          );
+          dreamStepCompleted = true;
+          return response;
+        },
       });
+      if (settings.dreamShopPurchase && this.runDreamShopPurchases) {
+        taskList.push({
+          name: "购买梦境金币商品和高级商人黄金鱼竿",
+          execute: async () => {
+            if (!dreamStepCompleted) {
+              this.log("梦境步骤未成功，跳过梦境商店购买", "warning");
+              return false;
+            }
+            this.throwIfInterrupted(tokenId);
+            const result = await this.runDreamShopPurchases({
+              tokenStore: this.tokenStore,
+              tokenId,
+              checkActive: () => this.throwIfInterrupted(tokenId),
+              sleep: this.sleep,
+              log: (text, type) => this.log(text, type),
+            });
+            if (result?.message) this.log(result.message);
+            return result?.status === "completed";
+          },
+        });
+      }
     }
 
     // 深海灯神

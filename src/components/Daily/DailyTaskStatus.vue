@@ -85,7 +85,11 @@
         <span v-else>执行每日任务</span>
       </button>
       <button
-        v-if="runSummary && !busy && runSummary.tokenId === tokenStore.selectedToken?.id"
+        v-if="
+          runSummary &&
+          !busy &&
+          runSummary.tokenId === tokenStore.selectedToken?.id
+        "
         type="button"
         class="result-link"
         @click="showLog = true"
@@ -147,27 +151,42 @@
           <div class="setting-switches">
             <div class="switch-row">
               <span class="switch-label">领罐子</span>
-              <n-switch v-model:value="settings.claimBottle" aria-label="领罐子" />
+              <n-switch
+                v-model:value="settings.claimBottle"
+                aria-label="领罐子"
+              />
             </div>
 
             <div class="switch-row">
               <span class="switch-label">领挂机</span>
-              <n-switch v-model:value="settings.claimHangUp" aria-label="领挂机" />
+              <n-switch
+                v-model:value="settings.claimHangUp"
+                aria-label="领挂机"
+              />
             </div>
 
             <div class="switch-row">
               <span class="switch-label">领取功法残卷</span>
-              <n-switch v-model:value="settings.claimLegacy" aria-label="领取功法残卷" />
+              <n-switch
+                v-model:value="settings.claimLegacy"
+                aria-label="领取功法残卷"
+              />
             </div>
 
             <div class="switch-row">
               <span class="switch-label">竞技场</span>
-              <n-switch v-model:value="settings.arenaEnable" aria-label="竞技场" />
+              <n-switch
+                v-model:value="settings.arenaEnable"
+                aria-label="竞技场"
+              />
             </div>
 
             <div class="switch-row">
               <span class="switch-label">领取邮件奖励</span>
-              <n-switch v-model:value="settings.claimEmail" aria-label="领取邮件奖励" />
+              <n-switch
+                v-model:value="settings.claimEmail"
+                aria-label="领取邮件奖励"
+              />
             </div>
           </div>
         </section>
@@ -184,12 +203,25 @@
             </div>
             <div class="switch-row">
               <span class="switch-label">黑市购买物品</span>
-              <n-switch v-model:value="settings.blackMarketPurchase" aria-label="黑市购买物品" />
+              <n-switch
+                v-model:value="settings.blackMarketPurchase"
+                aria-label="黑市购买物品"
+              />
             </div>
 
             <div class="switch-row">
               <span class="switch-label">付费招募</span>
-              <n-switch v-model:value="settings.payRecruit" aria-label="付费招募" />
+              <n-switch
+                v-model:value="settings.payRecruit"
+                aria-label="付费招募"
+              />
+            </div>
+            <div class="switch-row">
+              <span class="switch-label">梦境金币商品及高级商人黄金鱼竿</span>
+              <n-switch
+                v-model:value="settings.dreamShopPurchase"
+                aria-label="梦境金币商品及高级商人黄金鱼竿"
+              />
             </div>
           </div>
         </section>
@@ -339,6 +371,7 @@ import {
   watch,
 } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import { runDailyDreamPurchase } from "@/utils/dailyDreamPurchase";
 import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
 import { useDailyTaskSettings } from "@/utils/dailyTaskSettings";
 import {
@@ -356,6 +389,21 @@ const showLog = ref(false);
 const busy = ref(false);
 const logContainer = ref(null);
 const runSummary = ref(null);
+let runConnectionGeneration = 0;
+watch(
+  () => {
+    const id = tokenStore.selectedToken?.id;
+    return [
+      id,
+      id ? tokenStore.getWebSocketStatus(id) : null,
+      id ? tokenStore.wsConnections?.[id]?.client : null,
+    ];
+  },
+  () => {
+    runConnectionGeneration++;
+  },
+  { flush: "sync" },
+);
 
 // 任务设置
 const settings = useDailyTaskSettings(tokenStore, (error) => {
@@ -526,6 +574,7 @@ const runDailyFix = async () => {
   showLog.value = true;
   logList.value = [];
   const runToken = tokenStore.selectedToken;
+  const runGeneration = runConnectionGeneration;
   const accountName = runToken.name || "当前角色";
   const account = `执行账号：${accountName}`;
   runSummary.value = {
@@ -539,14 +588,36 @@ const runDailyFix = async () => {
     log("=== 开始执行一键补差任务 ===");
 
     // 使用 DailyTaskRunner 执行任务
-    const runner = new DailyTaskRunner(tokenStore, {
-      commandDelay: settings.commandDelay,
-      taskDelay: settings.taskDelay,
-    });
+    const runner = new DailyTaskRunner(
+      tokenStore,
+      {
+        commandDelay: settings.commandDelay,
+        taskDelay: settings.taskDelay,
+      },
+      {
+        runDreamShopPurchases: ({ tokenId, checkActive, sleep, log }) =>
+          runDailyDreamPurchase({
+            accountId: tokenId,
+            isOpen: true,
+            send: (command, params) =>
+              tokenStore.sendMessageWithPromise(
+                tokenId,
+                command,
+                params,
+                15000,
+              ),
+            checkActive,
+            pause: sleep,
+            onProgress: ({ confirmed, total }) =>
+              log(`梦境商品：已确认购买 ${confirmed}/${total} 件`),
+          }),
+      },
+    );
 
     const result = await runner.run(
       runToken.id,
       {
+        shouldStop: () => runConnectionGeneration !== runGeneration,
         onLog: (logItem) => log(logItem.message, logItem.type),
         onProgress: (progress) => {
           log(`服务器每日任务完成并领奖: ${progress}%`);
@@ -655,6 +726,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  runConnectionGeneration++;
   log("组件即将卸载");
 });
 </script>

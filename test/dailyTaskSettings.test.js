@@ -147,3 +147,18 @@ test("a browser storage failure is surfaced to the settings view", () => {
   assert.deepEqual(errors, ["storage unavailable"]);
   binding.stop();
 });
+
+test("梦境购买开关按角色保存且支持关闭", () => {
+  const storage = memoryStorage();
+  const a = { id: "a", roleId: "role-a" };
+  const b = { id: "b", roleId: "role-b" };
+  const store = reactive({ selectedToken: a, gameTokens: [a, b] });
+  const binding = bind(store, storage);
+  assert.equal(binding.settings.dreamShopPurchase, true);
+  binding.settings.dreamShopPurchase = false;
+  store.selectedToken = b;
+  assert.equal(binding.settings.dreamShopPurchase, true);
+  store.selectedToken = a;
+  assert.equal(binding.settings.dreamShopPurchase, false);
+  binding.stop();
+});
