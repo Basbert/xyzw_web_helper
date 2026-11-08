@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
+import * as rewardState from "../src/utils/apexRewardState.js";
 import { loadModule } from "./helpers/loadModule.js";
 
 const source = await readFile(
@@ -183,6 +184,7 @@ test("batch guessing processes every open round when schedule windows overlap", 
     {
       "./apexRules.js": rules,
       "./apexRateLimit.js": rate,
+      "./apexRewardState.js": rewardState,
     },
   );
   const { createTasksApex } = await loadModule(

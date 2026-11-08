@@ -9,6 +9,8 @@ const emptyStatus = (kind, summaryText) => ({
   remainingSlots: 0,
   uncertainStagesCount: 0,
   openStagesCount: 0,
+  claimState: "unknown",
+  claimableRewards: [],
   details: [],
 });
 
@@ -69,14 +71,22 @@ export function useApexGuessStatus(tokenStore, { isActive = () => true } = {}) {
   };
 
   watch(
-    () => [tokenStore.selectedToken?.id, connected.value, isActive()],
+    () => {
+      const id = tokenStore.selectedToken?.id;
+      return [
+        id,
+        connected.value,
+        isActive(),
+        id ? tokenStore.wsConnections?.[id]?.client : null,
+      ];
+    },
     ([id, isConnected, active]) => {
       sequence++;
       checking.value = false;
       state.value = emptyStatus("disconnected", "连接账号后查看竞猜状态");
       if (id && isConnected && active) refresh();
     },
-    { immediate: true },
+    { immediate: true, flush: "sync" },
   );
 
   const refreshIfVisible = () => {

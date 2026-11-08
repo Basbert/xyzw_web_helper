@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as rewardState from "../src/utils/apexRewardState.js";
 import { loadModule } from "./helpers/loadModule.js";
 
 const rules = {
@@ -32,13 +33,31 @@ const createHelper = (overrides = {}) =>
   loadModule(new URL("../src/utils/apexGuessHelper.js", import.meta.url), {
     "./apexRules.js": overrides.rules || rules,
     "./apexRateLimit.js": overrides.rateLimit || rateLimit,
+    "./apexRewardState.js": rewardState,
   });
 const {
+  buildApexGuessStatus,
   resolveOpenGuesses,
   getApexGuessStatus,
   runApexAutoGuess,
   withApexGuessLock,
 } = await createHelper();
+
+test("竞猜未开放时仍显示服务端确认的待领取奖励", async () => {
+  const closed = await createHelper({
+    rules: { ...rules, getCurrentRounds: () => [] },
+  });
+  const status = closed.buildApexGuessStatus({
+    guessClaimMap: { 150: { team1: false, team2: true } },
+  });
+  assert.equal(status.claimState, "ready");
+  assert.equal(status.claimableRewards.length, 1);
+});
+
+test("服务端未提供领取状态时，不将其当作零奖励", () => {
+  const status = buildApexGuessStatus({});
+  assert.equal(status.claimState, "unknown");
+});
 
 function fixture({ record = { 151: ["old"] }, pages, onGuess } = {}) {
   const guessMap = structuredClone(record);

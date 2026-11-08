@@ -3,6 +3,7 @@ import {
   isApexRateLimited,
   runApexAction,
 } from "./apexRateLimit.js";
+import { parseApexClaimableRewards } from "./apexRewardState.js";
 import {
   ApexScheduleStatus,
   calibrateServerTime,
@@ -94,6 +95,13 @@ async function fetchApexInfo(tokenStore, tokenId, checkInterrupted = () => {}) {
 
 /** Calculate status only from a response belonging to the requested account. */
 export function buildApexGuessStatus(apexInfo, nowMs = Date.now()) {
+  let claimableRewards = [];
+  let claimState = "ready";
+  try {
+    claimableRewards = parseApexClaimableRewards(apexInfo);
+  } catch {
+    claimState = "unknown";
+  }
   const serverNow = calibrateServerTime(nowMs, apexInfo?.resetTime?.day);
   const season = getCurrentSeason(serverNow);
   const reportedSeason = Number(apexInfo?.resetTime?.season) || 0;
@@ -143,6 +151,8 @@ export function buildApexGuessStatus(apexInfo, nowMs = Date.now()) {
     summaryText = "当前开放阶段已全部竞猜";
   }
   return {
+    claimableRewards,
+    claimState,
     hasOpenGuesses: details.length > 0,
     season: openRounds[0]?.season ?? season,
     serverNowMs: serverNow,

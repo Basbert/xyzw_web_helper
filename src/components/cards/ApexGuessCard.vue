@@ -58,6 +58,12 @@
           </ul>
         </details>
       </div>
+      <div class="reward-status" aria-live="polite">
+        {{ rewardStatusText }}
+      </div>
+      <div v-if="lastClaim" class="guess-result" aria-live="polite">
+        <strong>{{ lastClaim.message }}</strong>
+      </div>
     </div>
 
     <div class="card-actions">
@@ -69,10 +75,18 @@
       >
         {{ isBusy ? progressText || "正在竞猜…" : buttonText }}
       </button>
+      <button
+        type="button"
+        class="action-button reward-button"
+        :disabled="isClaimDisabled"
+        @click="handleRewardClaim"
+      >
+        {{ isClaiming ? claimProgressText || "正在领取…" : claimButtonText }}
+      </button>
       <div class="secondary-actions">
         <button
           type="button"
-          :disabled="!isConnected || checking || isBusy"
+          :disabled="!isConnected || checking || isBusy || isClaiming"
           @click="refresh"
         >
           {{ checking ? "正在刷新…" : "刷新状态" }}
@@ -85,9 +99,9 @@
   </div>
 </template>
 
-<script setup>
+<script>
 import { useMessage } from "naive-ui";
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, onUnmounted, reactive, ref, watch } from "vue";
 import { useApexGuessStatus } from "@/hooks/useApexGuessStatus";
 import { useTokenStore } from "@/stores/tokenStore";
 import {
@@ -95,7 +109,16 @@ import {
   formatNextApexGuess,
   runApexAutoGuess,
 } from "@/utils/apexGuessHelper.js";
+import {
+  isApexRewardClaimUncertain,
+  runApexRewardClaims,
+} from "@/utils/apexRewardHelper.js";
 
+// Retain confirmed results by account when navigating away and back.
+const claimResults = reactive(new Map());
+</script>
+
+<script setup>
 const props = defineProps({ active: { type: Boolean, default: true } });
 const emit = defineEmits(["navToApex", "statusChange"]);
 const tokenStore = useTokenStore();
@@ -107,9 +130,36 @@ const {
   refresh,
 } = useApexGuessStatus(tokenStore, { isActive: () => props.active });
 const isBusy = ref(false);
+const isClaiming = ref(false);
 const progressText = ref("");
+const claimProgressText = ref("");
 const lastResult = ref(null);
+const lastClaim = computed(
+  () => claimResults.get(tokenStore.selectedToken?.id) || null,
+);
+const claimUncertain = computed(() =>
+  Boolean(
+    lastClaim.value && isApexRewardClaimUncertain(tokenStore.selectedToken?.id),
+  ),
+);
 let disposed = false;
+let accountGeneration = 0;
+
+watch(
+  () => {
+    const id = tokenStore.selectedToken?.id;
+    return [
+      id,
+      id ? tokenStore.getWebSocketStatus(id) : null,
+      id ? tokenStore.wsConnections?.[id]?.client : null,
+      props.active,
+    ];
+  },
+  () => {
+    accountGeneration++;
+  },
+  { flush: "sync" },
+);
 
 const isGuessActive = computed(
   () =>
@@ -127,6 +177,7 @@ const isAllCompleted = computed(
 );
 const badgeText = computed(() => {
   if (isBusy.value) return "竞猜中";
+  if (isClaiming.value) return "领取中";
   if (!isConnected.value) return "未连接";
   if (guessState.value.kind === "loading") return "检查中";
   if (
@@ -152,11 +203,13 @@ const upcomingDescription = computed(() => {
 const collapsedSummary = computed(() => {
   if (
     isBusy.value ||
+    isClaiming.value ||
     !isConnected.value ||
     guessState.value.kind !== "ready" ||
     guessState.value.uncertainStagesCount
   )
     return badgeText.value;
+  if (claimCount.value > 0) return `待领奖 ${claimCount.value} 项`;
   return compactApexGuessStatus(guessState.value);
 });
 const buttonText = computed(() => {
@@ -172,9 +225,43 @@ const isButtonDisabled = computed(
   () =>
     !isConnected.value ||
     isBusy.value ||
+    isClaiming.value ||
     checking.value ||
     guessState.value.kind !== "ready" ||
     !guessState.value.pendingStagesCount,
+);
+const claimCount = computed(() =>
+  guessState.value.claimState === "ready" &&
+  Array.isArray(guessState.value.claimableRewards)
+    ? guessState.value.claimableRewards.length
+    : null,
+);
+const rewardStatusText = computed(() => {
+  if (!isConnected.value) return "连接账号后查看竞猜奖励";
+  if (claimUncertain.value)
+    return "上次领取结果待核对，请核对游戏后重新加载页面";
+  if (guessState.value.kind === "loading" || checking.value)
+    return "正在检查竞猜奖励…";
+  if (claimCount.value === null) return "竞猜奖励状态暂未确认，请刷新状态";
+  return claimCount.value
+    ? `有 ${claimCount.value} 项竞猜奖励待领取`
+    : "暂无可领取的竞猜奖励";
+});
+const claimButtonText = computed(() =>
+  claimCount.value > 0
+    ? `一键领取竞猜奖励（${claimCount.value}）`
+    : "一键领取竞猜奖励",
+);
+const isClaimDisabled = computed(
+  () =>
+    !isConnected.value ||
+    isBusy.value ||
+    isClaiming.value ||
+    checking.value ||
+    claimUncertain.value ||
+    guessState.value.kind !== "ready" ||
+    claimCount.value === null ||
+    claimCount.value === 0,
 );
 const formatVotes = (value) => Number(value).toLocaleString("zh-CN");
 
@@ -189,7 +276,74 @@ watch(
 );
 onUnmounted(() => {
   disposed = true;
+  accountGeneration++;
 });
+
+const handleRewardClaim = async () => {
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId || isClaimDisabled.value) return;
+  const generation = accountGeneration;
+  const valid = () =>
+    !disposed &&
+    props.active &&
+    accountGeneration === generation &&
+    tokenStore.selectedToken?.id === tokenId &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected";
+  const checkInterrupted = () => {
+    if (!valid()) {
+      const error = new Error("账号、连接或页面已变化，已停止后续领取");
+      error.interrupted = true;
+      throw error;
+    }
+  };
+  isClaiming.value = true;
+  claimProgressText.value = "正在领取…";
+  claimResults.delete(tokenId);
+  try {
+    const result = await runApexRewardClaims({
+      tokenStore,
+      tokenId,
+      checkInterrupted,
+      onProgress: (progress) => {
+        if (progress && typeof progress === "object") {
+          const count = progress.claimedCount ?? progress.successCount;
+          if (Number.isSafeInteger(count) && count > 0) {
+            claimResults.set(tokenId, {
+              ...progress,
+              message: progress.message || `已确认领取 ${count} 项奖励`,
+            });
+          }
+        }
+        if (valid())
+          claimProgressText.value =
+            typeof progress === "string"
+              ? progress
+              : progress?.message || "正在领取…";
+      },
+    });
+    const messageText = result?.message || "竞猜奖励处理完成，请查看状态";
+    claimResults.set(tokenId, { ...result, message: messageText });
+    if (valid()) {
+      if (result?.outcome === "partial" || result?.outcome === "stopped")
+        message.warning(messageText);
+      else message.info(messageText);
+      await refresh();
+    }
+  } catch (error) {
+    const existing = claimResults.get(tokenId);
+    const messageText = existing
+      ? `${existing.message}；${error?.message || "后续领取未完成"}`
+      : error?.message || "竞猜奖励领取未完成";
+    claimResults.set(tokenId, { ...error, message: messageText });
+    if (valid()) {
+      message.warning(messageText);
+      await refresh();
+    }
+  } finally {
+    isClaiming.value = false;
+    claimProgressText.value = "";
+  }
+};
 
 const handleAutoGuess = async () => {
   const tokenId = tokenStore.selectedToken?.id;
@@ -245,6 +399,11 @@ const handleAutoGuess = async () => {
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+.reward-status {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text-color-secondary, #73777f);
 }
 .card-header {
   display: grid;
