@@ -27,13 +27,27 @@
         ><span>剩余 {{ showCount(state?.chaos) }} 次</span>
       </div>
       <p>自动抽完剩余次数，并领取可用的赠送次数后继续抽取。</p>
+      <p v-if="chaosBonusProgress !== null">
+        {{ busy && drawing === "chaos" ? "开始前赠送进度" : "赠送进度" }}
+        {{ chaosBonusProgress % CHAOS_BONUS_THRESHOLD }}/{{
+          CHAOS_BONUS_THRESHOLD
+        }}
+        · 待领取 {{ Math.floor(chaosBonusProgress / CHAOS_BONUS_THRESHOLD) }} 次
+      </p>
+      <p v-else>赠送进度尚未确认</p>
       <button
         class="primary-button"
         type="button"
         :disabled="!canDrawChaos"
         @click="drawChaos"
       >
-        {{ busy && drawing === "chaos" ? progressText : "抽取全部剩余次数" }}
+        {{
+          busy && drawing === "chaos"
+            ? progressText
+            : state?.chaos === 0 && chaosBonusProgress >= CHAOS_BONUS_THRESHOLD
+              ? "领取赠送次数并抽取"
+              : "抽取全部剩余次数"
+        }}
       </button>
     </div>
 
@@ -135,6 +149,10 @@ const starTotal = computed(() => {
   return counts.every((value) => Number.isSafeInteger(value) && value >= 0)
     ? counts.reduce((sum, value) => sum + value, 0)
     : null;
+});
+const chaosBonusProgress = computed(() => {
+  const value = state.value?.chaosBonus;
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
 });
 const canDrawChaos = computed(
   () =>
@@ -267,6 +285,13 @@ async function draw(type) {
       send: (command, params) =>
         tokenStore.sendMessageWithPromise(context.id, command, params, 15000),
       assertActive,
+      onWait: (milliseconds) => {
+        if (context.valid())
+          progressText.value =
+            milliseconds > 0
+              ? `等待 ${Math.ceil(milliseconds / 1000)} 秒后继续…`
+              : "正在继续处理…";
+      },
       onDraw: ({ completed, rewards }) => {
         confirmed = completed;
         confirmedRewards.push(...rewards);

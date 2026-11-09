@@ -5,10 +5,12 @@ import {
   isCompassAccountUncertain,
   parseChaosSnapshot,
   parseStarSnapshot,
-  runCompassDraw,
+  runCompassDraw as runCompassDrawWithDelays,
 } from "../src/utils/compassProtocol.js";
 
 const active = () => {};
+const runCompassDraw = (options) =>
+  runCompassDrawWithDelays({ sleep: async () => {}, ...options });
 const star = (white) => ({ roleNMExt: { hasKeyCntMap: { 36997: white } } });
 const reward = { type: 1, itemId: 456, value: 3 };
 
@@ -37,6 +39,7 @@ test("罗盘次数仅使用可确认的服务端字段", () => {
 
 test("混沌抽奖只发一次请求，保留所有奖励", async () => {
   const calls = [];
+  let left = 3;
   const result = await runCompassDraw({
     accountId: "chaos",
     kind: "chaos",
@@ -45,21 +48,23 @@ test("混沌抽奖只发一次请求，保留所有奖励", async () => {
     assertActive: active,
     send: async (command, params) => {
       calls.push([command, params]);
-      return command === COMPASS_COMMANDS.chaosInfo
-        ? {
-            weekAward: { turntableLeftCnt: 3 },
-            nightMareData: { bookScore: 0, turnRewardTime: 0 },
-          }
-        : {
-            weekAward: { turntableLeftCnt: 0 },
-            nightMare: { bookScore: 3, turnRewardTime: 0 },
-            reward: [reward, { type: 8, itemId: 789, value: 1 }],
-          };
+      if (command === COMPASS_COMMANDS.chaosInfo)
+        return {
+          weekAward: { turntableLeftCnt: left },
+          nightMareData: { bookScore: left ? 0 : 3, turnRewardTime: 0 },
+        };
+      left = 0;
+      return {
+        weekAward: { turntableLeftCnt: 0 },
+        nightMare: { bookScore: 3, turnRewardTime: 0 },
+        reward: [reward, { type: 8, itemId: 789, value: 1 }],
+      };
     },
   });
   assert.deepEqual(calls, [
     [COMPASS_COMMANDS.chaosInfo, { roleId: 123 }],
     [COMPASS_COMMANDS.chaosDraw, {}],
+    [COMPASS_COMMANDS.chaosInfo, { roleId: 123 }],
   ]);
   assert.equal(result.rewards.length, 2);
 });
@@ -314,7 +319,8 @@ test("另一种钥匙余额发生异常变化时中止并保留奖励", async ()
       !error.compassUncertain &&
       error.compassRewards.length === 1,
   );
-  assert.equal(calls, 2);
+  // Re-read the full state once before treating the partial/mismatched reply as an error.
+  assert.equal(calls, 3);
 });
 
 test("一键抽奖期间切换角色会中止后续颜色", async () => {
@@ -414,7 +420,10 @@ test("混沌逐次抽取，全部抽完后领取赠送次数并继续抽", async
     calls.filter((call) => call === COMPASS_COMMANDS.chaosClaim).length,
     1,
   );
-  assert.equal(calls.at(-1), COMPASS_COMMANDS.chaosDraw);
+  assert.equal(
+    calls.filter((call) => call === COMPASS_COMMANDS.chaosDraw).length,
+    7,
+  );
 });
 
 test("混沌回包缺少余额时只读刷新后再决定下一步", async () => {
@@ -440,6 +449,7 @@ test("混沌回包缺少余额时只读刷新后再决定下一步", async () =>
     COMPASS_COMMANDS.chaosDraw,
     COMPASS_COMMANDS.chaosInfo,
     COMPASS_COMMANDS.chaosDraw,
+    COMPASS_COMMANDS.chaosInfo,
     COMPASS_COMMANDS.chaosInfo,
   ]);
   assert.equal(isCompassAccountUncertain("chaos-partial"), false);
@@ -609,4 +619,273 @@ test("完整状态中的 null 不应当作零值", () => {
     ).bonusProgress,
     null,
   );
+});
+
+test("星级连续抽取前等待，避免两次请求紧挨着发送", async () => {
+  let balance = 2;
+  const events = [];
+  const result = await runCompassDraw({
+    accountId: "star-paced",
+    kind: "white",
+    count: 2,
+    assertActive: active,
+    sleep: async (ms) => events.push({ kind: "wait", ms }),
+    send: async (command) => {
+      if (command === COMPASS_COMMANDS.starInfo) return star(balance);
+      events.push({ kind: "draw" });
+      balance--;
+      return { ...star(balance), reward: [reward] };
+    },
+  });
+  assert.equal(result.completed, 2);
+  const draws = events.flatMap((event, index) =>
+    event.kind === "draw" ? [index] : [],
+  );
+  assert.equal(draws.length, 2);
+  assert.ok(
+    events
+      .slice(draws[0] + 1, draws[1])
+      .some((event) => event.kind === "wait" && event.ms > 0),
+  );
+});
+
+test("星级回包只包含发生变化的颜色时复核完整余额并继续", async () => {
+  const balances = { white: 2, green: 1, blue: 0 };
+  const itemColor = { 36997: "white", 36998: "green", 36999: "blue" };
+  let reads = 0;
+  const result = await runCompassDraw({
+    accountId: "star-partial-color-map",
+    kind: "allStar",
+    count: { ...balances },
+    assertActive: active,
+    send: async (command, params) => {
+      if (command === COMPASS_COMMANDS.starInfo) {
+        reads++;
+        return allColors(balances.white, balances.green, balances.blue);
+      }
+      const color = itemColor[params.itemId];
+      balances[color]--;
+      return {
+        roleNMExt: { hasKeyCntMap: { [params.itemId]: balances[color] } },
+        reward: [reward],
+      };
+    },
+  });
+  assert.equal(result.completed, 3);
+  assert.ok(reads >= 2, "不完整的颜色余额必须触发只读复核");
+  assert.deepEqual(balances, { white: 0, green: 0, blue: 0 });
+});
+
+test("服务器明确返回 200400 时等待并有限重试，不丢已确认奖励", async () => {
+  let balance = 2;
+  let attempts = 0;
+  const events = [];
+  const result = await runCompassDraw({
+    accountId: "star-rate-limit",
+    kind: "white",
+    count: 2,
+    assertActive: active,
+    sleep: async (ms) => events.push({ kind: "wait", ms }),
+    send: async (command) => {
+      if (command === COMPASS_COMMANDS.starInfo) return star(balance);
+      attempts++;
+      events.push({ kind: "draw", attempts });
+      if (attempts === 2)
+        throw new Error("服务器错误: 200400 - 操作太快，请稍后再试");
+      balance--;
+      return { ...star(balance), reward: [reward] };
+    },
+  });
+  assert.equal(result.completed, 2);
+  assert.equal(result.rewards.length, 2);
+  assert.equal(attempts, 3);
+  const rejected = events.findIndex(
+    (entry) => entry.kind === "draw" && entry.attempts === 2,
+  );
+  const retried = events.findIndex(
+    (entry) => entry.kind === "draw" && entry.attempts === 3,
+  );
+  assert.ok(
+    events
+      .slice(rejected + 1, retried)
+      .some((entry) => entry.kind === "wait" && entry.ms > 0),
+  );
+});
+
+test("星级抽奖超时不会自动重试并保留账号保护", async () => {
+  let attempts = 0;
+  await assert.rejects(
+    runCompassDraw({
+      accountId: "star-timeout-no-retry",
+      kind: "white",
+      count: 1,
+      assertActive: active,
+      send: async (command) => {
+        if (command === COMPASS_COMMANDS.starInfo) return star(1);
+        attempts++;
+        throw new Error("请求超时");
+      },
+    }),
+    (error) => error.compassUncertain === true,
+  );
+  assert.equal(attempts, 1);
+  assert.equal(isCompassAccountUncertain("star-timeout-no-retry"), true);
+});
+
+test("星级抽取等待期间取消，不发送下一次请求", async () => {
+  let balance = 2;
+  let draws = 0;
+  let cancelled = false;
+  await assert.rejects(
+    runCompassDraw({
+      accountId: "star-cancel-during-wait",
+      kind: "white",
+      count: 2,
+      assertActive: () => {
+        if (cancelled) throw new Error("已取消");
+      },
+      sleep: async () => {
+        if (draws > 0) cancelled = true;
+      },
+      send: async (command) => {
+        if (command === COMPASS_COMMANDS.starInfo) return star(balance);
+        draws++;
+        balance--;
+        return { ...star(balance), reward: [reward] };
+      },
+    }),
+    (error) =>
+      /取消/.test(error.message) &&
+      error.compassCompleted === 1 &&
+      error.compassRewards.length === 1 &&
+      !error.compassUncertain,
+  );
+  assert.equal(draws, 1);
+});
+
+test("混沌赠送次数被明确限流后退避领取，并继续抽赠送次数", async () => {
+  let left = 0;
+  let claimed = 0;
+  let claimAttempts = 0;
+  const delays = [];
+  const result = await runCompassDraw({
+    accountId: "chaos-claim-rate-limit",
+    roleId: 123,
+    kind: "chaos",
+    count: 0,
+    assertActive: active,
+    sleep: async (ms) => delays.push(ms),
+    send: async (command) => {
+      if (command === COMPASS_COMMANDS.chaosInfo)
+        return chaosState(left, 5, claimed);
+      if (command === COMPASS_COMMANDS.chaosClaim) {
+        claimAttempts++;
+        if (claimAttempts === 1)
+          throw new Error("服务器错误: 200400 - 操作太快");
+        left = 1;
+        claimed = 5;
+        return chaosState(left, 5, claimed);
+      }
+      left = 0;
+      return { ...chaosState(0, 6, claimed), reward: [reward] };
+    },
+  });
+  assert.equal(claimAttempts, 2);
+  assert.equal(result.completed, 1);
+  assert.ok(delays.some((ms) => ms >= 2400));
+  assert.equal(isCompassAccountUncertain("chaos-claim-rate-limit"), false);
+});
+
+test("星级余额中的明确 null 不应被当作零", () => {
+  assert.throws(
+    () => parseStarSnapshot({ roleNMExt: { hasKeyCntMap: { 36997: null } } }),
+    /次数无效/,
+  );
+});
+
+test("混沌抽奖回包余额滞后时重新读取并继续", async () => {
+  let left = 2;
+  let reads = 0;
+  let draws = 0;
+  const result = await runCompassDraw({
+    accountId: "chaos-stale-draw-ack",
+    roleId: 123,
+    kind: "chaos",
+    count: 2,
+    assertActive: active,
+    send: async (command) => {
+      if (command === COMPASS_COMMANDS.chaosInfo) {
+        reads++;
+        return chaosState(left, 2 - left, 0);
+      }
+      draws++;
+      left--;
+      return {
+        ...chaosState(draws === 1 ? 2 : left, draws, 0),
+        reward: [reward],
+      };
+    },
+  });
+  assert.equal(result.completed, 2);
+  assert.equal(reads, 3);
+  assert.equal(draws, 2);
+});
+
+test("赠送次数领取回包滞后时只读核对，继续抽取", async () => {
+  let left = 0;
+  let claimed = 0;
+  let claims = 0;
+  const result = await runCompassDraw({
+    accountId: "chaos-stale-claim-ack",
+    roleId: 123,
+    kind: "chaos",
+    count: 0,
+    assertActive: active,
+    send: async (command) => {
+      if (command === COMPASS_COMMANDS.chaosInfo)
+        return chaosState(left, 5, claimed);
+      if (command === COMPASS_COMMANDS.chaosClaim) {
+        claims++;
+        left = 1;
+        claimed = 5;
+        return chaosState(0, 5, 0);
+      }
+      left = 0;
+      return { ...chaosState(0, 6, 5), reward: [reward] };
+    },
+  });
+  assert.equal(claims, 1);
+  assert.equal(result.completed, 1);
+});
+
+test("最后一次抽奖回包的赠送进度滞后时会复核并领取赠送次数", async () => {
+  let left = 1;
+  let score = 4;
+  let claimed = 0;
+  let claims = 0;
+  const result = await runCompassDraw({
+    accountId: "chaos-bonus-lag",
+    roleId: 123,
+    kind: "chaos",
+    count: 1,
+    assertActive: active,
+    send: async (command) => {
+      if (command === COMPASS_COMMANDS.chaosInfo)
+        return chaosState(left, score, claimed);
+      if (command === COMPASS_COMMANDS.chaosClaim) {
+        claims++;
+        left = 1;
+        claimed = 5;
+        return chaosState(left, score, claimed);
+      }
+      left--;
+      score++;
+      return {
+        ...chaosState(left, score === 5 ? 4 : score, claimed),
+        reward: [reward],
+      };
+    },
+  });
+  assert.equal(claims, 1);
+  assert.equal(result.completed, 2);
 });
