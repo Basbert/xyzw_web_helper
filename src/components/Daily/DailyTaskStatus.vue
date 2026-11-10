@@ -378,6 +378,7 @@ import {
   getDailyTaskStates,
   loadDailyTaskConfig,
 } from "@/utils/dailyTaskState";
+import { markDreamShopChecked } from "@/utils/dreamShopCheckState";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
@@ -595,6 +596,7 @@ const runDailyFix = async () => {
         taskDelay: settings.taskDelay,
       },
       {
+        onDreamShopChecked: markDreamShopChecked,
         runDreamShopPurchases: ({ tokenId, checkActive, sleep, log }) =>
           runDailyDreamPurchase({
             accountId: tokenId,

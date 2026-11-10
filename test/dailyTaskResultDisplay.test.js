@@ -42,6 +42,7 @@ function fixture(result, options = {}) {
     logList: ref([]),
     settings: { commandDelay: 0, taskDelay: 0 },
     runConnectionGeneration: 0,
+    markDreamShopChecked: () => true,
     runDailyDreamPurchase: async (request) => {
       context.dreamRequest = request;
       return { status: "completed", purchases: [] };

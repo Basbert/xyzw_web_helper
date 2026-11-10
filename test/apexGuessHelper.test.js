@@ -391,3 +391,33 @@ test("unknown future schedules are not presented as a definite date", async () =
   assert.equal(current.nextGuess, null);
   assert.equal(compactApexGuessStatus(current), "暂无开放，后续赛程待确认");
 });
+
+test("竞猜简短状态优先显示待领取奖励并保留不确定提示", async () => {
+  const { compactApexGuessStatus } = await createHelper();
+  const base = {
+    hasOpenGuesses: false,
+    claimState: "ready",
+    claimableRewards: [{}, {}],
+  };
+  assert.equal(compactApexGuessStatus(base), "待领奖 2 项");
+  assert.equal(
+    compactApexGuessStatus({
+      ...base,
+      hasOpenGuesses: true,
+      pendingStagesCount: 1,
+    }),
+    "待竞猜 1 阶段 · 待领奖 2 项",
+  );
+  assert.equal(
+    compactApexGuessStatus({ ...base, uncertainStagesCount: 1 }),
+    "待领奖 2 项 · 竞猜状态待确认",
+  );
+  assert.equal(
+    compactApexGuessStatus({
+      ...base,
+      claimState: "unknown",
+      uncertainStagesCount: 1,
+    }),
+    "状态待确认",
+  );
+});

@@ -8,6 +8,7 @@
           <div class="page-header-primary">
             <h2>批量日常任务</h2>
             <p>已选 {{ selectedTokens.length }} 个账号，执行时使用各账号的每日设置</p>
+            <p>梦境开放日按各角色开关购买商店商品；该开关默认开启，购买会消耗游戏资源。</p>
           </div>
           <div class="batch-actions">
             <n-button
@@ -459,6 +460,13 @@
                 >
                   逐鹿盐山竞猜
                 </n-button>
+                <n-button
+                  size="small"
+                  :disabled="uiBusy || selectedTokens.length === 0"
+                  @click="batchApexClaim()"
+                >
+                  领取逐鹿竞猜奖励
+                </n-button>
               </n-space>
             </n-tab-pane>
             <n-tab-pane name="baoku" tab="宝库">
@@ -805,6 +813,10 @@
             <div class="switch-row">
               <span class="switch-label">付费招募</span
               ><n-switch v-model:value="currentSettings.payRecruit" />
+            </div>
+            <div class="switch-row">
+              <span class="switch-label">梦境金币商品及高级商人黄金鱼竿</span>
+              <n-switch v-model:value="currentSettings.dreamShopPurchase" aria-label="梦境商店自动购买" />
             </div>
           </div>
         </div>
@@ -3045,8 +3057,10 @@ import {
   onMounted,
   reactive,
   ref,
+  toRaw,
   watch,
 } from "vue";
+import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { $emit } from "@/stores/events/index.ts";
 import { gameTokens, tokenGroups, useTokenStore } from "@/stores/tokenStore";
 // Import batch task modules
@@ -3091,13 +3105,15 @@ import {
   createScheduledRunQueue,
   summarizeScheduledRun,
 } from "@/utils/batch/scheduledRuns";
+import { runDailyDreamPurchase } from "@/utils/dailyDreamPurchase";
 import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
 import {
   DAILY_TASK_DEFAULTS,
   readDailyTaskSettings,
   writeDailyTaskSettings,
 } from "@/utils/dailyTaskSettings";
-import { goldItemsConfig, merchantConfig } from "@/utils/dreamConstants";
+import { goldItemsConfig, isDungeonOpen, merchantConfig } from "@/utils/dreamConstants";
+import { markDreamShopChecked } from "@/utils/dreamShopCheckState";
 
 import { isSameGameValue } from "@/utils/gameValue.js";
 
@@ -3183,10 +3199,8 @@ const getSortIcon = (field) => {
 };
 
 const tokens = computed(() => tokenStore.gameTokens);
-const ismengjingActivityOpen = computed(() => {
-  const day = new Date().getDay();
-  return day === 0 || day === 1 || day === 3 || day === 4;
-});
+const shanghaiNow = useShanghaiClock();
+const ismengjingActivityOpen = computed(() => isDungeonOpen(shanghaiNow.value));
 const isbaokuActivityOpen = computed(() => {
   const day = new Date().getDay();
   return !isSameGameValue(day, 1) && !isSameGameValue(day, 2);
@@ -3572,6 +3586,7 @@ const currentSettings = reactive({
   claimHangUp: true,
   claimEmail: true,
   blackMarketPurchase: true,
+  dreamShopPurchase: true,
 });
 
 // Task Template State
@@ -4765,7 +4780,7 @@ onMounted(() => {
 // Cleanup countdown interval on unmount
 onBeforeUnmount(() => {
   scheduledQueue.close();
-  if (activeScheduledRun.value) shouldStop.value = true;
+  if (activeScheduledRun.value || isRunning.value) shouldStop.value = true;
   if (countdownInterval) {
     clearInterval(countdownInterval);
     countdownInterval = null;
@@ -5025,7 +5040,7 @@ const executeScheduledTask = async (task) => {
 
       if (
         ["batchmengjing", "batchBuyDreamItems"].includes(taskName) &&
-        !ismengjingActivityOpen.value
+        !isDungeonOpen()
       ) {
         addLog({
           time: new Date().toLocaleTimeString(),
@@ -6196,12 +6211,18 @@ const releaseConnectionSlot = () => {
  * @param {string} tokenId Account identity.
  * @param {number} maxRetries Whether connection retry is allowed.
  * @param {Function|null} onSlotChange Optional ownership notification.
+ * @param {Function|null} onClientCreated Optional exact created-client notification.
+ * @param {Function|null} onConnectionReady Optional guard before initialization.
+ * @param {object} options Connection options; `skipInitialization` is read-only.
  * @returns {Promise<boolean>} True after connection initialization.
  */
 const ensureConnection = async (
   tokenId,
   maxRetries = 2,
   onSlotChange = null,
+  onClientCreated = null,
+  onConnectionReady = null,
+  options = {},
 ) => {
   const latestToken = tokens.value.find((t) => t.id === tokenId);
   if (!latestToken) {
@@ -6222,11 +6243,17 @@ const ensureConnection = async (
       type: "info",
     });
 
-    tokenStore.createWebSocketConnection(
+    let createdSocket = null;
+    let createdClient = tokenStore.createWebSocketConnection(
       tokenId,
       latestToken.token,
       latestToken.wsUrl,
     );
+    if (onClientCreated) {
+      createdClient = await createdClient;
+      createdSocket = toRaw(createdClient?.socket);
+      onClientCreated(createdClient, createdSocket);
+    }
     connected = await waitForConnection(tokenId);
 
     if (!connected && maxRetries > 0) {
@@ -6236,7 +6263,18 @@ const ensureConnection = async (
         type: "warning",
       });
 
-      tokenStore.closeWebSocketConnection(tokenId);
+      if (onClientCreated) {
+        const current = tokenStore.wsConnections?.[tokenId]?.client;
+        if (current && (!createdClient || toRaw(current) !== toRaw(createdClient) || (createdSocket && toRaw(current.socket) !== createdSocket))) {
+          const error = new Error("连接已被替换，停止批量任务");
+          error.interrupted = true;
+          throw error;
+        }
+        if (createdClient && current && createdSocket && toRaw(current.socket) === createdSocket)
+          tokenStore.closeWebSocketConnection(tokenId);
+      } else {
+        tokenStore.closeWebSocketConnection(tokenId);
+      }
       await new Promise((r) =>
         setTimeout(r, runtimeBatchSettings.reconnectDelay),
       );
@@ -6248,11 +6286,16 @@ const ensureConnection = async (
       });
 
       const refreshedToken = tokens.value.find((t) => t.id === tokenId);
-      tokenStore.createWebSocketConnection(
+      createdClient = tokenStore.createWebSocketConnection(
         tokenId,
         refreshedToken.token,
         refreshedToken.wsUrl,
       );
+      if (onClientCreated) {
+        createdClient = await createdClient;
+        createdSocket = toRaw(createdClient?.socket);
+        onClientCreated(createdClient, createdSocket);
+      }
 
       connected = await waitForConnection(tokenId);
     }
@@ -6260,7 +6303,9 @@ const ensureConnection = async (
     if (!connected) {
       // 连接失败，释放槽位
       try {
-        tokenStore.closeWebSocketConnection(tokenId);
+        const current = tokenStore.wsConnections?.[tokenId]?.client;
+        if (!onClientCreated || (createdClient && current && createdSocket && toRaw(createdClient) === toRaw(current) && toRaw(current.socket) === createdSocket))
+          tokenStore.closeWebSocketConnection(tokenId);
       } finally {
         releaseConnectionSlot();
         onSlotChange?.(false);
@@ -6270,6 +6315,8 @@ const ensureConnection = async (
   }
 
   // 连接成功，槽位保持占用，直到任务完成后手动释放
+  onConnectionReady?.();
+  if (options.skipInitialization) return true;
 
   // Initialize Game Data (Critical for Battle Version and Session)
   try {
@@ -6280,6 +6327,7 @@ const ensureConnection = async (
       {},
       5000,
     );
+    onConnectionReady?.();
 
     // Fetch Battle Version
     const res = await tokenStore.sendMessageWithPromise(
@@ -6288,10 +6336,12 @@ const ensureConnection = async (
       {},
       5000,
     );
+    onConnectionReady?.();
     if (res?.battleData?.version) {
       tokenStore.setBattleVersion(res.battleData.version, tokenId);
     }
   } catch (e) {
+    if (e?.interrupted) throw e;
     addLog({
       time: new Date().toLocaleTimeString(),
       message: `初始化数据失败: ${e.message}`,
@@ -6443,7 +6493,7 @@ const tasksFootball = createTasksFootball(createTaskDeps());
 const { batchFootballBet } = tasksFootball;
 
 const tasksApex = createTasksApex(createTaskDeps());
-const { batchApexGuess } = tasksApex;
+const { batchApexClaim, batchApexGuess } = tasksApex;
 
 const tasksCampChallenge = createTasksCampChallenge(createTaskDeps());
 const { batchCampChallenge, batchCampChallengePet, batchCampClaimTasks } =
@@ -6521,23 +6571,115 @@ const startBatch = async () => {
       return;
     }
     let ownsSlot = false;
+    let ownedClient = null;
+    let ownedSocket = null;
+    let runClient =
+      tokenStore.getWebSocketStatus(tokenId) === "connected"
+        ? toRaw(tokenStore.wsConnections?.[tokenId]?.client)
+        : null;
+    let runSocket = runClient ? toRaw(runClient.socket) : null;
+    let connectionInvalidated = false;
+    let stopConnectionWatch = null;
+    const assertRunConnection = () => {
+      const current = toRaw(tokenStore.wsConnections?.[tokenId]?.client);
+      const socket = toRaw(tokenStore.wsConnections?.[tokenId]?.client?.socket);
+      if (
+        shouldStop.value ||
+        connectionInvalidated ||
+        tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
+        !current ||
+        !socket ||
+        (runClient && current !== runClient) ||
+        (runSocket && socket !== runSocket)
+      ) {
+        const error = new Error("批量任务已停止或账号连接已变化");
+        error.interrupted = true;
+        throw error;
+      }
+      if (!runClient) runClient = current;
+      if (!runSocket) runSocket = socket;
+      if (ownedClient === current && !ownedSocket) ownedSocket = socket;
+    };
+    const watchRunConnection = () => {
+      assertRunConnection();
+      if (!stopConnectionWatch) {
+        stopConnectionWatch = watch(
+          () => [
+            tokenStore.getWebSocketStatus(tokenId),
+            toRaw(tokenStore.wsConnections?.[tokenId]?.client),
+            toRaw(tokenStore.wsConnections?.[tokenId]?.client?.socket),
+          ],
+          ([status, client, socket]) => {
+            if (status !== "connected" || client !== runClient || socket !== runSocket)
+              connectionInvalidated = true;
+          },
+          { flush: "sync" },
+        );
+      }
+    };
     try {
       addLog({
         time: new Date().toLocaleTimeString(),
         message: `=== 开始执行: ${token.name} ===`,
         type: "info",
       });
-      await ensureConnection(tokenId, 2, (owned) => {
-        ownsSlot = owned;
-      });
-      const runner = new DailyTaskRunner(tokenStore, {
-        commandDelay: runtimeBatchSettings.commandDelay,
-        taskDelay: runtimeBatchSettings.taskDelay,
-      });
+      await ensureConnection(
+        tokenId,
+        2,
+        (owned) => { ownsSlot = owned; },
+        (client, socket) => {
+          ownedClient = client ? toRaw(client) : null;
+          ownedSocket = socket || null;
+          if (ownedClient) runClient = ownedClient;
+          if (ownedSocket) runSocket = ownedSocket;
+        },
+        watchRunConnection,
+      );
+      assertRunConnection();
+      const runner = new DailyTaskRunner(
+        tokenStore,
+        {
+          commandDelay: runtimeBatchSettings.commandDelay,
+          taskDelay: runtimeBatchSettings.taskDelay,
+        },
+        {
+          onDreamShopChecked: (details) => {
+            assertRunConnection();
+            return markDreamShopChecked(details);
+          },
+          runDreamShopPurchases: ({ tokenId: id, checkActive, sleep, log }) => {
+            if (id !== tokenId) {
+              const error = new Error("梦境购买账号已变化，停止执行");
+              error.interrupted = true;
+              throw error;
+            }
+            return runDailyDreamPurchase({
+              accountId: id,
+              isOpen: true,
+              send: (command, params) => {
+                assertRunConnection();
+                return tokenStore.sendMessageWithPromise(id, command, params, 15000);
+              },
+              checkActive: () => {
+                checkActive();
+                assertRunConnection();
+              },
+              pause: sleep,
+              onProgress: ({ confirmed, total }) =>
+                log(`梦境商品：已确认购买 ${confirmed}/${total} 件`),
+            });
+          },
+        },
+      );
       const result = await runner.run(
         tokenId,
         {
-          shouldStop: () => shouldStop.value,
+          shouldStop: () =>
+            shouldStop.value ||
+            connectionInvalidated ||
+            tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
+            toRaw(tokenStore.wsConnections?.[tokenId]?.client) !== runClient ||
+            toRaw(tokenStore.wsConnections?.[tokenId]?.client?.socket) !== runSocket,
           onLog: (log) =>
             addLog({ ...log, message: `${token.name}: ${log.message}` }),
           onProgress: (progress) =>
@@ -6549,13 +6691,15 @@ const startBatch = async () => {
         },
         activeScheduledRun.value?.accountSettings[tokenId] ?? null,
       );
-      tokenStatus.value[tokenId] = result.incomplete ? "pending" : "completed";
+      assertRunConnection();
+      const needsAttention = Boolean(result.incomplete || result.failed);
+      tokenStatus.value[tokenId] = needsAttention ? "pending" : "completed";
       addLog({
         time: new Date().toLocaleTimeString(),
-        message: result.incomplete
-          ? `=== ${token.name} 本轮结束，${result.incomplete} 个步骤待继续 ===`
+        message: needsAttention
+          ? `=== ${token.name} 本轮结束，${result.incomplete || 0} 个步骤待继续，${result.failed || 0} 个步骤失败 ===`
           : `=== ${token.name} 执行完成 ===`,
-        type: result.incomplete ? "warning" : "success",
+        type: needsAttention ? "warning" : "success",
       });
     } catch (error) {
       tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
@@ -6565,9 +6709,13 @@ const startBatch = async () => {
         type: error.interrupted ? "warning" : "error",
       });
     } finally {
+      stopConnectionWatch?.();
       if (ownsSlot) {
         try {
-          tokenStore.closeWebSocketConnection(tokenId);
+          const current = toRaw(tokenStore.wsConnections?.[tokenId]?.client);
+          const socket = toRaw(tokenStore.wsConnections?.[tokenId]?.client?.socket);
+          if (ownedClient && ownedSocket && current === ownedClient && socket === ownedSocket)
+            tokenStore.closeWebSocketConnection(tokenId);
         } finally {
           releaseConnectionSlot();
         }

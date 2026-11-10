@@ -238,11 +238,7 @@ const isConnected = computed(() => {
 const apexGuessTip = computed(() => {
   if (!isConnected.value) return "未连接";
   if (apexGuessState.value.kind === "loading") return "检查中";
-  if (
-    apexGuessState.value.kind !== "ready" ||
-    apexGuessState.value.uncertainStagesCount
-  )
-    return "状态待确认";
+  if (apexGuessState.value.kind !== "ready") return "状态待确认";
   return compactApexGuessStatus(apexGuessState.value);
 });
 

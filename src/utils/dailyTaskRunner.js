@@ -54,10 +54,19 @@ const getTodayBossId = (dailyTime) => {
   return DAY_BOSS_MAP[dayOfWeek];
 };
 
+const serverRoleIdentity = (value) => {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  if (typeof value === "number" && (!Number.isSafeInteger(value) || value <= 0))
+    return null;
+  const id = String(value).trim();
+  return id && id !== "0" ? id : null;
+};
+
 export class DailyTaskRunner {
   constructor(tokenStore, delaySettings = null, options = {}) {
     this.loadConfig = options.loadConfig || loadDailyTaskConfig;
     this.runDreamShopPurchases = options.runDreamShopPurchases || null;
+    this.onDreamShopChecked = options.onDreamShopChecked || null;
     this.sleep =
       options.sleep ||
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -322,6 +331,7 @@ export class DailyTaskRunner {
     );
     const roleData = await this.refreshServerRole(tokenId);
     this.taskDay = roleData.dailyTask.dailyTime;
+    const initialRoleId = serverRoleIdentity(roleData.roleId);
 
     this.log("开始执行每日任务补差");
 
@@ -876,6 +886,49 @@ export class DailyTaskRunner {
               log: (text, type) => this.log(text, type),
             });
             if (result?.message) this.log(result.message);
+            if (
+              result?.status === "completed" &&
+              typeof this.onDreamShopChecked === "function" &&
+              initialRoleId &&
+              Number.isSafeInteger(this.taskDay) &&
+              this.taskDay > 0
+            ) {
+              let verifiedRole;
+              try {
+                // Role info has a separate request limit from shop purchases.
+                await this.sleep(1000);
+                const response = await this.sendRequest(tokenId, () =>
+                  this.tokenStore.sendGetRoleInfo(tokenId, {}, 2),
+                );
+                verifiedRole = response?.role;
+              } catch (error) {
+                if (error.interrupted) throw error;
+                this.log("商店已检查，但未能核对今日状态", "warning");
+              }
+              const verifiedId = serverRoleIdentity(verifiedRole?.roleId);
+              if (verifiedId && verifiedId !== initialRoleId) {
+                const error = new Error("服务器角色已变化，请重新连接后再继续");
+                error.interrupted = true;
+                throw error;
+              }
+              if (
+                verifiedRole &&
+                verifiedId === initialRoleId &&
+                verifiedRole.dailyTask?.dailyTime === this.taskDay
+              ) {
+                try {
+                  await this.onDreamShopChecked({
+                    tokenId,
+                    roleId: initialRoleId,
+                    taskDay: this.taskDay,
+                  });
+                } catch {
+                  this.log("商店已检查，但提醒状态未能保存", "warning");
+                }
+              } else if (verifiedRole) {
+                this.log("商店已检查，但身份或日期未能核对", "warning");
+              }
+            }
             return result?.status === "completed";
           },
         });

@@ -1008,3 +1008,105 @@ test("上一期已完成的梦境不能让新一期跳过梦境步骤", async ()
     1,
   );
 });
+
+test("梦境购买成功且身份日期经服务器再次确认后记录，即使购买零件", async () => {
+  const f = fixture();
+  f.role.roleId = 123;
+  f.role.dailyTask.dailyTime = Date.parse("2026-11-11T00:00:00+08:00") / 1000;
+  const marked = [];
+  const runner = f.runner({
+    runDreamShopPurchases: async () => ({ status: "completed", purchases: [] }),
+    onDreamShopChecked: (data) => marked.push(data),
+  });
+  await runner.run("account-a", {}, { ...settings, dreamShopPurchase: true });
+  assert.equal(marked.length, 1);
+  assert.equal(marked[0].tokenId, "account-a");
+  assert.equal(marked[0].roleId, "123");
+  assert.equal(marked[0].taskDay, f.role.dailyTask.dailyTime);
+});
+
+test("梦境购买未完成或无服务端角色 ID 时不记录提醒", async () => {
+  for (const [status, roleId] of [
+    ["skipped", 123],
+    ["completed", undefined],
+  ]) {
+    const f = fixture();
+    f.role.roleId = roleId;
+    f.role.dailyTask.dailyTime = Date.parse("2026-11-11T00:00:00+08:00") / 1000;
+    let marked = false;
+    await f
+      .runner({
+        runDreamShopPurchases: async () => ({ status }),
+        onDreamShopChecked: () => {
+          marked = true;
+        },
+      })
+      .run("account-a", {}, { ...settings, dreamShopPurchase: true });
+    assert.equal(marked, false);
+  }
+});
+
+test("购买期间服务器日常日期变更时不记录，停止后续任务", async () => {
+  const f = fixture();
+  f.role.roleId = 123;
+  f.role.dailyTask.dailyTime = Date.parse("2026-11-11T00:00:00+08:00") / 1000;
+  let marked = false;
+  await assert.rejects(
+    f
+      .runner({
+        runDreamShopPurchases: async () => {
+          f.role.dailyTask.dailyTime += 86400;
+          return { status: "completed" };
+        },
+        onDreamShopChecked: () => {
+          marked = true;
+        },
+      })
+      .run("account-a", {}, { ...settings, dreamShopPurchase: true }),
+    /重置/,
+  );
+  assert.equal(marked, false);
+});
+
+test("购买后角色身份变化时不记录且停止后续任务", async () => {
+  const f = fixture();
+  f.role.roleId = 123;
+  f.role.dailyTask.dailyTime = Date.parse("2026-11-11T00:00:00+08:00") / 1000;
+  let marked = false;
+  await assert.rejects(
+    f
+      .runner({
+        runDreamShopPurchases: async () => {
+          f.role.roleId = 456;
+          return { status: "completed" };
+        },
+        onDreamShopChecked: () => {
+          marked = true;
+        },
+      })
+      .run("account-a", {}, { ...settings, dreamShopPurchase: true }),
+    /角色已变化/,
+  );
+  assert.equal(marked, false);
+});
+
+test("提醒存储故障不影响已完成的梦境购买", async () => {
+  const f = fixture();
+  f.role.roleId = 123;
+  f.role.dailyTask.dailyTime = Date.parse("2026-11-11T00:00:00+08:00") / 1000;
+  const messages = [];
+  const result = await f
+    .runner({
+      runDreamShopPurchases: async () => ({ status: "completed" }),
+      onDreamShopChecked: () => {
+        throw new Error("storage denied");
+      },
+    })
+    .run(
+      "account-a",
+      { onLog: (entry) => messages.push(entry.message) },
+      { ...settings, dreamShopPurchase: true },
+    );
+  assert.equal(result.failed, 0);
+  assert.ok(messages.some((line) => line.includes("提醒状态未能保存")));
+});

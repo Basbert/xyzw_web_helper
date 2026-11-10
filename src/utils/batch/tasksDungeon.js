@@ -290,13 +290,7 @@ export function createTasksDungeon(deps) {
         });
         checkStop();
         const mjbattleTeam = { 0: 107 };
-        const dayOfWeek = new Date().getDay();
-        if (
-          dayOfWeek === 0 ||
-          dayOfWeek === 1 ||
-          dayOfWeek === 3 ||
-          dayOfWeek === 4
-        ) {
+        if (isDungeonOpen()) {
           await tokenStore.sendMessageWithPromise(
             tokenId,
             "dungeon_selecthero",

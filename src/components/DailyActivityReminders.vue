@@ -8,7 +8,13 @@
     <div v-if="days.dream" class="reminder-row">
       <div>
         <strong>梦境商店</strong>
-        <p>今天梦境开放，记得检查商店里的商品。</p>
+        <p>
+          {{
+            dreamChecked
+              ? "今日已通过每日任务自动检查商店。"
+              : "今天梦境开放，记得检查商店里的商品。"
+          }}
+        </p>
       </div>
       <button type="button" @click="emit('navigate', 'dream')">查看梦境</button>
     </div>
@@ -26,11 +32,31 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
 import { describeCampProgress, getReminderDays } from "@/utils/dailyReminders";
+import {
+  isDreamShopChecked,
+  subscribeDreamShopChecks,
+} from "@/utils/dreamShopCheckState";
 
 const emit = defineEmits(["navigate"]);
 const tokenStore = useTokenStore();
 const now = useShanghaiClock();
 const days = computed(() => getReminderDays(now.value));
+const dreamChecked = ref(false);
+function refreshDreamChecked() {
+  dreamChecked.value = isDreamShopChecked({
+    roleId: tokenStore.selectedToken?.roleId,
+    dayKey: days.value.dayKey,
+  });
+}
+watch(
+  () => [
+    tokenStore.selectedToken?.id,
+    tokenStore.selectedToken?.roleId,
+    days.value.dayKey,
+  ],
+  refreshDreamChecked,
+  { immediate: true },
+);
 const connected = computed(() => {
   const id = tokenStore.selectedToken?.id;
   return !!id && tokenStore.getWebSocketStatus(id) === "connected";
@@ -40,6 +66,7 @@ let sequence = 0;
 let timer;
 let disposed = false;
 let lastRefresh = 0;
+let unsubscribeDream = () => {};
 async function refreshCamp() {
   const id = tokenStore.selectedToken?.id;
   const dayKey = days.value.dayKey;
@@ -81,10 +108,13 @@ function refreshWhenVisible() {
     refreshCamp();
 }
 onMounted(() => {
+  unsubscribeDream = subscribeDreamShopChecks(refreshDreamChecked);
+  refreshDreamChecked();
   document.addEventListener("visibilitychange", refreshWhenVisible);
   timer = window.setInterval(refreshWhenVisible, 60000);
 });
 onUnmounted(() => {
+  unsubscribeDream();
   disposed = true;
   sequence++;
   document.removeEventListener("visibilitychange", refreshWhenVisible);

@@ -91,7 +91,7 @@
       <strong>{{ result.message }}</strong>
       <ul v-if="result.rewards?.length">
         <li v-for="(reward, index) in result.rewards" :key="index">
-          {{ formatReward(reward) }}
+          {{ formatCompassReward(reward) }}
         </li>
       </ul>
       <p v-else>暂无可确认的奖励明细。</p>
@@ -111,6 +111,7 @@ import {
   parseStarSnapshot,
   runCompassDraw,
 } from "@/utils/compassProtocol.js";
+import { formatCompassReward } from "@/utils/compassRewards.js";
 
 // Preserve the original account's confirmed results when navigating or switching.
 const compassResultsByAccount = reactive(new Map());
@@ -192,20 +193,6 @@ function capture() {
       connected.value &&
       tokenStore.wsConnections?.[id]?.client === client,
   };
-}
-
-function formatReward(reward) {
-  const id = reward.itemId ?? reward.id;
-  const type = reward.type;
-  const amount = reward.value ?? reward.count ?? reward.num;
-  const names = { 1020: "皮肤币", 1022: "白玉", 1023: "彩玉" };
-  const name =
-    reward.name ||
-    (Number(type) === 3 ? names[id] : undefined) ||
-    (id != null && id !== 0 ? `道具 ID ${id}` : `奖励类型 ${type ?? "未知"}`);
-  const typeLabel =
-    type != null && id != null && id !== 0 ? `（类型 ${type}）` : "";
-  return `${name}${typeLabel} × ${amount ?? "数量未知"}`;
 }
 
 function record(id, value) {

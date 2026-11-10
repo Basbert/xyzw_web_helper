@@ -186,6 +186,18 @@ export function formatNextApexGuess(nextGuess, referenceMs = Date.now()) {
 /** Short text shared by the dashboard and the collapsed daily entry. */
 export function compactApexGuessStatus(status) {
   const next = formatNextApexGuess(status.nextGuess, status.serverNowMs);
+  const rewards =
+    status.claimState === "ready" && Array.isArray(status.claimableRewards)
+      ? status.claimableRewards.length
+      : 0;
+  if (rewards > 0) {
+    const claim = `待领奖 ${rewards} 项`;
+    if (status.uncertainStagesCount) return `${claim} · 竞猜状态待确认`;
+    return status.pendingStagesCount
+      ? `待竞猜 ${status.pendingStagesCount} 阶段 · ${claim}`
+      : claim;
+  }
+  if (status.uncertainStagesCount) return "状态待确认";
   if (!status.hasOpenGuesses) {
     if (status.scheduleMismatch) return "赛程待核对";
     return next ? `下次预计 ${next}` : "暂无开放，后续赛程待确认";

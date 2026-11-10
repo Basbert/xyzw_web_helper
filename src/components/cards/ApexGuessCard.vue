@@ -205,11 +205,9 @@ const collapsedSummary = computed(() => {
     isBusy.value ||
     isClaiming.value ||
     !isConnected.value ||
-    guessState.value.kind !== "ready" ||
-    guessState.value.uncertainStagesCount
+    guessState.value.kind !== "ready"
   )
     return badgeText.value;
-  if (claimCount.value > 0) return `待领奖 ${claimCount.value} 项`;
   return compactApexGuessStatus(guessState.value);
 });
 const buttonText = computed(() => {
