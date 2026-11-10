@@ -43,33 +43,45 @@
             </div>
           </div>
           <div class="today-items">
-            <div class="today-item">
+            <button
+              type="button"
+              class="today-item"
+              @click="openDailyTarget('tasks')"
+            >
               <img src="/icons/174023274867420.png" alt="" />
-              <div class="today-item-name">
+              <span class="today-item-name">
                 <strong>每日任务</strong>
                 <span>按当前角色的设置执行</span>
-              </div>
-              <div class="today-item-status">
+              </span>
+              <span class="today-item-status">
                 <span>当前进度</span><strong>{{ dailyProgress }}</strong>
-              </div>
-            </div>
-            <div class="today-item">
+              </span>
+            </button>
+            <button
+              type="button"
+              class="today-item"
+              @click="openDailyTarget('maintenance')"
+            >
               <img src="/icons/173746572831736.png" alt="" />
-              <div class="today-item-name">
+              <span class="today-item-name">
                 <strong>盐罐、挂机与残卷</strong>
                 <span>一键处理盐罐、挂机和功法残卷</span>
-              </div>
-            </div>
-            <div class="today-item">
+              </span>
+            </button>
+            <button
+              type="button"
+              class="today-item"
+              @click="openDailyTarget('apex')"
+            >
               <img src="/icons/legionCup.png" alt="" />
-              <div class="today-item-name">
+              <span class="today-item-name">
                 <strong>逐鹿盐山竞猜</strong>
                 <span>每场按助威数选择队伍</span>
-              </div>
-              <div class="today-item-status">
+              </span>
+              <span class="today-item-status">
                 <span>{{ apexGuessTip }}</span>
-              </div>
-            </div>
+              </span>
+            </button>
           </div>
           <n-button
             type="primary"
@@ -120,6 +132,10 @@ import { useTokenStore } from "@/stores/tokenStore";
 import { compactApexGuessStatus } from "@/utils/apexGuessHelper.js";
 
 const router = useRouter();
+const openDailyTarget = (daily) => {
+  if (["tasks", "maintenance", "apex"].includes(daily))
+    return router.push({ path: "/admin/game-features", query: { daily } });
+};
 const openReminder = (kind) =>
   router.push({ path: "/admin/game-features", query: { reminder: kind } });
 const message = useMessage();
@@ -462,8 +478,20 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 12px;
+  width: 100%;
   min-width: 0;
   padding: 14px 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--bg-secondary);
+  }
 
   & + & {
     border-top: 1px solid var(--border-light);
@@ -497,9 +525,11 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   color: var(--text-secondary);
   font-size: 13px;
-  white-space: nowrap;
+  text-align: right;
+  overflow-wrap: anywhere;
 
   strong {
     color: var(--text-primary);
@@ -609,6 +639,7 @@ summary:focus-visible {
     flex-basis: calc(100% - 48px);
     justify-content: space-between;
     margin-left: 48px;
+    text-align: left;
   }
 }
 </style>

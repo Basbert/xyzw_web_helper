@@ -62,6 +62,7 @@
       <div class="info-container">
         竞技场阵容 {{ settings.arenaFormation }} · BOSS
         {{ settings.bossTimes }} 次
+        <span v-if="showDreamShopSummary"> · 含梦境商店</span>
       </div>
     </div>
 
@@ -370,6 +371,7 @@ import {
   ref,
   watch,
 } from "vue";
+import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
 import { runDailyDreamPurchase } from "@/utils/dailyDreamPurchase";
 import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
@@ -378,6 +380,7 @@ import {
   getDailyTaskStates,
   loadDailyTaskConfig,
 } from "@/utils/dailyTaskState";
+import { isDungeonOpen } from "@/utils/dreamConstants";
 import { markDreamShopChecked } from "@/utils/dreamShopCheckState";
 
 const tokenStore = useTokenStore();
@@ -411,6 +414,13 @@ const settings = useDailyTaskSettings(tokenStore, (error) => {
   console.error("每日任务设置读写失败:", error);
   message.warning("无法保存或读取每日任务设置，请检查浏览器存储权限");
 });
+const shanghaiNow = useShanghaiClock();
+const showDreamShopSummary = computed(
+  () =>
+    Boolean(tokenStore.selectedToken?.id) &&
+    settings.dreamShopPurchase === true &&
+    isDungeonOpen(shanghaiNow.value),
+);
 
 // 每日任务列表
 const tasks = ref([

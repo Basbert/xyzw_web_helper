@@ -14,26 +14,35 @@
         activeSection === 'tools' && dreamInitialTab === 'buy',
     }"
   >
-    <!-- 下方选卡分区切换（Tabs）：日常｜俱乐部｜活动 -->
-    <n-tabs
-      class="section-tabs"
-      v-model:value="activeSection"
-      type="line"
-      animated
-      size="small"
-    >
-      <n-tab-pane name="daily" tab="日常" />
-      <n-tab-pane name="club" tab="俱乐部" />
-      <n-tab-pane name="activity" tab="活动" />
-      <n-tab-pane v-if="ENABLE_TOOLS_TAB" name="tools" tab="工具" />
-      <n-tab-pane name="apexChallengeGroup" tab="逐鹿盐山" />
-      <n-tab-pane name="campChallengeGroup" tab="营地挑战" />
-      <n-tab-pane name="saltFieldGroup" tab="盐场" />
-      <n-tab-pane name="peachGroup" tab="蟠桃园" />
-      <n-tab-pane name="rankGroup" tab="排行榜" />
-      <n-tab-pane name="fightPvp" tab="切磋" />
-      <n-tab-pane name="tenHall" tab="模拟十殿" />
-    </n-tabs>
+    <nav class="section-navigation" aria-label="游戏功能分类">
+      <div class="primary-section-tabs" aria-label="功能分组" role="group">
+        <button
+          v-for="group in navigationGroups"
+          :key="group.value"
+          type="button"
+          :aria-pressed="activeNavigationGroup === group.value"
+          @click="activeNavigationGroup = group.value"
+        >
+          {{ group.label }}
+        </button>
+      </div>
+      <div
+        v-if="activeNavigationSections.length > 1"
+        class="secondary-section-tabs"
+        aria-label="分组内功能"
+        role="group"
+      >
+        <button
+          v-for="section in activeNavigationSections"
+          :key="section.value"
+          type="button"
+          :aria-pressed="activeSection === section.value"
+          @click="activeSection = section.value"
+        >
+          {{ section.label }}
+        </button>
+      </div>
+    </nav>
 
     <DailyActivityReminders
       v-if="activeSection === 'daily'"
@@ -45,8 +54,13 @@
       class="daily-workspace"
       aria-label="每日常用操作"
     >
-      <DailyTaskStatus />
-      <section class="maintenance-panel" aria-label="盐罐、挂机与功法残卷">
+      <DailyTaskStatus id="daily-task-target" tabindex="-1" />
+      <section
+        id="daily-maintenance-target"
+        class="maintenance-panel"
+        aria-label="盐罐、挂机与功法残卷"
+        tabindex="-1"
+      >
         <div class="maintenance-heading">
           <h2>盐罐、挂机与功法残卷</h2>
           <p>处理盐罐、先领取挂机奖励再加钟，并领取功法残卷</p>
@@ -101,7 +115,12 @@
       <TeamFormation />
     </section>
 
-    <details v-show="activeSection === 'daily'" class="apex-guess-details">
+    <details
+      id="daily-apex-target"
+      v-show="activeSection === 'daily'"
+      class="apex-guess-details"
+      tabindex="-1"
+    >
       <summary>
         逐鹿盐山 · 竞猜
         <span class="apex-summary-status">{{ apexGuessSummary }}</span>
@@ -229,7 +248,10 @@
     <!-- 俱乐部信息（仅俱乐部分区） -->
     <ClubInfo v-if="activeSection === 'club'" />
 
-    <CompassCard v-if="activeSection === 'activity'" :active="activeSection === 'activity'" />
+    <CompassCard
+      v-if="activeSection === 'activity'"
+      :active="activeSection === 'activity'"
+    />
 
     <!-- 月度任务进度（提取组件） -->
     <MonthlyTasksCard v-show="activeSection === 'activity'" />
@@ -621,7 +643,76 @@ const legionMatch = ref({
 
 // 响应式数据
 
+const ENABLE_TOOLS_TAB = true; // 工具分区开关
 const activeSection = ref("daily");
+// Keep the existing section identifiers as the source of truth, including
+// direct navigation from reminders and the guessing card.
+const navigationGroups = computed(() => [
+  {
+    value: "daily",
+    label: "日常",
+    sections: [{ value: "daily", label: "日常" }],
+  },
+  {
+    value: "battle",
+    label: "十殿与切磋",
+    sections: [
+      { value: "tenHall", label: "模拟十殿" },
+      { value: "fightPvp", label: "切磋" },
+    ],
+  },
+  {
+    value: "events",
+    label: "赛事与排行",
+    sections: [
+      { value: "apexChallengeGroup", label: "逐鹿盐山" },
+      { value: "campChallengeGroup", label: "营地挑战" },
+      { value: "saltFieldGroup", label: "盐场" },
+      { value: "peachGroup", label: "蟠桃园" },
+      { value: "rankGroup", label: "排行榜" },
+    ],
+  },
+  {
+    value: "club",
+    label: "俱乐部",
+    sections: [{ value: "club", label: "俱乐部" }],
+  },
+  {
+    value: "activity",
+    label: "活动",
+    sections: [{ value: "activity", label: "活动" }],
+  },
+  ...(ENABLE_TOOLS_TAB
+    ? [
+        {
+          value: "tools",
+          label: "工具",
+          sections: [{ value: "tools", label: "工具" }],
+        },
+      ]
+    : []),
+]);
+const lastVisitedSections = ref({});
+const activeNavigationGroup = computed({
+  get: () =>
+    navigationGroups.value.find((group) =>
+      group.sections.some((section) => section.value === activeSection.value),
+    )?.value || "daily",
+  set: (value) => {
+    const group = navigationGroups.value.find((item) => item.value === value);
+    if (!group) return;
+    const last = lastVisitedSections.value[value];
+    activeSection.value = group.sections.some((item) => item.value === last)
+      ? last
+      : group.sections[0].value;
+  },
+});
+const activeNavigationSections = computed(
+  () =>
+    navigationGroups.value.find(
+      (group) => group.value === activeNavigationGroup.value,
+    )?.sections || [],
+);
 const dreamInitialTab = ref("battle");
 const route = useRoute();
 let dreamObserver;
@@ -656,10 +747,35 @@ watch(
   },
   { immediate: true },
 );
+const openDailyTarget = async (kind) => {
+  const targets = {
+    tasks: "daily-task-target",
+    maintenance: "daily-maintenance-target",
+    apex: "daily-apex-target",
+  };
+  if (typeof kind !== "string" || !Object.hasOwn(targets, kind)) return;
+  activeSection.value = "daily";
+  await nextTick();
+  if (route.query.daily !== kind || activeSection.value !== "daily") return;
+  const target = document.getElementById(targets[kind]);
+  if (!target) return;
+  if (kind === "apex") target.open = true;
+  target.focus({ preventScroll: true });
+  target.scrollIntoView({ behavior: "auto", block: "start" });
+};
+watch(() => route.query.daily, openDailyTarget, { immediate: true });
 const tenHallVisited = ref(false);
-watch(activeSection, (section) => {
-  if (section === "tenHall") tenHallVisited.value = true;
-});
+watch(
+  activeSection,
+  (section) => {
+    const group = navigationGroups.value.find((item) =>
+      item.sections.some((entry) => entry.value === section),
+    );
+    if (group) lastVisitedSections.value[group.value] = section;
+    if (section === "tenHall") tenHallVisited.value = true;
+  },
+  { immediate: true, flush: "sync" },
+);
 const saltFieldSubTab = ref("warrank");
 const peachSubTab = ref("peach");
 const rankSubTab = ref("serverrank");
@@ -819,7 +935,6 @@ const startTimer = () => {
 // 功能开关：暂时隐藏俱乐部排位与旧签到卡片
 const ENABLE_LEGION_MATCH = false;
 const ENABLE_LEGION_SIGNIN_CARD = false;
-const ENABLE_TOOLS_TAB = true; // 工具分区开关
 
 // 盐场战绩入口已移动至俱乐部信息模块
 
@@ -940,7 +1055,7 @@ onUnmounted(() => {
 
 // Keep the selected dream card ahead of other lazily loaded tool cards so their
 // eventual height cannot move it away after the router has positioned it.
-.dream-shop-priority .section-tabs {
+.dream-shop-priority .section-navigation {
   order: -2;
 }
 .dream-shop-priority #dream-shop-helper {
@@ -948,6 +1063,11 @@ onUnmounted(() => {
 }
 #dream-shop-helper {
   min-width: 0;
+  scroll-margin-top: 76px;
+}
+#daily-task-target,
+#daily-maintenance-target,
+#daily-apex-target {
   scroll-margin-top: 76px;
 }
 
@@ -969,15 +1089,58 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-.section-tabs {
-  margin: 0 var(--spacing-sm) var(--spacing-md) var(--spacing-sm);
+.section-navigation {
   grid-column: 1 / -1;
-  border-bottom: 1px solid var(--border-light);
-  overflow: auto;
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  margin: 0 var(--spacing-sm) var(--spacing-md);
 }
 
-.section-tabs :deep(.n-tabs-pane-wrapper) {
-  display: none;
+.primary-section-tabs,
+.secondary-section-tabs {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.primary-section-tabs {
+  border-bottom: 1px solid var(--border-light);
+}
+
+.section-navigation button {
+  flex: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  padding: 8px 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.section-navigation button[aria-pressed="true"] {
+  color: var(--primary-color);
+  border-bottom-color: var(--primary-color);
+}
+
+.section-navigation button:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.secondary-section-tabs button {
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.secondary-section-tabs button[aria-pressed="true"] {
+  background: var(--bg-primary);
 }
 
 .daily-workspace,

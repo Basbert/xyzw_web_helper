@@ -174,6 +174,12 @@ const router = createRouter({
   scrollBehavior(to, from, savedPosition) {
     // The dream section focuses itself after its async component is ready.
     if (to.query.reminder === "dream") return false;
+    // GameStatus positions these three validated sections after rendering.
+    if (
+      to.path === "/admin/game-features" &&
+      ["tasks", "maintenance", "apex"].includes(to.query.daily)
+    )
+      return false;
     if (savedPosition) {
       return savedPosition;
     } else {

@@ -89,11 +89,39 @@
     </button>
     <div v-if="result" class="results" role="status" aria-live="polite">
       <strong>{{ result.message }}</strong>
-      <ul v-if="result.rewards?.length">
-        <li v-for="(reward, index) in result.rewards" :key="index">
-          {{ formatCompassReward(reward) }}
-        </li>
-      </ul>
+      <template v-if="rewardSummary.length">
+        <p class="result-heading">奖励汇总</p>
+        <ul>
+          <li v-for="item in rewardSummary" :key="item.index">
+            {{ item.text }}
+          </li>
+        </ul>
+        <details v-if="rewardBatches.details.length" class="result-details">
+          <summary>
+            {{
+              rewardBatches.confirmedDraws === null
+                ? "查看抽取明细（次数待确认）"
+                : `查看每次抽取明细（共 ${rewardBatches.confirmedDraws} 次）`
+            }}
+          </summary>
+          <p v-if="rewardBatches.incomplete">
+            部分奖励未能与回包明细对应，请以汇总为准。
+          </p>
+          <ol>
+            <li v-for="(batch, index) in rewardBatches.details" :key="index">
+              <span>{{ batch.label }}</span>
+              <ul>
+                <li
+                  v-for="(reward, rewardIndex) in batch.rewards"
+                  :key="rewardIndex"
+                >
+                  {{ formatCompassReward(reward) }}
+                </li>
+              </ul>
+            </li>
+          </ol>
+        </details>
+      </template>
       <p v-else>暂无可确认的奖励明细。</p>
     </div>
   </section>
@@ -111,7 +139,11 @@ import {
   parseStarSnapshot,
   runCompassDraw,
 } from "@/utils/compassProtocol.js";
-import { formatCompassReward } from "@/utils/compassRewards.js";
+import {
+  describeCompassRewardBatches,
+  formatCompassReward,
+  summarizeCompassRewards,
+} from "@/utils/compassRewards.js";
 
 // Preserve the original account's confirmed results when navigating or switching.
 const compassResultsByAccount = reactive(new Map());
@@ -131,6 +163,15 @@ const cancelRequested = ref(false);
 const tokenId = computed(() => tokenStore.selectedToken?.id || null);
 const result = computed(
   () => compassResultsByAccount.get(tokenId.value) || null,
+);
+const rewardSummary = computed(() =>
+  summarizeCompassRewards(result.value?.rewards),
+);
+const rewardBatches = computed(() =>
+  describeCompassRewardBatches(
+    result.value?.batches,
+    result.value?.rewards?.length ?? 0,
+  ),
 );
 const uncertain = computed(() => {
   return (
@@ -251,7 +292,7 @@ async function draw(type) {
   const requestedTotal = type === "chaos" ? requestedCount : starTotal.value;
   const roleId = chaosRoleId.value;
   const confirmedRewards = [];
-  let confirmed = 0;
+  const confirmedBatches = [];
   busy.value = true;
   drawing.value = type;
   cancelRequested.value = false;
@@ -279,38 +320,63 @@ async function draw(type) {
               ? `等待 ${Math.ceil(milliseconds / 1000)} 秒后继续…`
               : "正在继续处理…";
       },
-      onDraw: ({ completed, rewards }) => {
-        confirmed = completed;
+      onDraw: ({ kind, rewards, response }) => {
         confirmedRewards.push(...rewards);
+        confirmedBatches.push({
+          kind,
+          rewards: rewards.slice(),
+          confIdList: Array.isArray(response?.confIdList)
+            ? response.confIdList.slice()
+            : response?.confIdList,
+        });
+        const draws = describeCompassRewardBatches(
+          confirmedBatches,
+          confirmedRewards.length,
+        ).confirmedDraws;
         const message =
-          type === "chaos"
-            ? `混沌罗盘已确认 ${completed} 次`
-            : `已确认 ${completed}/${requestedTotal} 次`;
-        record(context.id, { message, rewards: confirmedRewards.slice() });
+          draws === null
+            ? `已收到 ${confirmedBatches.length} 批奖励，抽取次数待确认`
+            : type === "chaos"
+              ? `混沌罗盘已确认 ${draws} 次`
+              : `已确认 ${draws}/${requestedTotal} 次`;
+        record(context.id, {
+          message,
+          rewards: confirmedRewards.slice(),
+          batches: confirmedBatches.slice(),
+        });
         if (context.valid()) progressText.value = message;
       },
     });
+    const draws = describeCompassRewardBatches(
+      confirmedBatches,
+      next.rewards.length,
+    ).confirmedDraws;
     record(context.id, {
       message:
-        type === "chaos"
-          ? "混沌罗盘抽取完成"
-          : `星级罗盘已完成 ${next.completed} 次`,
+        draws === null
+          ? "抽取完成，部分回包的抽取次数无法确认"
+          : `${type === "chaos" ? "混沌" : "星级"}罗盘已确认 ${draws} 次`,
       rewards: next.rewards,
+      batches: confirmedBatches.slice(),
     });
   } catch (error) {
     const rewards = Array.isArray(error.compassRewards)
       ? error.compassRewards
       : confirmedRewards;
-    const completed = error.compassCompleted ?? confirmed;
+    const draws = describeCompassRewardBatches(
+      confirmedBatches,
+      rewards.length,
+    ).confirmedDraws;
     const prefix =
-      type === "chaos"
-        ? "混沌罗盘抽取未完成"
-        : `星级罗盘已确认 ${completed} 次`;
+      draws === null
+        ? `已收到 ${confirmedBatches.length} 批奖励，抽取次数未确认`
+        : `${type === "chaos" ? "混沌" : "星级"}罗盘已确认 ${draws} 次`;
     record(context.id, {
       message: error.compassUncertain
         ? `${prefix}：${error.message || "请求失败"}。最后一次操作结果未确认，请到游戏内核对后重新加载页面。`
         : `${prefix}：${error.message || "请求失败"}。已确认的奖励保留如下。`,
       rewards,
+      batches: confirmedBatches.slice(),
     });
   } finally {
     busy.value = false;
@@ -470,6 +536,23 @@ button:disabled {
 }
 .results p {
   margin-bottom: 0;
+}
+.result-heading {
+  font-weight: 600;
+}
+.result-details {
+  margin-top: 12px;
+}
+.result-details summary {
+  cursor: pointer;
+  color: var(--text-color-secondary, #73777f);
+}
+.result-details ol {
+  margin: 8px 0 0;
+  padding-left: 20px;
+}
+.result-details ol > li + li {
+  margin-top: 8px;
 }
 @media (max-width: 420px) {
   .compass-header {
