@@ -46,7 +46,7 @@
       </div>
     </template>
     <template #action>
-      <a-button
+      <n-button
         type="primary"
         :disabled="state.isRunning"
         secondary
@@ -56,8 +56,8 @@
         @click="handleBoxHelper"
       >
         {{ state.isRunning ? "运行中" : "开启宝箱" }}
-      </a-button>
-      <a-button
+      </n-button>
+      <n-button
         type="primary"
         size="small"
         :disabled="state.isRunning"
@@ -65,7 +65,7 @@
         @click="batchclaimboxpointreward"
       >
         {{ claimBoxPointButtonText }}
-      </a-button>
+      </n-button>
     </template>
   </MyCard>
 </template>

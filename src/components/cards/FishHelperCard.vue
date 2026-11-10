@@ -21,22 +21,51 @@
           </div>
         </div>
         <div class="selects">
-          <n-select v-model:value="type" :options="typeOptions" />
-          <n-select v-model:value="number" :options="numberOptions" />
+          <n-select
+            v-model:value="type"
+            :options="typeOptions"
+            :disabled="state.isRunning"
+          />
+          <n-select
+            v-model:value="number"
+            :options="numberOptions"
+            :disabled="state.isRunning"
+          />
         </div>
+        <p
+          v-if="state.visible && (state.isRunning || state.result)"
+          class="run-result"
+          aria-live="polite"
+        >
+          {{
+            state.isRunning
+              ? state.available === null
+                ? state.stopRequested
+                  ? "正在停止"
+                  : "正在核对鱼竿数量"
+                : `已获回包的请求共涉及 ${state.completed}/${state.total} 次${state.stopRequested ? "，正在停止" : ""}`
+              : state.result
+          }}
+        </p>
       </div>
     </template>
     <template #action>
-      <a-button
+      <n-button
         type="primary"
-        :disabled="state.isRunning"
+        :disabled="state.isRunning ? state.stopRequested : !connected"
         secondary
         size="small"
         block
-        @click="handleHelper"
+        @click="state.isRunning ? stop() : handleHelper()"
       >
-        {{ state.isRunning ? "运行中" : "开始钓鱼" }}
-      </a-button>
+        {{
+          state.isRunning
+            ? state.stopRequested
+              ? "正在停止"
+              : "停止钓鱼"
+            : "开始钓鱼"
+        }}
+      </n-button>
     </template>
   </MyCard>
 </template>
@@ -44,11 +73,14 @@
 <script setup>
 import { useMessage } from "naive-ui";
 import { computed, ref } from "vue";
+import { useManualBatchRun } from "@/composables/useManualBatchRun";
 import { useTokenStore } from "@/stores/tokenStore";
+import { readItemCount, runFishBatch } from "@/utils/manualBatchHelpers";
 import MyCard from "../Common/MyCard.vue";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
+const { state, connected, run, stop } = useManualBatchRun(tokenStore, message);
 
 const iconPath = computed(() => {
   return `${import.meta.env.BASE_URL}fish/hjyg.png`;
@@ -63,15 +95,23 @@ const dataList = computed(() => {
     {
       type: "普通鱼竿",
       img: getImgPath("/fish/ptyg.png"),
-      count: roleInfo.value?.role?.items?.[1011]?.quantity || 0,
+      count: getCount(1011),
     },
     {
       type: "黄金鱼竿",
       img: getImgPath("/fish/hjyg.png"),
-      count: roleInfo.value?.role?.items?.[1012]?.quantity || 0,
+      count: getCount(1012),
     },
   ];
 });
+
+function getCount(itemId) {
+  try {
+    return readItemCount(roleInfo.value, itemId);
+  } catch {
+    return "—";
+  }
+}
 
 const type = ref(1);
 const typeOptions = [
@@ -89,43 +129,12 @@ const numberOptions = [
   { label: "160", value: 160 },
 ];
 
-const state = ref({
-  isRunning: false,
-});
-
-const handleHelper = async () => {
-  if (!tokenStore.selectedToken) {
-    message.warning("请先选择Token");
-    return;
-  }
-  const tokenId = tokenStore.selectedToken.id;
-  state.value.isRunning = true;
-  message.info("钓鱼助手运行中");
-  console.log("🚀 ~ handleHelper ~ type.value:", type.value);
-  if (number.value >= 10) {
-    const batches = Math.floor(number.value / 10);
-    const remainder = number.value % 10;
-    for (let i = 0; i < batches; i++) {
-      await tokenStore.sendMessageWithPromise(tokenId, "artifact_lottery", {
-        type: type.value,
-        lotteryNumber: 10,
-        newFree: true,
-      });
-    }
-    if (remainder > 0) {
-      await tokenStore.sendMessageWithPromise(tokenId, "artifact_lottery", {
-        type: type.value,
-        lotteryNumber: remainder,
-        newFree: true,
-      });
-    }
-    await tokenStore.sendMessage(tokenId, "role_getroleinfo");
-    // 更新活动进度
-    tokenStore.sendMessage(tokenId, "activity_get");
-    message.success("钓鱼完毕");
-    state.value.isRunning = false;
-  }
-};
+const handleHelper = () =>
+  run(runFishBatch, {
+    type: type.value,
+    requested: number.value,
+    refreshActivity: true,
+  });
 </script>
 
 <style scoped lang="scss">
@@ -173,5 +182,10 @@ const handleHelper = async () => {
     gap: 12px;
     margin-top: 12px;
   }
+}
+.run-result {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  margin: 12px 0 0;
 }
 </style>

@@ -364,3 +364,79 @@ test("explains that the free room may be unavailable outside its opening hours",
   await assert.rejects(run(game), /检查免费房间的开放时间/);
   assert.ok(!game.calls.some((c) => c.command === "pkroom_startbattle"));
 });
+
+test("refreshing confirmation reads a new server snapshot before creating the room", async () => {
+  const game = mockGame();
+  let shown = 0;
+  await run(game, {
+    confirmLoadout: async () => {
+      shown++;
+      return shown === 1 ? "refresh" : true;
+    },
+  });
+  assert.equal(shown, 2);
+  assert.deepEqual(
+    game.calls.slice(0, 4).map((call) => call.command),
+    [
+      "role_getroleinfo",
+      "role_getroleinfo",
+      "role_getroleinfo",
+      "pkroom_create",
+    ],
+  );
+});
+
+test("refuses to create a room if the team changes while confirmation is open", async () => {
+  const game = mockGame();
+  const send = game.tokenStore.sendMessageWithPromise;
+  let reads = 0;
+  game.tokenStore.sendMessageWithPromise = async (...args) => {
+    if (args[1] === "role_getroleinfo" && ++reads === 2) {
+      return { role: { ...role, lordWeaponId: 99 } };
+    }
+    return send(...args);
+  };
+  await assert.rejects(
+    run(game, { confirmLoadout: async () => true }),
+    /确认期间阵容、玩具或宠物已变化/,
+  );
+  assert.equal(
+    game.calls.some((call) => call.command === "pkroom_create"),
+    false,
+  );
+});
+
+test("after switching, confirmation displays the freshly fetched weapon and pet", async () => {
+  const game = mockGame();
+  const send = game.tokenStore.sendMessageWithPromise;
+  let reads = 0;
+  game.tokenStore.sendMessageWithPromise = async (...args) => {
+    if (args[1] === "role_getroleinfo" && ++reads === 2) {
+      return {
+        role: {
+          ...role,
+          lordWeaponId: 8,
+          pet: { petUId: "pet-2", petId: 502 },
+        },
+      };
+    }
+    return send(...args);
+  };
+  const previews = [];
+  await assert.rejects(
+    run(game, {
+      confirmLoadout: async (value) => {
+        previews.push(value);
+        return previews.length === 1 ? "refresh" : false;
+      },
+    }),
+    { name: "AbortError" },
+  );
+  assert.equal(previews[0].weaponId, 2);
+  assert.equal(previews[1].weaponId, 8);
+  assert.equal(previews[1].petId, 502);
+  assert.equal(
+    game.calls.some((call) => call.command === "pkroom_create"),
+    false,
+  );
+});

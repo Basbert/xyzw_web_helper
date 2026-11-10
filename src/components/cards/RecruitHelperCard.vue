@@ -36,7 +36,7 @@
       </div>
     </template>
     <template #action>
-      <a-button
+      <n-button
         type="primary"
         :disabled="state.isRunning"
         secondary
@@ -46,7 +46,7 @@
         @click="handleHelper"
       >
         {{ state.isRunning ? "运行中" : "开始招募" }}
-      </a-button>
+      </n-button>
     </template>
   </MyCard>
 </template>

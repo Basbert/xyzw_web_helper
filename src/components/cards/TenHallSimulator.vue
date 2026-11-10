@@ -10,6 +10,26 @@
 
     <div class="simulation-layout">
       <section class="setup" aria-label="模拟设置">
+        <h3>出战阵容</h3>
+        <div class="hall-options" role="group" aria-label="切换游戏预设阵容">
+          <n-button
+            v-for="id in [1, 2, 3, 4]"
+            :key="id"
+            :type="presetId === id ? 'primary' : 'default'"
+            :disabled="running || presetBusy || !connected"
+            @click="switchPreset(id)"
+            >阵容 {{ id }}</n-button
+          >
+        </div>
+        <p class="setup-note">
+          {{
+            presetBusy
+              ? "正在确认阵容…"
+              : presetId
+                ? `当前使用阵容 ${presetId}`
+                : "当前阵容编号未确认，请切换或刷新后检查"
+          }}。切换会同步修改游戏中的当前阵容。
+        </p>
         <h3>选择殿数</h3>
         <div class="hall-options" role="radiogroup" aria-label="选择殿数">
           <label v-for="option in halls" :key="option.value">
@@ -48,7 +68,7 @@
           type="primary"
           size="large"
           block
-          :disabled="running || !connected"
+          :disabled="running || presetBusy || !connected"
           :loading="running"
           @click="startSimulation"
         >
@@ -315,8 +335,24 @@
           {{ hallLabel(confirmation.hall) }} · {{ confirmation.count }} 次
         </p>
         <p class="confirm-note">
-          这是刚从游戏读取的当前主线阵容。确认后会按此阵容模拟；如需调整，请先取消并在游戏中换阵。
+          这是刚从游戏读取的当前主线阵容。可直接切换预设，切换会同步修改游戏中的当前阵容。
         </p>
+        <div class="hall-options" role="group" aria-label="确认并切换预设阵容">
+          <n-button
+            v-for="id in [1, 2, 3, 4]"
+            :key="id"
+            :type="presetId === id ? 'primary' : 'default'"
+            :disabled="presetBusy || !connected"
+            @click="switchPreset(id, true)"
+            >阵容 {{ id }}</n-button
+          >
+          <n-button
+            :disabled="presetBusy || !connected"
+            @click="refreshConfirmation"
+            >刷新预览</n-button
+          >
+        </div>
+        <p v-if="presetError" class="error" role="alert">{{ presetError }}</p>
         <ul class="confirm-heroes">
           <li v-for="hero in confirmation.heroes" :key="hero.slot">
             <span>{{ hero.slot + 1 }} 号位</span>
@@ -345,8 +381,13 @@
           >
         </div>
         <div class="confirm-actions">
-          <n-button @click="settleConfirmation?.(false)">取消</n-button>
-          <n-button type="primary" @click="settleConfirmation?.(true)"
+          <n-button :disabled="presetBusy" @click="settleConfirmation?.(false)"
+            >取消</n-button
+          >
+          <n-button
+            type="primary"
+            :disabled="presetBusy || !!presetError || !connected"
+            @click="settleConfirmation?.(true)"
             >确认并开始</n-button
           >
         </div>
@@ -360,6 +401,11 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { HERO_DICT, weapon } from "@/utils/HeroList";
 import { PET_DICT } from "@/utils/PetList";
+import {
+  presetSwitchFailure,
+  readTenHallPreset,
+  setTenHallPreset,
+} from "@/utils/tenHallFormation";
 import {
   readTenHallHistory,
   removeTenHallHistory,
@@ -399,6 +445,11 @@ const historyRoleId = ref(null);
 const historyError = ref("");
 const activeHistoryId = ref(null);
 const confirmation = ref(null);
+const presetId = ref(null);
+const presetBusy = ref(false);
+const presetError = ref("");
+let presetGeneration = 0;
+let presetSwitchOperation = 0;
 const summary = computed(() => summarizeTenHallResults(seriesResults.value));
 let settleConfirmation = null;
 let controller = null;
@@ -545,6 +596,76 @@ function deleteHistory(id) {
   }
 }
 
+async function refreshPreset() {
+  const tokenId = tokenStore.selectedToken?.id;
+  const generation = ++presetGeneration;
+  presetId.value = null;
+  if (!tokenId || !connected.value) return;
+  try {
+    const id = await readTenHallPreset({ tokenStore, tokenId });
+    if (generation === presetGeneration) presetId.value = id;
+  } catch {
+    // The simulation can still preview the actual main-line team.
+  }
+}
+
+function clearPresetError() {
+  if (presetError.value && errorText.value === presetError.value)
+    errorText.value = "";
+  presetError.value = "";
+}
+
+async function switchPreset(teamId, fromConfirmation = false) {
+  if (
+    presetBusy.value ||
+    !connected.value ||
+    (running.value && !fromConfirmation)
+  )
+    return;
+  const tokenId = tokenStore.selectedToken.id;
+  const generation = ++presetGeneration;
+  const operation = ++presetSwitchOperation;
+  presetBusy.value = true;
+  clearPresetError();
+  try {
+    await setTenHallPreset({
+      tokenStore,
+      tokenId,
+      teamId,
+      signal: controller?.signal,
+    });
+    if (
+      generation !== presetGeneration ||
+      tokenStore.selectedToken?.id !== tokenId
+    )
+      return;
+    presetId.value = teamId;
+    if (fromConfirmation) settleConfirmation?.("refresh");
+  } catch (error) {
+    if (
+      generation !== presetGeneration ||
+      tokenStore.selectedToken?.id !== tokenId
+    )
+      return;
+    presetId.value = null;
+    presetError.value = presetSwitchFailure(error);
+    if (!fromConfirmation) errorText.value = presetError.value;
+  } finally {
+    if (operation === presetSwitchOperation) presetBusy.value = false;
+  }
+}
+
+function invalidatePresetSwitch() {
+  presetSwitchOperation++;
+  presetBusy.value = false;
+}
+
+function refreshConfirmation() {
+  clearPresetError();
+  refreshPreset();
+  settleConfirmation?.("refresh");
+}
+
 function requestConfirmation(loadout, signal, selectedCount) {
   return new Promise((resolve) => {
     const onAbort = () => finish(false);
@@ -587,7 +708,7 @@ async function startSimulation() {
           chosenCount,
         );
         if (
-          confirmed &&
+          confirmed === true &&
           !signal.aborted &&
           tokenStore.selectedToken?.id === tokenId
         ) {
@@ -690,10 +811,28 @@ watch(
       progress.value = "";
       errorText.value = "";
     }
+    invalidatePresetSwitch();
+    clearPresetError();
     refreshHistory(roleId);
+    refreshPreset();
     showAllHistory.value = false;
   },
   { immediate: true, flush: "sync" },
+);
+watch(
+  connected,
+  (isConnected) => {
+    if (!isConnected) {
+      invalidatePresetSwitch();
+      clearPresetError();
+      presetGeneration++;
+      presetId.value = null;
+      controller?.abort();
+    } else {
+      refreshPreset();
+    }
+  },
+  { flush: "sync" },
 );
 const onHistoryStorage = (event) => {
   if (event.key === null || event.key?.startsWith(TEN_HALL_HISTORY_PREFIX)) {
@@ -703,6 +842,8 @@ const onHistoryStorage = (event) => {
 onMounted(() => window.addEventListener("storage", onHistoryStorage));
 onUnmounted(() => {
   window.removeEventListener("storage", onHistoryStorage);
+  presetGeneration++;
+  invalidatePresetSwitch();
   controller?.abort();
 });
 </script>

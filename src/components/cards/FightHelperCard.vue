@@ -16,21 +16,46 @@
       </div>
       <div class="container">
         <div class="selects">
-          <n-select v-model:value="number" :options="numberOptions" />
+          <n-select
+            v-model:value="number"
+            :options="numberOptions"
+            :disabled="state.isRunning"
+          />
         </div>
+        <p
+          v-if="state.visible && (state.isRunning || state.result)"
+          class="run-result"
+          aria-live="polite"
+        >
+          {{
+            state.isRunning
+              ? state.available === null
+                ? state.stopRequested
+                  ? "正在停止"
+                  : "正在核对门票数量"
+                : `已获回包的请求共涉及 ${state.completed}/${state.total} 次${state.stopRequested ? "，正在停止" : ""}`
+              : state.result
+          }}
+        </p>
       </div>
     </template>
     <template #action>
-      <a-button
+      <n-button
         type="primary"
-        :disabled="state.isRunning"
+        :disabled="state.isRunning ? state.stopRequested : !connected"
         secondary
         size="small"
         block
-        @click="handleFightHelper"
+        @click="state.isRunning ? stop() : handleFightHelper()"
       >
-        {{ state.isRunning ? "运行中" : "开始战斗" }}
-      </a-button>
+        {{
+          state.isRunning
+            ? state.stopRequested
+              ? "正在停止"
+              : "停止战斗"
+            : "开始战斗"
+        }}
+      </n-button>
     </template>
   </MyCard>
 </template>
@@ -38,29 +63,23 @@
 <script setup>
 import { useMessage } from "naive-ui";
 import { computed, ref } from "vue";
+import { useManualBatchRun } from "@/composables/useManualBatchRun";
 import { useTokenStore } from "@/stores/tokenStore";
+import { readItemCount, runArenaBatch } from "@/utils/manualBatchHelpers";
 import MyCard from "../Common/MyCard.vue";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
+const { state, connected, run, stop } = useManualBatchRun(tokenStore, message);
 
 const roleInfo = computed(() => tokenStore.gameData?.roleInfo || null);
-const itemcount = computed(
-  () => roleInfo.value?.role?.items?.[1007]?.quantity || 0,
-);
-
-const pickArenaTargetId = (targets) => {
-  const candidate =
-    targets?.rankList?.[0] ||
-    targets?.roleList?.[0] ||
-    targets?.targets?.[0] ||
-    targets?.targetList?.[0] ||
-    targets?.list?.[0];
-
-  if (candidate?.roleId) return candidate.roleId;
-  if (candidate?.id) return candidate.id;
-  return targets?.roleId || targets?.id;
-};
+const itemcount = computed(() => {
+  try {
+    return readItemCount(roleInfo.value, 1007);
+  } catch {
+    return "—";
+  }
+});
 
 const number = ref(10);
 const numberOptions = [
@@ -73,55 +92,7 @@ const numberOptions = [
   { label: "5000", value: 5000 },
   { label: "10000", value: 10000 },
 ];
-const state = ref({
-  isRunning: false,
-});
-
-const handleFightHelper = async () => {
-  if (!tokenStore.selectedToken) {
-    message.warning("请先选择Token");
-    return;
-  }
-  if (itemcount.value < number.value) {
-    message.warning("咸神门票不足以完成该战斗次数");
-    return;
-  }
-  const tokenId = tokenStore.selectedToken.id;
-  state.value.isRunning = true;
-  message.info("竞技场战斗中");
-  for (let i = 0; i < number.value; i++) {
-    // 开始竞技场
-    await tokenStore.sendMessageWithPromise(tokenId, "arena_startarea", {});
-    let targets;
-    try {
-      targets = await tokenStore.sendMessageWithPromise(
-        tokenId,
-        "arena_getareatarget",
-        {},
-      );
-    } catch (err) {
-      message.error(`获取竞技场目标失败：${err.message}`);
-      break;
-    }
-
-    const targetId = pickArenaTargetId(targets);
-    if (!targetId) {
-      message.warning("未找到可用的竞技场目标，已停止");
-      break;
-    }
-    try {
-      await tokenStore.sendMessageWithPromise(tokenId, "fight_startareaarena", {
-        targetId,
-      });
-    } catch (e) {
-      message.error(`竞技场对决失败：${e.message}`);
-    }
-  }
-
-  await tokenStore.sendMessage(tokenId, "role_getroleinfo");
-  message.success("竞技场战斗完毕");
-  state.value.isRunning = false;
-};
+const handleFightHelper = () => run(runArenaBatch, { requested: number.value });
 </script>
 
 <style scoped lang="scss">
@@ -182,5 +153,10 @@ const handleFightHelper = async () => {
       font-weight: var(--font-weight-semibold);
     }
   }
+}
+.run-result {
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  margin: 12px 0 0;
 }
 </style>

@@ -256,19 +256,22 @@ export async function runTenHallSimulation({
     );
   };
   try {
-    onProgress("正在读取当前阵容");
-    const response = await send("role_getroleinfo");
-    const role = response?.role;
-    roleId = role?.roleId;
-    if (!roleId) throw new Error("无法读取当前角色信息");
-    // Freeze the confirmed team before creating a room.
-    const team = makeTenHallTeam(role, "");
-    const petId = role.pet?.petId;
-    const signature = teamSignature(team, petId);
-    if (expectedLoadout && expectedLoadout !== signature) {
-      throw new Error("当前阵容、玩具或宠物已变化，请重新确认后再模拟");
-    }
-    if (confirmLoadout) {
+    let role, team, petId, signature;
+    // A preset switch in the confirmation dialog requires a new server snapshot.
+    while (true) {
+      onProgress("正在读取当前阵容");
+      const response = await send("role_getroleinfo");
+      assertConnection();
+      role = response?.role;
+      roleId = role?.roleId;
+      if (!roleId) throw new Error("无法读取当前角色信息");
+      team = makeTenHallTeam(role, "");
+      petId = role.pet?.petId;
+      signature = teamSignature(team, petId);
+      if (expectedLoadout && expectedLoadout !== signature) {
+        throw new Error("当前阵容、玩具或宠物已变化，请重新确认后再模拟");
+      }
+      if (!confirmLoadout) break;
       const confirmed = await confirmLoadout({
         roleId,
         roleName: role.name,
@@ -280,7 +283,19 @@ export async function runTenHallSimulation({
         petId,
         hasPet: !!team.petUId,
       });
-      if (!confirmed) throw abortError();
+      if (confirmed === "refresh") continue;
+      if (confirmed !== true) throw abortError();
+      // Detect external changes while the dialog was open, before creating a room.
+      const latest = (await send("role_getroleinfo"))?.role;
+      if (
+        !latest ||
+        String(latest.roleId) !== String(roleId) ||
+        teamSignature(makeTenHallTeam(latest, ""), latest.pet?.petId) !==
+          signature
+      ) {
+        throw new Error("确认期间阵容、玩具或宠物已变化，请重新确认后再模拟");
+      }
+      break;
     }
     assertConnection();
     const roomRequest = makeTenHallRoomRequest(role.name, hall);

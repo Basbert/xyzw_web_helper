@@ -40,14 +40,14 @@
             ></n-select>
           </div>
           <div class="button-group">
-            <a-button
+            <n-button
               type="primary"
               :disabled="state.isRunning"
               size="small"
               @click="levelHeroUpgrade"
-              >升级</a-button
+              >升级</n-button
             >
-            <a-button
+            <n-button
               type="primary"
               :disabled="
                 isSameGameValue(
@@ -57,7 +57,7 @@
               "
               size="small"
               @click="orderHeroUpgrade"
-              >进阶</a-button
+              >进阶</n-button
             >
           </div>
         </div>

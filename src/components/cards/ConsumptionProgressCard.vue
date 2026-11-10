@@ -21,12 +21,12 @@
         </div>
         <div class="current">
           可行方案:
-          <a-button
+          <n-button
             type="primary"
             size="small"
             style="margin-left: 8px"
             @click="showCombosModal = true"
-            >查看所有可行方案</a-button
+            >查看所有可行方案</n-button
           >
         </div>
         <div class="current" v-if="feasibleCombos.length === 0">
@@ -42,12 +42,12 @@
         :step="1"
         size="small"
       />
-      <a-button
+      <n-button
         type="primary"
         size="small"
         :disabled="state.isRunning"
         @click="OpenActivityItem"
-        >打开普通道具</a-button
+        >打开普通道具</n-button
       >
     </div>
 
@@ -85,15 +85,12 @@
       </div>
     </div>
     <!--显示可行方案-->
-    <a-modal
-      v-model:visible="showCombosModal"
-      width="900px"
-      height="600px"
-      :footer="false"
+    <n-modal
+      v-model:show="showCombosModal"
+      preset="card"
+      title="所有可行组合（按总普通道具升序）"
+      style="width: min(900px, calc(100vw - 32px))"
     >
-      <template #title>
-        <h3>所有可行组合（按总普通道具升序）</h3>
-      </template>
       <div class="cp-modal-scroll">
         <div v-if="feasibleCombos.length === 0">暂无可行组合或已满足目标</div>
         <div v-else>
@@ -122,7 +119,7 @@
           <n-button @click="showCombosModal = false">关闭</n-button>
         </n-space>
       </template>
-    </a-modal>
+    </n-modal>
   </div>
 </template>
 

@@ -180,6 +180,15 @@
       </div>
     </div>
 
+    <div
+      v-if="climbProgress"
+      class="climb-progress"
+      role="status"
+      aria-live="polite"
+    >
+      {{ climbProgress }}
+    </div>
+
     <div class="card-actions">
       <button
         class="climb-button"
@@ -210,9 +219,10 @@
 <script setup>
 import { useMessage } from "naive-ui";
 // 停止批量爬塔操作
-import { computed, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { HERO_DICT } from "@/utils/HeroList";
+import { runTowerClimb } from "@/utils/towerClimbRunner";
 import {
   checkTowerConfigVersion,
   getTowerEnemyLineup,
@@ -243,7 +253,28 @@ const showBuyEnergyDialog = ref(false); // 购买弹窗显示
 const buyDialogSession = ref(null); // 打开弹窗时的账号和连接
 const buyEnergyNum = ref(1); // 购买数量（1-100）
 const climbTimeout = ref(null); // 用于超时重置状态
-// 最后一次爬塔结果
+const climbProgress = ref("");
+let sessionGeneration = 0;
+let disposed = false;
+watch(
+  [
+    () => tokenStore.selectedToken?.id,
+    () => tokenStore.getWebSocketStatus(tokenStore.selectedToken?.id),
+    () => tokenStore.wsConnections?.[tokenStore.selectedToken?.id]?.client,
+  ],
+  () => {
+    sessionGeneration++;
+    stopFlag = true;
+    climbProgress.value = "";
+  },
+  { flush: "sync" },
+);
+onUnmounted(() => {
+  disposed = true;
+  sessionGeneration++;
+  stopFlag = true;
+  if (climbTimeout.value) clearTimeout(climbTimeout.value);
+});
 
 // 计算属性 - 从gameData中获取塔相关信息
 const roleInfo = computed(() => {
@@ -418,82 +449,81 @@ const startTowerClimb = async () => {
     return;
   }
 
-  // 清除之前的超时
-  if (climbTimeout.value) {
-    clearTimeout(climbTimeout.value);
-    climbTimeout.value = null;
-  }
-
+  if (climbTimeout.value) clearTimeout(climbTimeout.value);
   isClimbing.value = true;
   stopFlag = false;
-  let climbCount = 0;
-  const maxClimb = 100; // 最多批量次数，防止死循环
-  // 设置超时保护，60秒后自动重置状态
-  climbTimeout.value = setTimeout(() => {
-    climbTimeout.value = null;
-    stopFlag = true;
-    message.info("批量爬塔已超时自动停止");
-  }, 60000);
-
+  let timedOut = false;
+  let attempts = 0;
   const tokenId = tokenStore.selectedToken.id;
   const client = tokenStore.wsConnections?.[tokenId]?.client;
-  try {
-    const checkSession = () => {
-      if (
-        !client ||
-        tokenStore.selectedToken?.id !== tokenId ||
-        tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
-        tokenStore.wsConnections?.[tokenId]?.client !== client
-      )
-        throw new Error("账号或连接已变化，请重新检查爬塔状态");
-    };
-    for (let i = 0; i < maxClimb; i++) {
-      if (stopFlag) break;
-      checkSession();
-      const response = await tokenStore.sendMessageWithPromise(
-        tokenId,
-        "role_getroleinfo",
-        {},
-        10000,
-      );
-      checkSession();
-      if (stopFlag) break;
-      const energy = response?.role?.tower?.energy;
-      if (!Number.isFinite(energy)) throw new Error("服务器未返回当前爬塔体力");
-      if (energy <= 0) break;
-      await tokenStore.sendMessageWithPromise(
-        tokenId,
-        "fight_starttower",
-        {},
-        10000,
-      );
-      climbCount++;
-      message.success(`第${climbCount}次爬塔命令已发送`);
-      await new Promise((res) => setTimeout(res, 2000)); // 每次间隔2秒
-    }
-    if (stopFlag) message.info(`爬塔已停止，本次爬塔 ${climbCount} 次`);
-    else message.success(`已自动爬塔${climbCount}次，体力已耗尽或达到上限。`);
-  } catch (error) {
-    message.error(`批量爬塔失败: ${error.message || "未知错误"}`);
-  }
-
-  // A stopped batch may have completed its last fight after the preceding read.
-  if (
-    climbCount > 0 &&
-    client &&
+  const generation = sessionGeneration;
+  const isCurrent = () =>
+    !disposed &&
+    generation === sessionGeneration &&
     tokenStore.selectedToken?.id === tokenId &&
     tokenStore.getWebSocketStatus(tokenId) === "connected" &&
-    tokenStore.wsConnections?.[tokenId]?.client === client
-  ) {
-    tokenStore.sendMessage(tokenId, "role_getroleinfo");
-  }
-
-  // 清除超时并重置状态
-  if (climbTimeout.value) {
-    clearTimeout(climbTimeout.value);
+    tokenStore.wsConnections?.[tokenId]?.client === client;
+  const checkSession = () => {
+    if (!client || !isCurrent())
+      throw new Error("账号或连接已变化，请重新检查爬塔状态");
+  };
+  climbProgress.value = "正在爬塔，已收到 0 次挑战响应";
+  climbTimeout.value = setTimeout(() => {
     climbTimeout.value = null;
+    timedOut = true;
+    stopFlag = true;
+  }, 60000);
+
+  try {
+    const result = await runTowerClimb({
+      checkSession,
+      shouldStop: () => stopFlag,
+      onProgress: (count) => {
+        attempts = count;
+        if (isCurrent())
+          climbProgress.value = `正在爬塔，已收到 ${count} 次挑战响应`;
+      },
+      delay: () => new Promise((resolve) => setTimeout(resolve, 2000)),
+      send: async (command) => {
+        try {
+          return await tokenStore.sendMessageWithPromise(
+            tokenId,
+            command,
+            {},
+            10000,
+          );
+        } catch (error) {
+          if (command === "fight_starttower") {
+            throw new Error("本次战斗结果未确认，请核对体力和层数后再试");
+          }
+          throw error;
+        }
+      },
+    });
+    if (!isCurrent()) return;
+    const reason = timedOut
+      ? "达到运行时间限制"
+      : {
+          stopped: "已停止",
+          energy: "小鱼干不足",
+          limit: "达到本次挑战上限",
+          defeat: "挑战失败，已停止以免继续消耗",
+          uncertain: "本次战斗结果未确认，请核对后再试",
+        }[result.reason];
+    climbProgress.value = `${reason}，本次收到 ${result.attempts} 次挑战响应。`;
+  } catch (error) {
+    if (isCurrent()) {
+      climbProgress.value = `爬塔未完成（已收到 ${attempts} 次挑战响应）：${error.message || "未知错误"}`;
+    }
+  } finally {
+    if (attempts > 0 && isCurrent())
+      tokenStore.sendMessage(tokenId, "role_getroleinfo");
+    if (climbTimeout.value) {
+      clearTimeout(climbTimeout.value);
+      climbTimeout.value = null;
+    }
+    isClimbing.value = false;
   }
-  isClimbing.value = false;
 };
 
 // 重置爬塔状态的方法
@@ -595,6 +625,12 @@ onMounted(() => {
 </script>
 
 <style scoped lang="scss">
+.climb-progress {
+  margin: var(--spacing-sm) 0;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
 .stop-button {
   width: 100%;
   padding: var(--spacing-sm) var(--spacing-md);

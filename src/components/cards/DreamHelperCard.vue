@@ -40,26 +40,25 @@
                 >
                   {{ hero.name }}
                 </div>
-                <a-button
-                  type="primary"
+                <n-button
+                  :type="continuousBattles[hero.id] ? 'error' : 'primary'"
                   size="small"
-                  :class="{ 'stop-btn': continuousBattles[hero.id] }"
                   @click="toggleContinuousBattle(hero.id)"
                 >
                   {{ continuousBattles[hero.id] ? "停止" : "连续战斗" }}
-                </a-button>
+                </n-button>
               </div>
             </div>
           </div>
           <div class="team-actions">
-            <a-button type="primary" size="small" @click="getDefaultTeam"
-              >获取队伍</a-button
+            <n-button type="primary" size="small" @click="getDefaultTeam"
+              >获取队伍</n-button
             >
-            <a-button type="primary" size="small" @click="selectDreamTeam"
-              >选择阵容</a-button
+            <n-button type="primary" size="small" @click="selectDreamTeam"
+              >选择阵容</n-button
             >
-            <a-button type="primary" size="small" @click="stopAllBattles"
-              >停止所有</a-button
+            <n-button type="primary" size="small" @click="stopAllBattles"
+              >停止所有</n-button
             >
           </div>
         </div>
@@ -69,26 +68,26 @@
           <div class="merchant-info">
             <div class="merchant-title">商品列表</div>
             <div class="merchant-actions">
-              <a-button
+              <n-button
                 type="primary"
                 size="small"
                 :disabled="isRunning"
                 @click="refreshMerchantList"
-                >获取商品</a-button
+                >获取商品</n-button
               >
-              <a-button
+              <n-button
                 type="primary"
                 size="small"
                 :disabled="isRunning"
                 @click="buyAllGoldItems"
-                >一键购买金币商品</a-button
+                >一键购买金币商品</n-button
               >
-              <a-button
+              <n-button
                 type="primary"
                 size="small"
                 :disabled="isRunning"
                 @click="buyAllGoldFishItems"
-                >一键购买高级商人鱼竿</a-button
+                >一键购买高级商人鱼竿</n-button
               >
             </div>
           </div>
@@ -124,7 +123,7 @@
       </div>
     </template>
     <template #action>
-      <a-button
+      <n-button
         type="primary"
         :disabled="isRunning"
         secondary
@@ -133,7 +132,7 @@
         @click="startDreamHelper"
       >
         {{ isRunning ? "运行中" : "启动梦境助手" }}
-      </a-button>
+      </n-button>
     </template>
   </MyCard>
 </template>
@@ -839,10 +838,5 @@ const startDreamHelper = async () => {
       font-size: var(--font-size-xs);
     }
   }
-}
-
-.stop-btn {
-  background-color: var(--color-danger) !important;
-  border-color: var(--color-danger) !important;
 }
 </style>

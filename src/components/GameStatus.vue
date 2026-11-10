@@ -170,8 +170,6 @@
 
     <!-- 消耗活动进度（提取组件） -->
     <ConsumptionProgressCard v-if="activeSection === 'tools'" />
-    <!-- 咸王宝库（提取组件） -->
-    <BossTower v-if="activeSection === 'tools'" />
     <!-- 俱乐部排位（暂时隐藏） -->
     <div
       class="status-card legion-match"
@@ -252,6 +250,9 @@
       v-if="activeSection === 'activity'"
       :active="activeSection === 'activity'"
     />
+
+    <!-- 咸王宝库 -->
+    <BossTower v-if="activeSection === 'activity'" />
 
     <!-- 月度任务进度（提取组件） -->
     <MonthlyTasksCard v-show="activeSection === 'activity'" />

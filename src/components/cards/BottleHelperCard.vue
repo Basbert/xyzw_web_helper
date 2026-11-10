@@ -21,7 +21,7 @@
       </div>
     </template>
     <template #action>
-      <a-button
+      <n-button
         type="primary"
         secondary
         size="small"
@@ -30,7 +30,7 @@
         @click="handleBottleHelper"
       >
         {{ state.isRunning ? "重启服务" : "启动服务" }}
-      </a-button>
+      </n-button>
     </template>
   </MyCard>
 </template>

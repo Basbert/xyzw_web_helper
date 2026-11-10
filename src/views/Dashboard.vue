@@ -31,6 +31,15 @@
           <span class="connection-pill" :class="{ connected: isConnected }">{{
             connectionLabel
           }}</span>
+          <n-button
+            v-if="tokenStore.selectedToken && !isConnected"
+            size="small"
+            :loading="isConnecting"
+            :disabled="isConnecting"
+            @click="connectSelectedAccount"
+          >
+            {{ isConnecting ? "连接中" : "连接" }}
+          </n-button>
         </div>
 
         <DailyActivityReminders @navigate="openReminder" />
@@ -122,7 +131,7 @@
 <script setup>
 import lz4 from "lz4js";
 import { useMessage } from "naive-ui";
-import { computed, onMounted } from "vue";
+import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import DailyActivityReminders from "@/components/DailyActivityReminders.vue";
 import { useApexGuessStatus } from "@/hooks/useApexGuessStatus";
@@ -250,6 +259,39 @@ const isConnected = computed(() => {
     Boolean(tokenId) && tokenStore.getWebSocketStatus(tokenId) === "connected"
   );
 });
+
+const connectingAccount = ref(null);
+const isConnecting = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  return (
+    Boolean(connectingAccount.value) ||
+    (Boolean(tokenId) &&
+      tokenStore.getWebSocketStatus(tokenId) === "connecting")
+  );
+});
+
+const connectSelectedAccount = async () => {
+  const token = tokenStore.selectedToken;
+  if (!token || isConnected.value || isConnecting.value) return;
+
+  connectingAccount.value = token.id;
+  try {
+    const client = await tokenStore.createWebSocketConnection(
+      token.id,
+      token.token,
+      token.wsUrl,
+    );
+    if (tokenStore.selectedToken?.id !== token.id) return;
+    if (!client && tokenStore.getWebSocketStatus(token.id) !== "connected") {
+      message.warning("暂时无法建立连接，请检查账号状态或稍后重试");
+    }
+  } catch {
+    if (tokenStore.selectedToken?.id === token.id)
+      message.error("连接未能建立，请稍后重试");
+  } finally {
+    connectingAccount.value = null;
+  }
+};
 
 const apexGuessTip = computed(() => {
   if (!isConnected.value) return "未连接";

@@ -34,29 +34,29 @@
     </template>
     <template #action>
       <div class="action-row">
-        <a-button
+        <n-button
           type="primary"
           size="small"
           :disabled="state.isRunning"
           @click="startHeroUpgrade"
-          >升星</a-button
+          >升星</n-button
         >
-        <a-button
+        <n-button
           type="primary"
           size="small"
           :disabled="state.isRunning"
           @click="startBookUpgrade"
-          >图鉴</a-button
+          >图鉴</n-button
         >
-        <a-button
+        <n-button
           type="primary"
           size="small"
           :disabled="state.isRunning"
           @click="startClaimRewards"
-          >领奖</a-button
+          >领奖</n-button
         >
-        <a-button size="small" :disabled="!state.isRunning" @click="stopRunning"
-          >停止</a-button
+        <n-button size="small" :disabled="!state.isRunning" @click="stopRunning"
+          >停止</n-button
         >
       </div>
     </template>

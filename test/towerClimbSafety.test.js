@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
+import { runTowerClimb } from "../src/utils/towerClimbRunner.js";
 
 const component = await readFile(
   new URL("../src/components/Tower/TowerStatus.vue", import.meta.url),
@@ -33,6 +34,7 @@ function fixture({
   fight = async () => {},
 } = {}) {
   const calls = [];
+  let stage = 1;
   const tokenStore = {
     selectedToken: { id: "A" },
     wsConnections: { A: { client: {} } },
@@ -41,9 +43,13 @@ function fixture({
       calls.push([id, cmd]);
       if (cmd === "role_getroleinfo") {
         await read();
-        return { role: { tower: { energy: energy.shift() } } };
+        return { role: { tower: { energy: energy.shift(), id: stage } } };
       }
-      if (cmd === "fight_starttower") await fight();
+      if (cmd === "fight_starttower") {
+        await fight();
+        stage++;
+        return { battleData: { result: { sponsor: { ext: { curHP: 1 } } } } };
+      }
       return {};
     },
     sendMessage(id, cmd) {
@@ -53,6 +59,10 @@ function fixture({
   const context = {
     tokenStore,
     stopFlag: false,
+    sessionGeneration: 0,
+    disposed: false,
+    climbProgress: { value: "" },
+    runTowerClimb,
     isClimbing: { value: false },
     climbTimeout: { value: null },
     canClimb: { value: true },
