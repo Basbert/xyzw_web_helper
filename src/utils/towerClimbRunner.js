@@ -5,11 +5,11 @@ export async function runTowerClimb({
   shouldStop,
   onProgress,
   delay,
-  maxClimb = 100,
 }) {
   let attempts = 0;
   let previousStage = null;
-  for (let i = 0; i < maxClimb; i++) {
+  let previousDefeat = false;
+  while (true) {
     if (shouldStop()) return { attempts, reason: "stopped" };
     checkSession();
     const role = await send("role_getroleinfo");
@@ -27,12 +27,17 @@ export async function runTowerClimb({
       Number(rawStage) >= 0
         ? Number(rawStage)
         : null;
-    // A surviving sponsor is not proof of victory: only a server-confirmed
-    // increase in completed stages allows the next fight to start.
-    if (previousStage !== null && (stage === null || stage <= previousStage)) {
+    if (energy <= 0) return { attempts, reason: "energy" };
+    // A confirmed loss can be retried on the same floor. A missing result
+    // requires evidence of progress before starting another fight.
+    if (
+      previousStage !== null &&
+      (stage === null ||
+        stage < previousStage ||
+        (!previousDefeat && stage === previousStage))
+    ) {
       return { attempts, reason: "uncertain" };
     }
-    if (energy <= 0) return { attempts, reason: "energy" };
     if (stage === null) throw new Error("服务器未返回当前咸将塔层数");
     const battle = await send("fight_starttower");
     attempts++;
@@ -40,14 +45,11 @@ export async function runTowerClimb({
     onProgress(attempts);
     const result = battle?.battleData?.result;
     const hp = result?.sponsor?.ext?.curHP;
-    // The game's other battle parsers interpret false as sponsor defeat. Do
-    // not infer victory from remaining health or an absent result field.
-    if (result?.isWin === false || (Number.isFinite(hp) && hp <= 0)) {
-      return { attempts, reason: "defeat" };
-    }
+    // Explicit losses may be retried, but success is never inferred from HP.
+    previousDefeat =
+      result?.isWin === false || (Number.isFinite(hp) && hp <= 0);
     if (shouldStop()) return { attempts, reason: "stopped" };
     previousStage = stage;
     await delay();
   }
-  return { attempts, reason: "limit" };
 }

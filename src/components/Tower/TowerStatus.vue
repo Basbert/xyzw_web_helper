@@ -236,10 +236,6 @@ let stopFlag = false;
 
 const stopClimbing = () => {
   stopFlag = true;
-  if (climbTimeout.value) {
-    clearTimeout(climbTimeout.value);
-    climbTimeout.value = null;
-  }
   message.info("正在停止爬塔");
 };
 
@@ -252,7 +248,6 @@ const isBuying = ref(false); // 购买小鱼干状态
 const showBuyEnergyDialog = ref(false); // 购买弹窗显示
 const buyDialogSession = ref(null); // 打开弹窗时的账号和连接
 const buyEnergyNum = ref(1); // 购买数量（1-100）
-const climbTimeout = ref(null); // 用于超时重置状态
 const climbProgress = ref("");
 let sessionGeneration = 0;
 let disposed = false;
@@ -273,7 +268,6 @@ onUnmounted(() => {
   disposed = true;
   sessionGeneration++;
   stopFlag = true;
-  if (climbTimeout.value) clearTimeout(climbTimeout.value);
 });
 
 // 计算属性 - 从gameData中获取塔相关信息
@@ -449,10 +443,8 @@ const startTowerClimb = async () => {
     return;
   }
 
-  if (climbTimeout.value) clearTimeout(climbTimeout.value);
   isClimbing.value = true;
   stopFlag = false;
-  let timedOut = false;
   let attempts = 0;
   const tokenId = tokenStore.selectedToken.id;
   const client = tokenStore.wsConnections?.[tokenId]?.client;
@@ -468,12 +460,6 @@ const startTowerClimb = async () => {
       throw new Error("账号或连接已变化，请重新检查爬塔状态");
   };
   climbProgress.value = "正在爬塔，已收到 0 次挑战响应";
-  climbTimeout.value = setTimeout(() => {
-    climbTimeout.value = null;
-    timedOut = true;
-    stopFlag = true;
-  }, 60000);
-
   try {
     const result = await runTowerClimb({
       checkSession,
@@ -501,15 +487,11 @@ const startTowerClimb = async () => {
       },
     });
     if (!isCurrent()) return;
-    const reason = timedOut
-      ? "达到运行时间限制"
-      : {
-          stopped: "已停止",
-          energy: "小鱼干不足",
-          limit: "达到本次挑战上限",
-          defeat: "挑战失败，已停止以免继续消耗",
-          uncertain: "本次战斗结果未确认，请核对后再试",
-        }[result.reason];
+    const reason = {
+      stopped: "已停止",
+      energy: "小鱼干不足",
+      uncertain: "本次战斗结果未确认，请核对后再试",
+    }[result.reason];
     climbProgress.value = `${reason}，本次收到 ${result.attempts} 次挑战响应。`;
   } catch (error) {
     if (isCurrent()) {
@@ -518,20 +500,12 @@ const startTowerClimb = async () => {
   } finally {
     if (attempts > 0 && isCurrent())
       tokenStore.sendMessage(tokenId, "role_getroleinfo");
-    if (climbTimeout.value) {
-      clearTimeout(climbTimeout.value);
-      climbTimeout.value = null;
-    }
     isClimbing.value = false;
   }
 };
 
 // 重置爬塔状态的方法
 const resetClimbingState = () => {
-  if (climbTimeout.value) {
-    clearTimeout(climbTimeout.value);
-    climbTimeout.value = null;
-  }
   isClimbing.value = false;
   message.info("爬塔状态已重置");
 };

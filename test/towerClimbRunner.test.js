@@ -56,11 +56,45 @@ test("逐次核对体力并报告完成次数", async () => {
   assert.equal(f.calls.filter((item) => item === "fight_starttower").length, 2);
 });
 
-test("挑战失败或结果无法确认时停止，避免继续消耗", async () => {
+test("挑战失败自动重试，直至小鱼干不足", async () => {
+  for (const options of [{ hp: 0 }, { hp: 10, isWin: false }]) {
+    const f = fixture(options);
+    assert.deepEqual(await runTowerClimb(f.args), {
+      attempts: 2,
+      reason: "energy",
+    });
+    assert.equal(
+      f.calls.filter((item) => item === "fight_starttower").length,
+      2,
+    );
+  }
+});
+
+test("连续失败后成功时继续爬下一层，无 100 次上限", async () => {
+  let remaining = 103;
+  let stage = 1;
+  const stages = [];
+  const f = fixture();
+  f.args.send = async (command) => {
+    if (command === "role_getroleinfo")
+      return { role: { tower: { energy: remaining, id: stage } } };
+    stages.push(stage);
+    remaining--;
+    if (stages.length > 101) stage++;
+    return { battleData: { result: { isWin: stages.length > 101 } } };
+  };
+  assert.deepEqual(await runTowerClimb(f.args), {
+    attempts: 103,
+    reason: "energy",
+  });
+  assert.equal(stages[100], 1);
+  assert.equal(stages[101], 1);
+  assert.equal(stages[102], 2);
+});
+
+test("结果无法确认或声称成功但层数未推进时停止", async () => {
   for (const [options, reason] of [
-    [{ hp: 0 }, "defeat"],
     [{ uncertain: true }, "uncertain"],
-    [{ hp: 10, isWin: false }, "defeat"],
     [{ hp: 10, isWin: true, advance: false }, "uncertain"],
   ]) {
     const f = fixture(options);
@@ -93,6 +127,20 @@ test("停止、连接变化或战斗超时不会发起下一次挑战", async ()
     failed.calls.filter((item) => item === "fight_starttower").length,
     1,
   );
+});
+
+test("失败后等待期间手动停止，不再发起下一次挑战", async () => {
+  const f = fixture({ hp: 0 });
+  let stop = false;
+  f.args.shouldStop = () => stop;
+  f.args.delay = async () => {
+    stop = true;
+  };
+  assert.deepEqual(await runTowerClimb(f.args), {
+    attempts: 1,
+    reason: "stopped",
+  });
+  assert.equal(f.calls.filter((item) => item === "fight_starttower").length, 1);
 });
 
 test("缺失层数时不发起战斗，只有服务端确认层数推进才继续", async () => {
