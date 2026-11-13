@@ -20,7 +20,14 @@
 
         <div class="account-strip">
           <img src="/icons/173746572831736.png" alt="" />
-          <div class="account-name">
+          <div
+            class="account-name"
+            :title="
+              [tokenStore.selectedToken?.name, tokenStore.selectedToken?.server]
+                .filter(Boolean)
+                .join(' · ')
+            "
+          >
             <strong>{{
               tokenStore.selectedToken?.name || "尚未选择账号"
             }}</strong>
@@ -28,9 +35,10 @@
               tokenStore.selectedToken?.server || "在账号管理中选择角色"
             }}</span>
           </div>
-          <span class="connection-pill" :class="{ connected: isConnected }">{{
-            connectionLabel
-          }}</span>
+          <span class="connection-pill" :class="{ connected: isConnected }">
+            <span class="connection-dot" aria-hidden="true"></span
+            >{{ connectionLabel }}
+          </span>
           <n-button
             v-if="tokenStore.selectedToken && !isConnected"
             size="small"
@@ -48,7 +56,7 @@
           <div class="today-heading">
             <div>
               <h2>日常操作</h2>
-              <p>在日常页分别处理每日任务与日常补给</p>
+              <p>为当前账号执行，也可以进入日常页查看详情</p>
             </div>
           </div>
           <div class="today-items">
@@ -62,7 +70,7 @@
                 <strong>每日任务</strong>
                 <span>按当前角色的设置执行</span>
               </span>
-              <span class="today-item-status">
+              <span v-if="isConnected" class="today-item-status">
                 <span>当前进度</span><strong>{{ dailyProgress }}</strong>
               </span>
             </button>
@@ -92,10 +100,63 @@
               </span>
             </button>
           </div>
-          <n-button
-            type="primary"
-            size="large"
-            @click="router.push('/admin/game-features')"
+          <div class="quick-actions">
+            <n-button
+              type="primary"
+              size="large"
+              :disabled="!isConnected || dailyActions.state.running"
+              :loading="
+                dailyActions.state.running &&
+                dailyActions.state.kind === 'daily'
+              "
+              @click="dailyActions.run('daily')"
+              >执行每日任务</n-button
+            >
+            <n-button
+              type="primary"
+              size="large"
+              secondary
+              :disabled="!isConnected || dailyActions.state.running"
+              :loading="
+                dailyActions.state.running &&
+                dailyActions.state.kind === 'maintenance'
+              "
+              @click="dailyActions.run('maintenance')"
+              >一键处理盐罐、挂机与残卷</n-button
+            >
+            <n-button
+              v-if="dailyActions.state.running"
+              size="large"
+              @click="dailyActions.stop()"
+              >停止后续操作</n-button
+            >
+          </div>
+          <p class="quick-note">
+            每日任务按当前角色设置执行；付费招募、黑市及梦境购买开启时可能消耗资源。
+            离开页面会停止后续操作。
+            <button type="button" @click="openDailyTarget('tasks')">
+              查看任务设置
+            </button>
+          </p>
+          <p
+            v-if="dailyActions.state.running"
+            class="quick-result"
+            role="status"
+            aria-live="polite"
+          >
+            正在为 {{ dailyActions.state.name }} 执行：{{
+              dailyActions.state.progress
+            }}
+          </p>
+          <p
+            v-else-if="dashboardDailyResult"
+            class="quick-result"
+            role="status"
+            aria-live="polite"
+          >
+            {{ dashboardDailyResult.text }}
+          </p>
+          <n-button size="small" @click="router.push('/admin/game-features')"
             >进入日常页</n-button
           >
         </section>
@@ -134,11 +195,20 @@ import { useMessage } from "naive-ui";
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
 import DailyActivityReminders from "@/components/DailyActivityReminders.vue";
+import { useDashboardDailyActions } from "@/composables/useDashboardDailyActions";
 import { useApexGuessStatus } from "@/hooks/useApexGuessStatus";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import { formatShanghaiDate, useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
 import { compactApexGuessStatus } from "@/utils/apexGuessHelper.js";
+import { runBottleAndHangUp } from "@/utils/bottleAndHangUp";
+import { runDailyDreamPurchase } from "@/utils/dailyDreamPurchase";
+import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
+import {
+  DAILY_TASK_DEFAULTS,
+  readDailyTaskSettingsForExecution,
+} from "@/utils/dailyTaskSettings";
+import { markDreamShopChecked } from "@/utils/dreamShopCheckState";
 
 const router = useRouter();
 const openDailyTarget = (daily) => {
@@ -151,6 +221,47 @@ const message = useMessage();
 const tokenStore = useTokenStore();
 const { getArrayBuffer } = useIndexedDB();
 const { state: apexGuessState } = useApexGuessStatus(tokenStore);
+const dailyActions = useDashboardDailyActions(tokenStore, {
+  readSettings: (token) => ({
+    ...DAILY_TASK_DEFAULTS,
+    ...readDailyTaskSettingsForExecution(token, tokenStore.gameTokens || []),
+  }),
+  executeMaintenance: ({ tokenId, shouldStop, onProgress }) =>
+    runBottleAndHangUp({ tokenStore, tokenId, shouldStop, onProgress }),
+  executeDaily: ({ tokenId, settings, shouldStop, onProgress }) => {
+    const runner = new DailyTaskRunner(
+      tokenStore,
+      { commandDelay: settings.commandDelay, taskDelay: settings.taskDelay },
+      {
+        onDreamShopChecked: markDreamShopChecked,
+        runDreamShopPurchases: ({ tokenId: id, checkActive, sleep, log }) =>
+          runDailyDreamPurchase({
+            accountId: id,
+            isOpen: true,
+            send: (command, params) =>
+              tokenStore.sendMessageWithPromise(id, command, params, 15000),
+            checkActive,
+            pause: sleep,
+            onProgress: ({ confirmed, total }) =>
+              log(`梦境商品：已确认购买 ${confirmed}/${total} 件`),
+          }),
+      },
+    );
+    return runner.run(
+      tokenId,
+      {
+        shouldStop,
+        onLog: (item) => onProgress(item.message),
+        onProgress: (progress) =>
+          onProgress(`服务器每日任务完成并领奖：${progress}%`),
+      },
+      settings,
+    );
+  },
+});
+const dashboardDailyResult = computed(
+  () => dailyActions.results[tokenStore.selectedToken?.id] || null,
+);
 
 // ============ BIN 格式转换 ============
 
@@ -467,6 +578,9 @@ onMounted(async () => {
 }
 
 .connection-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   padding: 5px 10px;
   border-radius: 6px;
   background: var(--bg-secondary);
@@ -478,6 +592,14 @@ onMounted(async () => {
     background: rgba(24, 160, 88, 0.1);
     color: var(--success-color);
   }
+}
+
+.connection-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
 }
 
 .today-panel {
@@ -508,6 +630,38 @@ onMounted(async () => {
     color: var(--text-secondary);
     font-size: 13px;
   }
+}
+
+.quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  width: 100%;
+}
+
+.quick-note,
+.quick-result {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.quick-note button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary-color);
+  cursor: pointer;
+  font: inherit;
+}
+
+.quick-result {
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  overflow-wrap: anywhere;
 }
 
 .today-items {

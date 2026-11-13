@@ -120,8 +120,8 @@ src/
 ### 环境要求
 
 ```bash
-Node.js >= 18.0.0
-pnpm >= 9.0.0 (推荐)
+Node.js 24（见 .nvmrc）
+pnpm 10.19.0（见 package.json 的 packageManager）
 ```
 
 ### 安装与运行
@@ -132,7 +132,7 @@ git clone https://github.com/your-repo/xyzw-web-helper.git
 cd xyzw-web-helper
 
 # 安装依赖
-pnpm install
+pnpm install --frozen-lockfile
 
 # 启动开发服务器
 pnpm run dev
@@ -150,9 +150,27 @@ pnpm run preview
 pnpm run dev      # 启动开发服务器 (端口3000)
 pnpm run build    # 构建生产版本
 pnpm run preview  # 预览生产构建
-pnpm run lint     # 代码检查和修复
+pnpm run test     # 自动化测试
+pnpm run lint     # 代码检查，不自动修改文件
 pnpm run format   # 代码格式化
 ```
+
+### 连续操作的行为约定
+
+- **明确失败**：只有用户希望继续、且该玩法允许再次尝试时才继续；例如咸将塔战败后重试当前层。重试前核对当前账号、连接和所需次数，不把所有失败统一处理为可重试。
+- **结果未知**：消耗请求超时、断线或回包无法确认时，停止后续消耗并提示核对。允许只读查询确认状态，但不能把查询失败当作未执行，也不能自动重发未知结果的消费请求。
+- **正常结束**：按该玩法的实际规则判断，例如指定次数完成、资源不足或用户停止。记录已确认的结果，不把未执行或未确认的操作标为成功。
+- **停止与隔离**：手动停止、账号切换、连接变化或离开承载任务的页面后，不再发送下一次操作；正在途中的请求仍需等待响应或超时。各玩法的测试应覆盖明确失败、未知结果、正常结束以及上述停止条件。
+
+### 发布前检查
+
+本项目的 GitHub Actions CI 使用 `.nvmrc` 中的 Node 版本和锁文件，依次安装依赖、运行测试、lint、格式检查和构建。发布到 Cloudflare 前，应确认对应提交的这些检查全部通过；也可以在本地按上面的命令先执行。
+
+Cloudflare Pages 的 Git 自动部署与 GitHub Actions 是独立流程。仅添加工作流不会阻止推送后自动部署；如需强制等待 CI，应通过受保护分支与必需状态检查，或调整 Cloudflare 的自动部署设置。
+
+真实账号和浏览器仍需核实的事项列在 [待验证清单](docs/validation-checklist.md)。定时任务由批量日常页面调度：页面关闭或离开后不会运行，后台和锁屏时还会受浏览器节流影响。
+
+需要检查窄屏布局时，可先启动 `pnpm dev --host 127.0.0.1 --port 4173 --strictPort`，再运行 `node test/visualSmoke.mjs`。脚本使用独立浏览器配置、虚构账号并禁用游戏连接，检查 360、390、768 像素的深浅色页面；默认使用 macOS 的 Microsoft Edge，其他环境可通过 `XYZW_BROWSER` 指定 Chromium 兼容浏览器路径。截图默认保存在系统临时目录，可通过 `XYZW_SCREENSHOTS` 指定。此检查不能代替真实账号、触屏及加载实际商品后的验收。
 
 ### 部署代理服务 (Cloudflare Pages)
 

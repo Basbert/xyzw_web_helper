@@ -352,9 +352,16 @@ export class XyzwLegionWarWebSocketClient {
     socket.onerror = (error) => {
       if (this.socket !== socket) return;
       wsLogger.error("WebSocket 错误:", error);
+      this.socket = null;
       this.connected = false;
       this._clearTimers();
+      try {
+        socket.close();
+      } catch (closeError) {
+        wsLogger.warn("关闭错误连接失败", closeError);
+      }
       if (this.onError) this.onError(error);
+      this.onDisconnect?.({ code: 1006, reason: "连接错误" });
     };
   }
 
@@ -609,22 +616,51 @@ export class XyzwLegionWarWebSocketClient {
 
   /** 队列处理循环 */
   _processQueueLoop() {
-    if (this.sendQueueTimer) clearInterval(this.sendQueueTimer);
+    if (this.sendQueueTimer) {
+      clearTimeout(this.sendQueueTimer);
+      this.sendQueueTimer = null;
+    }
 
     const socket = this.socket;
-    this.sendQueueTimer = setInterval(async () => {
-      if (!this.sendQueue.length) return;
+    let timerId = null;
+
+    const scheduleNext = () => {
       if (
+        this.sendQueueTimer !== timerId ||
+        this.socket !== socket ||
+        !this.connected
+      ) {
+        return;
+      }
+      timerId = setTimeout(runStep, 50);
+      this.sendQueueTimer = timerId;
+    };
+
+    const runStep = async () => {
+      if (
+        this.sendQueueTimer !== timerId ||
         this.socket !== socket ||
         !this.connected ||
         socket?.readyState !== WebSocket.OPEN
-      )
+      ) {
         return;
+      }
+
+      if (!this.sendQueue.length) {
+        scheduleNext();
+        return;
+      }
 
       const task = this.sendQueue.shift();
-      if (!task) return;
+      if (!task) {
+        scheduleNext();
+        return;
+      }
       const request = task.request;
-      if (request && this.promises[request.seq] !== request) return;
+      if (request && this.promises[request.seq] !== request) {
+        scheduleNext();
+        return;
+      }
       // Server sequences must be contiguous: cancelled or failed unsent commands use no number.
       const wireSeq =
         task.cmd === "heart_beat" && !request ? 0 : this.wireSeq + 1;
@@ -700,13 +736,18 @@ export class XyzwLegionWarWebSocketClient {
           }
         }
 
-        // 可选延时
+        // 可选延时（下一次循环会在本次 sleep 结束后再排期）
         if (task.sleep) await sleep(task.sleep);
       } catch (error) {
         if (request) this._rejectRequest(request.seq, error);
         wsLogger.error(`发送消息失败: ${task.cmd}`, error);
+      } finally {
+        scheduleNext();
       }
-    }, 50);
+    };
+
+    timerId = setTimeout(runStep, 50);
+    this.sendQueueTimer = timerId;
   }
 
   /** 处理 Promise 响应 */
@@ -896,7 +937,7 @@ export class XyzwLegionWarWebSocketClient {
       this.heartbeatTimer = null;
     }
     if (this.sendQueueTimer) {
-      clearInterval(this.sendQueueTimer);
+      clearTimeout(this.sendQueueTimer);
       this.sendQueueTimer = null;
     }
   }

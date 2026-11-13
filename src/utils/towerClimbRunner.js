@@ -10,35 +10,59 @@ export async function runTowerClimb({
   let previousStage = null;
   let previousDefeat = false;
   while (true) {
-    if (shouldStop()) return { attempts, reason: "stopped" };
-    checkSession();
-    const role = await send("role_getroleinfo");
-    checkSession();
-    if (shouldStop()) return { attempts, reason: "stopped" };
-    const tower = role?.role?.tower;
-    const energy = tower?.energy;
-    if (!Number.isFinite(energy)) throw new Error("服务器未返回当前爬塔体力");
-    // The existing tower parser treats tower.id as the last completed stage.
-    const rawStage = tower?.id;
-    const stage =
-      (typeof rawStage === "number" ||
-        (typeof rawStage === "string" && rawStage.trim() !== "")) &&
-      Number.isSafeInteger(Number(rawStage)) &&
-      Number(rawStage) >= 0
-        ? Number(rawStage)
-        : null;
-    if (energy <= 0) return { attempts, reason: "energy" };
-    // A confirmed loss can be retried on the same floor. A missing result
-    // requires evidence of progress before starting another fight.
-    if (
-      previousStage !== null &&
-      (stage === null ||
-        stage < previousStage ||
-        (!previousDefeat && stage === previousStage))
-    ) {
-      return { attempts, reason: "uncertain" };
+    let stage = null;
+    let detail = "";
+    // A missing or stale snapshot gets at most one extra read. Never retry a
+    // consuming fight request, even if it timed out or its result was unclear.
+    for (let read = 0; read < 2; read++) {
+      if (shouldStop()) return { attempts, reason: "stopped" };
+      checkSession();
+      let role;
+      try {
+        role = await send("role_getroleinfo");
+      } catch {
+        checkSession();
+        if (shouldStop()) return { attempts, reason: "stopped" };
+        detail = "读取咸将塔状态失败，请检查连接后再试";
+      }
+      checkSession();
+      if (shouldStop()) return { attempts, reason: "stopped" };
+      const tower = role?.role?.tower;
+      const energy = tower?.energy;
+      if (!role) {
+        detail ||= "服务器未返回咸将塔状态";
+      } else if (!Number.isFinite(energy)) {
+        detail = "服务器未返回当前咸将塔体力";
+      } else if (Number.isFinite(energy) && energy <= 0) {
+        return { attempts, reason: "energy" };
+      } else if (role) {
+        // The existing tower parser treats tower.id as the last completed stage.
+        const rawStage = tower?.id;
+        stage =
+          (typeof rawStage === "number" ||
+            (typeof rawStage === "string" && rawStage.trim() !== "")) &&
+          Number.isSafeInteger(Number(rawStage)) &&
+          Number(rawStage) >= 0
+            ? Number(rawStage)
+            : null;
+        if (stage === null) {
+          detail = "服务器未返回当前咸将塔层数";
+        } else if (previousStage !== null && stage < previousStage) {
+          detail = "服务器返回的层数发生回退，无法确认当前状态";
+        } else if (
+          previousStage !== null &&
+          !previousDefeat &&
+          stage === previousStage
+        ) {
+          detail = "战斗结果未确认，服务器的层数尚未推进";
+        } else {
+          detail = "";
+          break;
+        }
+      }
+      if (read === 0) await delay();
     }
-    if (stage === null) throw new Error("服务器未返回当前咸将塔层数");
+    if (detail) return { attempts, reason: "uncertain", detail };
     const battle = await send("fight_starttower");
     attempts++;
     checkSession();

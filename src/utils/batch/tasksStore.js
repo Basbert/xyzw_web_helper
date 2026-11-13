@@ -9,6 +9,7 @@ import {
   normalizeBlackMarketPurchaseList,
   toStorePurchaseItemList,
 } from "./blackMarketConfig";
+import { withManagedConnection } from "./connectionManager.js";
 
 /**
  * 创建商店类任务执行器
@@ -128,6 +129,42 @@ export function createTasksStore(deps) {
     });
   };
 
+  const handleLegionStoreError = (tokenId, tokenName, limitLabel, error) => {
+    if (error?.interrupted) {
+      tokenStatus.value[tokenId] = "stopped";
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        message: `${tokenName} 购买已停止`,
+        type: "warning",
+      });
+      return;
+    }
+    const messageText = error?.message || "未知错误";
+    if (messageText.includes("俱乐部商品购买数量超出上限")) {
+      tokenStatus.value[tokenId] = "completed";
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        message: `${tokenName} 本周已购买过${limitLabel}，跳过`,
+        type: "info",
+      });
+      return;
+    }
+    tokenStatus.value[tokenId] = "failed";
+    if (messageText.includes("物品不存在")) {
+      addLog({
+        time: new Date().toLocaleTimeString(),
+        message: `${tokenName} 盐锭不足或未加入军团，购买失败`,
+        type: "error",
+      });
+      return;
+    }
+    addLog({
+      time: new Date().toLocaleTimeString(),
+      message: `${tokenName} 购买失败: ${messageText}`,
+      type: "error",
+    });
+  };
+
   /**
    * 一键购买四圣碎片
    */
@@ -142,10 +179,22 @@ export function createTasksStore(deps) {
     });
 
     const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+      if (shouldStop.value) {
+        tokenStatus.value[tokenId] = "stopped";
+        return;
+      }
 
       tokenStatus.value[tokenId] = "running";
       const token = tokens.value.find((t) => t.id === tokenId);
+      if (!token) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `账号已不存在，跳过购买四圣碎片`,
+          type: "error",
+        });
+        return;
+      }
 
       try {
         addLog({
@@ -154,68 +203,46 @@ export function createTasksStore(deps) {
           type: "info",
         });
 
-        await ensureConnection(tokenId);
-
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 发送购买请求...`,
-          type: "info",
-        });
-
-        const result = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "legion_storebuygoods",
-          { id: 6 },
-          5000,
-        );
-
-        await sleep(delayConfig.action);
-
-        if (result.error) {
-          if (result.error.includes("俱乐部商品购买数量超出上限")) {
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
             addLog({
               time: new Date().toLocaleTimeString(),
-              message: `${token.name} 本周已购买过四圣碎片，跳过`,
+              message: `${token.name} 发送购买请求...`,
               type: "info",
             });
-          } else if (result.error.includes("物品不存在")) {
+
+            await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "legion_storebuygoods",
+              { id: 6 },
+              5000,
+            );
+            check();
+
+            await sleep(delayConfig.action);
+
             addLog({
               time: new Date().toLocaleTimeString(),
-              message: `${token.name} 盐锭不足或未加入军团，购买失败`,
-              type: "error",
+              message: `${token.name} 购买成功，获得四圣碎片`,
+              type: "success",
             });
-            tokenStatus.value[tokenId] = "failed";
-          } else {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 购买失败: ${result.error}`,
-              type: "error",
-            });
-            tokenStatus.value[tokenId] = "failed";
-          }
-        } else {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `${token.name} 购买成功，获得四圣碎片`,
-            type: "success",
-          });
-          tokenStatus.value[tokenId] = "completed";
-        }
+            tokenStatus.value[tokenId] = "completed";
+          },
+        );
       } catch (error) {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 购买过程出错: ${error.message}`,
-          type: "error",
-        });
-        tokenStatus.value[tokenId] = "failed";
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭 (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
-        });
+        handleLegionStoreError(tokenId, token.name, "四圣碎片", error);
       }
     });
 
@@ -240,10 +267,22 @@ export function createTasksStore(deps) {
     });
 
     const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+      if (shouldStop.value) {
+        tokenStatus.value[tokenId] = "stopped";
+        return;
+      }
 
       tokenStatus.value[tokenId] = "running";
       const token = tokens.value.find((t) => t.id === tokenId);
+      if (!token) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `账号已不存在，跳过购买皮肤币`,
+          type: "error",
+        });
+        return;
+      }
 
       try {
         addLog({
@@ -252,73 +291,47 @@ export function createTasksStore(deps) {
           type: "info",
         });
 
-        await ensureConnection(tokenId);
-
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 发送购买请求...`,
-          type: "info",
-        });
-
-        let result = null;
-        for (let i = 0; i < 5; i++) {
-          if (shouldStop.value) break;
-
-          result = await tokenStore.sendMessageWithPromise(
+        await withManagedConnection(
+          {
             tokenId,
-            "legion_storebuygoods",
-            { id: 1 },
-            5000,
-          );
-
-          await sleep(delayConfig.action);
-        }
-
-        if (result && result.error) {
-          if (result.error.includes("俱乐部商品购买数量超出上限")) {
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
             addLog({
               time: new Date().toLocaleTimeString(),
-              message: `${token.name} 本周已购买过皮肤币，跳过`,
+              message: `${token.name} 发送购买请求...`,
               type: "info",
             });
-          } else if (result.error.includes("物品不存在")) {
+
+            for (let i = 0; i < 5; i++) {
+              check();
+              await tokenStore.sendMessageWithPromise(
+                tokenId,
+                "legion_storebuygoods",
+                { id: 1 },
+                5000,
+              );
+              await sleep(delayConfig.action);
+            }
+
             addLog({
               time: new Date().toLocaleTimeString(),
-              message: `${token.name} 盐锭不足或未加入军团，购买失败`,
-              type: "error",
+              message: `${token.name} 购买成功，获得皮肤币`,
+              type: "success",
             });
-            tokenStatus.value[tokenId] = "failed";
-          } else {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 购买失败: ${result.error}`,
-              type: "error",
-            });
-            tokenStatus.value[tokenId] = "failed";
-          }
-        } else {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `${token.name} 购买成功，获得皮肤币`,
-            type: "success",
-          });
-          tokenStatus.value[tokenId] = "completed";
-        }
+            tokenStatus.value[tokenId] = "completed";
+          },
+        );
       } catch (error) {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 购买过程出错: ${error.message}`,
-          type: "error",
-        });
-        tokenStatus.value[tokenId] = "failed";
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭 (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
-        });
+        handleLegionStoreError(tokenId, token.name, "皮肤币", error);
       }
     });
 
@@ -343,10 +356,22 @@ export function createTasksStore(deps) {
     });
 
     const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+      if (shouldStop.value) {
+        tokenStatus.value[tokenId] = "stopped";
+        return;
+      }
 
       tokenStatus.value[tokenId] = "running";
       const token = tokens.value.find((t) => t.id === tokenId);
+      if (!token) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `账号已不存在，跳过珍宝阁领取`,
+          type: "error",
+        });
+        return;
+      }
 
       try {
         addLog({
@@ -355,52 +380,52 @@ export function createTasksStore(deps) {
           type: "info",
         });
 
-        await ensureConnection(tokenId);
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `${token.name} 发送珍宝阁免费领取请求...`,
+              type: "info",
+            });
 
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 发送珍宝阁免费领取请求...`,
-          type: "info",
-        });
+            await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "collection_claimfreereward",
+              {},
+              5000,
+            );
+            check();
 
-        const result = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "collection_claimfreereward",
-          {},
-          5000,
+            await sleep(delayConfig.action);
+
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `${token.name} 珍宝阁领取成功`,
+              type: "success",
+            });
+            tokenStatus.value[tokenId] = "completed";
+          },
         );
-
-        await sleep(delayConfig.action);
-
-        if (result.error) {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `${token.name} 珍宝阁领取失败: ${result.error}`,
-            type: "error",
-          });
-          tokenStatus.value[tokenId] = "failed";
-        } else {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `${token.name} 珍宝阁领取成功`,
-            type: "success",
-          });
-          tokenStatus.value[tokenId] = "completed";
-        }
       } catch (error) {
+        tokenStatus.value[tokenId] = error?.interrupted ? "stopped" : "failed";
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `${token.name} 珍宝阁领取过程出错: ${error.message}`,
-          type: "error",
-        });
-        tokenStatus.value[tokenId] = "failed";
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭 (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
+          message: error?.interrupted
+            ? `${token.name} 珍宝阁领取已停止`
+            : `${token.name} 珍宝阁领取过程出错: ${error.message}`,
+          type: error?.interrupted ? "warning" : "error",
         });
       }
     });
@@ -426,10 +451,22 @@ export function createTasksStore(deps) {
     });
 
     const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+      if (shouldStop.value) {
+        tokenStatus.value[tokenId] = "stopped";
+        return;
+      }
 
       tokenStatus.value[tokenId] = "running";
       const token = tokens.value.find((t) => t.id === tokenId);
+      if (!token) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `账号已不存在，跳过配置黑市采购清单`,
+          type: "error",
+        });
+        return;
+      }
 
       try {
         addLog({
@@ -438,23 +475,32 @@ export function createTasksStore(deps) {
           type: "info",
         });
 
-        await ensureConnection(tokenId);
-        await updateBlackMarketPurchaseConfig(tokenId, token.name);
-        tokenStatus.value[tokenId] = "completed";
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async () => {
+            await updateBlackMarketPurchaseConfig(tokenId, token.name);
+            tokenStatus.value[tokenId] = "completed";
+          },
+        );
       } catch (error) {
+        tokenStatus.value[tokenId] = error?.interrupted ? "stopped" : "failed";
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `${token.name} 配置黑市采购清单失败: ${error.message}`,
-          type: "error",
-        });
-        tokenStatus.value[tokenId] = "failed";
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭 (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
+          message: error?.interrupted
+            ? `${token.name} 配置黑市采购清单已停止`
+            : `${token.name} 配置黑市采购清单失败: ${error.message}`,
+          type: error?.interrupted ? "warning" : "error",
         });
       }
     });
@@ -480,10 +526,22 @@ export function createTasksStore(deps) {
     });
 
     const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+      if (shouldStop.value) {
+        tokenStatus.value[tokenId] = "stopped";
+        return;
+      }
 
       tokenStatus.value[tokenId] = "running";
       const token = tokens.value.find((t) => t.id === tokenId);
+      if (!token) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `账号已不存在，跳过黑市采购`,
+          type: "error",
+        });
+        return;
+      }
 
       try {
         addLog({
@@ -492,52 +550,52 @@ export function createTasksStore(deps) {
           type: "info",
         });
 
-        await ensureConnection(tokenId);
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `${token.name} 发送黑市采购请求...`,
+              type: "info",
+            });
 
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 发送黑市采购请求...`,
-          type: "info",
-        });
+            await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "store_purchase",
+              {},
+              5000,
+            );
+            check();
 
-        const result = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "store_purchase",
-          {},
-          5000,
+            await sleep(delayConfig.action);
+
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `${token.name} 黑市采购成功`,
+              type: "success",
+            });
+            tokenStatus.value[tokenId] = "completed";
+          },
         );
-
-        await sleep(delayConfig.action);
-
-        if (result.error) {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `${token.name} 黑市采购失败: ${result.error}`,
-            type: "error",
-          });
-          tokenStatus.value[tokenId] = "failed";
-        } else {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `${token.name} 黑市采购成功`,
-            type: "success",
-          });
-          tokenStatus.value[tokenId] = "completed";
-        }
       } catch (error) {
+        tokenStatus.value[tokenId] = error?.interrupted ? "stopped" : "failed";
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `${token.name} 黑市采购过程出错: ${error.message}`,
-          type: "error",
-        });
-        tokenStatus.value[tokenId] = "failed";
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭 (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
+          message: error?.interrupted
+            ? `${token.name} 黑市采购已停止`
+            : `${token.name} 黑市采购过程出错: ${error.message}`,
+          type: error?.interrupted ? "warning" : "error",
         });
       }
     });

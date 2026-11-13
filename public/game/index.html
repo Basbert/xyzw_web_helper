@@ -59,9 +59,14 @@
     <script src="cocos2d-js-min.a5841.js" charset="utf-8"></script>
     <script src="xh.js" charset="utf-8"></script>
     <script src="sh1.js" charset="utf-8"></script>
-    <script src="diagnose_require.js" charset="utf-8"></script>
     <script type="text/javascript">
       (function () {
+        if (/(?:[?&])debug=1(?:&|$)/.test(window.location.search || "")) {
+          var diagScript = document.createElement("script");
+          diagScript.src = "diagnose_require.js";
+          diagScript.charset = "utf-8";
+          document.body.appendChild(diagScript);
+        }
         window.HtmlIsLoaded = true;
         var splash = document.getElementById("splash");
         splash.style.display = "none";

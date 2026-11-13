@@ -49,13 +49,13 @@
         </div>
 
         <div class="function-right">
-          <a-date-picker
-            v-model:value="inputDate1"
-            :default-value="inputDate1"
-            @change="fetchBattleRecordsByDate"
-            value-format="YYYY/MM/DD"
-            format="YYYY/MM/DD"
-            :disabled-date="disabledDate"
+          <n-date-picker
+            v-model:formatted-value="inputDate1"
+            type="date"
+            value-format="yyyy/MM/dd"
+            format="yyyy/MM/dd"
+            :is-date-disabled="disabledDate"
+            @update:formatted-value="fetchBattleRecordsByDate"
           />
           <n-button
             size="small"
@@ -1637,11 +1637,12 @@ const handleImageError = (event) => {
   event.target.style.display = "none";
 };
 
-const disabledDate = (current) => {
+const disabledDate = (ts) => {
+  const current = new Date(ts);
   return (
     (!isSameGameValue(current.getDay(), 6) &&
       !isSameGameValue(current.getDay(), 0)) ||
-    current > Date.now()
+    ts > Date.now()
   );
 };
 
@@ -1678,7 +1679,7 @@ const getRedQuenchClass = (redQuench) => {
 
 //日期选择时调用查询战绩方法
 const fetchBattleRecordsByDate = (val) => {
-  if (!isSameGameValue(undefined, val)) {
+  if (typeof val === "string" && val) {
     inputDate1.value = val;
   } else {
     inputDate1.value = getLastSaturday();
@@ -2168,7 +2169,7 @@ const handleExport1 = async () => {
 
   try {
     if (exportmethod.value.includes("1")) {
-      formatWarrankRecordsForExport(
+      await formatWarrankRecordsForExport(
         battleRecords1.value.legionRankList,
         queryDate.value,
       );

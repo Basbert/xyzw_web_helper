@@ -5,6 +5,7 @@
  */
 
 import { getXuanwuActBase } from "@/utils/towerActId";
+import { withManagedConnection } from "./connectionManager.js";
 
 // 活动ID后缀（前缀为当天日期 YYMMDD）
 const WAR_ORDER_SUFFIX = "1";
@@ -45,6 +46,8 @@ export function createTasksXuanwuBlessing(deps) {
     shouldStop,
     ensureConnection,
     releaseConnectionSlot,
+    connectionQueue,
+    batchSettings,
     tokenStore,
     addLog,
     message,
@@ -272,72 +275,107 @@ export function createTasksXuanwuBlessing(deps) {
     });
 
     const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+      if (shouldStop.value) {
+        tokenStatus.value[tokenId] = "stopped";
+        return;
+      }
       tokenStatus.value[tokenId] = "running";
       const token = tokens.value.find((t) => t.id === tokenId);
+      if (!token) {
+        tokenStatus.value[tokenId] = "failed";
+        log(`账号已不存在，跳过玄武赐福`, "error");
+        return;
+      }
       try {
         log(`=== 开始玄武赐福: ${token.name} ===`);
-        await ensureConnection(tokenId);
-        if (shouldStop.value) return;
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            const resolved = await resolveWarOrder(tokenId);
+            if (!resolved) {
+              throw new Error("未找到玄武赐福活动，请确认活动是否开启");
+            }
+            check();
+            const { actId, info } = resolved;
+            const base = String(actId).slice(0, 6);
+            const signActivityId = Number(base + SIGN_SUFFIX);
+            const goodsId = Number(base + GOODS_SUFFIX);
 
-        const resolved = await resolveWarOrder(tokenId);
-        if (!resolved) {
-          throw new Error("未找到玄武赐福活动，请确认活动是否开启");
-        }
-        const { actId, info } = resolved;
-        const base = String(actId).slice(0, 6);
-        const signActivityId = Number(base + SIGN_SUFFIX);
-        const goodsId = Number(base + GOODS_SUFFIX);
-
-        // 1. 先领一轮任务 + 通行证奖励，同时攒抽奖券
-        const first = await claimTasks(tokenId, actId, info, token.name);
-        let passRewards = await claimPassRewards(tokenId, actId, token.name);
-
-        // 2. 免费珍宝购买（产出抽奖券）
-        await buyFreeGoods(tokenId, goodsId, token.name);
-        await delay(commandDelay);
-
-        // 3. 抽奖（会推进"抽奖X次"类任务进度）
-        const lotteryCnt = await doLottery(tokenId, token.name);
-
-        // 4. 点卯补领（同样可能推进任务进度）
-        const signCnt = await claimSign(tokenId, signActivityId, token.name);
-
-        // 5. 抽奖/点卯后重新拉取，领取新完成的任务
-        let secondClaimed = 0;
-        if (lotteryCnt > 0 || signCnt > 0) {
-          const latestInfo = await fetchWarOrder(tokenId, actId);
-          if (latestInfo) {
-            const second = await claimTasks(
+            // 1. 先领一轮任务 + 通行证奖励，同时攒抽奖券
+            const first = await claimTasks(tokenId, actId, info, token.name);
+            check();
+            let passRewards = await claimPassRewards(
               tokenId,
               actId,
-              latestInfo,
               token.name,
             );
-            secondClaimed = second.claimed;
-            if (secondClaimed > 0) {
-              passRewards += await claimPassRewards(tokenId, actId, token.name);
+            check();
+
+            // 2. 免费珍宝购买（产出抽奖券）
+            await buyFreeGoods(tokenId, goodsId, token.name);
+            await delay(commandDelay);
+            check();
+
+            // 3. 抽奖（会推进"抽奖X次"类任务进度）
+            const lotteryCnt = await doLottery(tokenId, token.name);
+            check();
+
+            // 4. 点卯补领（同样可能推进任务进度）
+            const signCnt = await claimSign(
+              tokenId,
+              signActivityId,
+              token.name,
+            );
+            check();
+
+            // 5. 抽奖/点卯后重新拉取，领取新完成的任务
+            let secondClaimed = 0;
+            if (lotteryCnt > 0 || signCnt > 0) {
+              const latestInfo = await fetchWarOrder(tokenId, actId);
+              if (latestInfo) {
+                const second = await claimTasks(
+                  tokenId,
+                  actId,
+                  latestInfo,
+                  token.name,
+                );
+                secondClaimed = second.claimed;
+                if (secondClaimed > 0) {
+                  passRewards += await claimPassRewards(
+                    tokenId,
+                    actId,
+                    token.name,
+                  );
+                }
+              }
             }
-          }
-        }
 
-        log(
-          `${token.name} 玄武赐福完成: 任务${first.claimed + secondClaimed}, 通行证奖励${passRewards}, 点卯${signCnt}, 抽奖${lotteryCnt}`,
-          "success",
+            log(
+              `${token.name} 玄武赐福完成: 任务${first.claimed + secondClaimed}, 通行证奖励${passRewards}, 点卯${signCnt}, 抽奖${lotteryCnt}`,
+              "success",
+            );
+
+            tokenStatus.value[tokenId] = "completed";
+          },
         );
-
-        tokenStatus.value[tokenId] = "completed";
       } catch (error) {
         console.error(error);
-        tokenStatus.value[tokenId] = "failed";
+        tokenStatus.value[tokenId] = error?.interrupted ? "stopped" : "failed";
         log(
-          `${token.name} 玄武赐福失败: ${error.message || "未知错误"}`,
-          "error",
+          `${token.name} 玄武赐福${error?.interrupted ? "已停止" : "失败"}: ${error.message || "未知错误"}`,
+          error?.interrupted ? "warning" : "error",
         );
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        log(`${token.name} 连接已关闭`);
       }
     });
 

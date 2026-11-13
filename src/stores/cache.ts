@@ -3,22 +3,33 @@ import type { App } from "vue";
 
 const _timeout = 5 * 1000;
 
-const [key, val, timeout, ok, reject, reslove, config] = [
-  Symbol("key"),
-  Symbol("val"),
-  Symbol("timeout"),
-  Symbol("ok"),
-  Symbol("reject"),
-  Symbol("reslove"),
-  Symbol("config"),
-];
+const key = Symbol("key");
+const val = Symbol("val");
+const timeout = Symbol("timeout");
+const ok = Symbol("ok");
+const reject = Symbol("reject");
+const reslove = Symbol("reslove");
+const config = Symbol("config");
 
 class Content {
+  [prop: string]: any;
   constructor() {}
 }
 
+interface CacheConfig {
+  content: Content;
+  timeout: number;
+}
+
 class CacheItem {
-  constructor(_key, _val, _t = _timeout) {
+  [key]: string;
+  [val]: unknown;
+  [timeout]: number;
+  [ok] = false;
+  [reject]: Array<(reason?: unknown) => void>;
+  [reslove]: Array<(value: unknown) => void>;
+
+  constructor(_key: string, _val: unknown, _t = _timeout) {
     this[key] = _key;
     this[val] = _val;
     this[timeout] = +new Date() + _t;
@@ -43,7 +54,7 @@ class CacheItem {
     return this[key];
   }
 
-  set val(data) {
+  set val(data: unknown) {
     this[ok] = true;
     this[val] = data;
   }
@@ -70,7 +81,15 @@ class CacheItem {
 }
 
 class Cache {
-  constructor(name, { content = new Content(), timeout = _timeout }) {
+  name: string;
+  content: Content;
+  timeout?: number;
+  [config]: CacheConfig;
+
+  constructor(
+    name: string,
+    { content = new Content(), timeout = _timeout }: Partial<CacheConfig> = {},
+  ) {
     this.name = name;
     this.content = content;
     this[config] = {
@@ -79,14 +98,14 @@ class Cache {
     };
   }
 
-  async get(key, callback, conf) {
-    const item = this.content[key];
+  async get(key: string, callback: unknown, conf?: Partial<CacheConfig>) {
+    const item = this.content[key] as CacheItem | undefined;
     // 没有 初始化
     if (item != null) {
       if (!item.isOk()) {
-        return new Promise((reslove, reject) => {
-          item.reslove.push(reslove);
-          item.reject.push(reject);
+        return new Promise((resolve, rejectItem) => {
+          item.reslove.push(resolve);
+          item.reject.push(rejectItem);
         });
       }
       if (!item.isTimeout()) {
@@ -106,15 +125,24 @@ class Cache {
    * @param {object} conf Entry timeout configuration.
    * @returns {Promise<unknown>} Loaded value; loader failures reject and evict the entry.
    */
-  async feach(key, callback, conf = this[config]) {
-    const oldItem = this.content[key];
+  async feach(
+    key: string,
+    callback: unknown,
+    conf: CacheConfig = this[config],
+  ) {
+    const oldItem = this.content[key] as CacheItem | undefined;
     const newItem = new CacheItem(key, null, conf.timeout);
     this.content[key] = newItem;
-    const waitingItems = [oldItem, newItem].filter(Boolean);
+    const waitingItems = [oldItem, newItem].filter(
+      (entry): entry is CacheItem => Boolean(entry),
+    );
     try {
       const data =
         typeof callback === "function"
-          ? await callback(key, conf)
+          ? await (callback as (k: string, c: CacheConfig) => unknown)(
+              key,
+              conf,
+            )
           : await callback;
       newItem.val = data;
       for (const item of waitingItems) {
@@ -124,7 +152,7 @@ class Cache {
     } catch (error) {
       if (this.content[key] === newItem) delete this.content[key];
       for (const item of waitingItems) {
-        for (const reject of item.reject) reject(error);
+        for (const rejectItem of item.reject) rejectItem(error);
       }
       throw error;
     } finally {
@@ -141,30 +169,39 @@ class Cache {
 }
 
 class CacheManager {
+  content: Content;
+  timeout: number;
+
   constructor(content = new Content(), timeout = _timeout) {
     this.content = content;
     this.timeout = timeout;
   }
 
-  getCache(name, config) {
-    let cache = this.content[name];
+  getCache(name: string, config?: Partial<CacheConfig>): Cache {
+    let cache = this.content[name] as Cache | undefined;
     if (cache == null) {
       this.content[name] = cache = new Cache(name, {
         timeout: this.timeout,
         ...config,
       });
-    } else {
-      config && (cache.timeout = config.timeout);
+    } else if (config) {
+      cache.timeout = config.timeout;
     }
     return cache;
   }
 
-  delCache(name) {
+  delCache(name: string) {
     delete this.content[name];
   }
 
   clear() {
     this.content = new Content();
+  }
+}
+
+declare global {
+  interface Window {
+    $CacheManager?: CacheManager;
   }
 }
 
@@ -174,7 +211,12 @@ const install = (vm: App) => {
   if (vm.version.startsWith("3.")) {
     vm.config.globalProperties.$CacheManager = $CacheManager;
   } else {
-    vm.prototype.$CacheManager = $CacheManager;
+    const legacyVm = vm as unknown as {
+      prototype?: Record<string, unknown>;
+    };
+    if (legacyVm.prototype) {
+      legacyVm.prototype.$CacheManager = $CacheManager;
+    }
   }
 };
 

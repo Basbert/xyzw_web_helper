@@ -3,6 +3,7 @@
  * 包含: claimHangUpRewards, batchAddHangUpTime, batchStudy, batchclubsign
  */
 import { fillHangUpTime, runWithDailyTaskLock } from "@/utils/dailyTaskState";
+import { withManagedConnection } from "./connectionManager.js";
 
 /**
  * 创建挂机、答题、签到类任务执行器
@@ -158,11 +159,23 @@ export function createTasksHangUp(deps) {
     await preloadQuestions();
 
     const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+      if (shouldStop.value) {
+        tokenStatus.value[tokenId] = "stopped";
+        return;
+      }
 
       tokenStatus.value[tokenId] = "running";
 
       const token = tokens.value.find((t) => t.id === tokenId);
+      if (!token) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `账号已不存在，跳过答题`,
+          type: "error",
+        });
+        return;
+      }
 
       try {
         addLog({
@@ -171,97 +184,105 @@ export function createTasksHangUp(deps) {
           type: "info",
         });
 
-        await ensureConnection(tokenId);
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            const getAccountStudyTarget = () =>
+              tokenStore.getAccountGameData
+                ? tokenStore.getAccountGameData(tokenId).value
+                : tokenStore.gameData;
 
-        // Reset local study status
-        tokenStore.gameData.studyStatus = {
-          isAnswering: false,
-          questionCount: 0,
-          answeredCount: 0,
-          status: "",
-          timestamp: null,
-        };
+            const accountData = getAccountStudyTarget();
+            // Reset only this account's study status to prevent cross-account interference
+            accountData.studyStatus = {
+              isAnswering: false,
+              questionCount: 0,
+              answeredCount: 0,
+              status: "",
+              timestamp: null,
+            };
 
-        // Send start command
-        await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "study_startgame",
-          {},
-          5000,
-        );
+            // Send start command
+            await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "study_startgame",
+              {},
+              5000,
+            );
+            check();
 
-        // Wait for completion
-        let maxWait = 90;
-        let completed = false;
-        let lastStatus = "";
+            // Wait for completion
+            let maxWait = 90;
+            let completed = false;
+            let lastStatus = "";
 
-        while (maxWait > 0 && !shouldStop.value) {
-          const status = tokenStore.gameData.studyStatus;
+            while (maxWait > 0) {
+              check();
+              const status = getAccountStudyTarget().studyStatus || {};
 
-          if (status.status !== lastStatus) {
-            lastStatus = status.status;
-            if (status.status === "answering") {
+              if (status.status !== lastStatus) {
+                lastStatus = status.status;
+                if (status.status === "answering") {
+                  addLog({
+                    time: new Date().toLocaleTimeString(),
+                    message: `${token.name} 开始答题...`,
+                    type: "info",
+                  });
+                } else if (status.status === "claiming_rewards") {
+                  addLog({
+                    time: new Date().toLocaleTimeString(),
+                    message: `${token.name} 领取奖励...`,
+                    type: "info",
+                  });
+                }
+              }
+
+              if (status.status === "completed") {
+                completed = true;
+                break;
+              }
+
+              await new Promise((r) => setTimeout(r, 1000));
+              maxWait--;
+            }
+
+            if (completed) {
+              tokenStatus.value[tokenId] = "completed";
               addLog({
                 time: new Date().toLocaleTimeString(),
-                message: `${token.name} 开始答题...`,
-                type: "info",
+                message: `=== ${token.name} 答题完成 ===`,
+                type: "success",
               });
-            } else if (status.status === "claiming_rewards") {
+            } else {
+              tokenStatus.value[tokenId] = "failed";
               addLog({
                 time: new Date().toLocaleTimeString(),
-                message: `${token.name} 领取奖励...`,
-                type: "info",
+                message: `${token.name} 答题超时或未开始`,
+                type: "error",
               });
             }
-          }
-
-          if (status.status === "completed") {
-            completed = true;
-            break;
-          }
-
-          await new Promise((r) => setTimeout(r, 1000));
-          maxWait--;
-        }
-
-        if (completed) {
-          tokenStatus.value[tokenId] = "completed";
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `=== ${token.name} 答题完成 ===`,
-            type: "success",
-          });
-        } else {
-          if (shouldStop.value) {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 已停止`,
-              type: "warning",
-            });
-          } else {
-            tokenStatus.value[tokenId] = "failed";
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 答题超时或未开始`,
-              type: "error",
-            });
-          }
-        }
+          },
+        );
       } catch (error) {
         console.error(error);
-        tokenStatus.value[tokenId] = "failed";
+        tokenStatus.value[tokenId] = error?.interrupted ? "stopped" : "failed";
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `答题失败: ${error.message}`,
-          type: "error",
-        });
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭  (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
+          message: error?.interrupted
+            ? `${token.name} 已停止`
+            : `答题失败: ${error.message}`,
+          type: error?.interrupted ? "warning" : "error",
         });
       }
     });
@@ -286,45 +307,64 @@ export function createTasksHangUp(deps) {
     });
 
     const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+      if (shouldStop.value) {
+        tokenStatus.value[tokenId] = "stopped";
+        return;
+      }
       tokenStatus.value[tokenId] = "running";
       const token = tokens.value.find((t) => t.id === tokenId);
+      if (!token) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `账号已不存在，跳过俱乐部签到`,
+          type: "error",
+        });
+        return;
+      }
       try {
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `=== 开始一键俱乐部签到: ${token.name} ===`,
           type: "info",
         });
-        await ensureConnection(tokenId);
-        if (shouldStop.value) return;
-        await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "legion_signin",
-          {},
-          5000,
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "legion_signin",
+              {},
+              5000,
+            );
+            check();
+            await new Promise((r) => setTimeout(r, 500));
+            tokenStatus.value[tokenId] = "completed";
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `=== ${token.name} 俱乐部签到已完成 ===`,
+              type: "success",
+            });
+          },
         );
-        await new Promise((r) => setTimeout(r, 500));
-        tokenStatus.value[tokenId] = "completed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== ${token.name} 俱乐部签到已完成 ===`,
-          type: "success",
-        });
       } catch (error) {
         console.error(error);
-        tokenStatus.value[tokenId] = "failed";
+        tokenStatus.value[tokenId] = error?.interrupted ? "stopped" : "failed";
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `${token.name} 俱乐部签到失败: ${error.message || "未知错误"}`,
-          type: "error",
-        });
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭  (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-          type: "info",
+          message: `${token.name} 俱乐部签到${error?.interrupted ? "已停止" : "失败"}: ${error.message || "未知错误"}`,
+          type: error?.interrupted ? "warning" : "error",
         });
       }
     });
@@ -426,10 +466,22 @@ export function createTasksHangUp(deps) {
     });
 
     const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+      if (shouldStop.value) {
+        tokenStatus.value[tokenId] = "stopped";
+        return;
+      }
 
       tokenStatus.value[tokenId] = "running";
       const token = tokens.value.find((t) => t.id === tokenId);
+      if (!token) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `账号已不存在，跳过申请俱乐部`,
+          type: "error",
+        });
+        return;
+      }
 
       try {
         addLog({
@@ -438,53 +490,76 @@ export function createTasksHangUp(deps) {
           type: "info",
         });
 
-        await ensureConnection(tokenId);
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            const targetLegion = await queryLegionById(tokenId, targetLegionId);
+            check();
+            const roleInfo = await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "role_getroleinfo",
+              {},
+              5000,
+            );
+            check();
 
-        const targetLegion = await queryLegionById(tokenId, targetLegionId);
-        const roleInfo = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "role_getroleinfo",
-          {},
-          5000,
-        );
+            const currentLegionId = extractRoleLegionId(roleInfo);
+            if (currentLegionId > 0) {
+              if (currentLegionId === targetLegionId) {
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `=== ${token.name} 已在目标俱乐部 [${targetLegion.name}] 中，跳过 ===`,
+                  type: "warning",
+                });
+              } else {
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `=== ${token.name} 当前已加入其他俱乐部 (${currentLegionId})，跳过 ===`,
+                  type: "warning",
+                });
+              }
+              tokenStatus.value[tokenId] = "completed";
+              return;
+            }
 
-        const currentLegionId = extractRoleLegionId(roleInfo);
-        if (currentLegionId > 0) {
-          if (currentLegionId === targetLegionId) {
+            await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "legion_applyjoin",
+              { legionId: targetLegionId },
+              5000,
+            );
+
             addLog({
               time: new Date().toLocaleTimeString(),
-              message: `=== ${token.name} 已在目标俱乐部 [${targetLegion.name}] 中，跳过 ===`,
-              type: "warning",
+              message: `=== ${token.name} 已向 [${targetLegion.name}] 发起申请 ===`,
+              type: "success",
             });
-          } else {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `=== ${token.name} 当前已加入其他俱乐部 (${currentLegionId})，跳过 ===`,
-              type: "warning",
-            });
-          }
-          tokenStatus.value[tokenId] = "completed";
-          return;
-        }
-
-        await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "legion_applyjoin",
-          { legionId: targetLegionId },
-          5000,
+            tokenStatus.value[tokenId] = "completed";
+          },
         );
-
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== ${token.name} 已向 [${targetLegion.name}] 发起申请 ===`,
-          type: "success",
-        });
-        tokenStatus.value[tokenId] = "completed";
       } catch (error) {
         console.error(error);
         const errorMessage = error?.message || "未知错误";
 
-        if (
+        if (error?.interrupted) {
+          tokenStatus.value[tokenId] = "stopped";
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `${token.name} 申请俱乐部已停止`,
+            type: "warning",
+          });
+        } else if (
           errorMessage.includes("已加入") ||
           errorMessage.includes("已经加入") ||
           errorMessage.includes("当前已加入")
@@ -503,14 +578,6 @@ export function createTasksHangUp(deps) {
             type: "error",
           });
         }
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭`,
-          type: "info",
-        });
       }
     });
 
@@ -543,113 +610,143 @@ export function createTasksHangUp(deps) {
     });
 
     const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) return;
+      if (shouldStop.value) {
+        tokenStatus.value[tokenId] = "stopped";
+        return;
+      }
       tokenStatus.value[tokenId] = "running";
       const token = tokens.value.find((t) => t.id === tokenId);
+      if (!token) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `账号已不存在，跳过助威`,
+          type: "error",
+        });
+        return;
+      }
       try {
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `=== 开始助威: ${token.name} ===`,
           type: "info",
         });
-        await ensureConnection(tokenId);
-
-        // 尝试领取拍手器
-        try {
-          const rewardRes = await tokenStore.sendMessageWithPromise(
+        await withManagedConnection(
+          {
             tokenId,
-            "warguess_getguesscoinreward",
-            {},
-            3000, // 短超时，因为这不是关键步骤
-          );
-          if (rewardRes && rewardRes.reward) {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `=== ${token.name} 领取拍手器成功 ===`,
-              type: "success",
-            });
-          }
-        } catch (e) {
-          // 忽略领取失败
-          // console.warn("领取拍手器失败", e);
-        }
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            // 尝试领取拍手器
+            try {
+              const rewardRes = await tokenStore.sendMessageWithPromise(
+                tokenId,
+                "warguess_getguesscoinreward",
+                {},
+                3000, // 短超时，因为这不是关键步骤
+              );
+              if (rewardRes && rewardRes.reward) {
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `=== ${token.name} 领取拍手器成功 ===`,
+                  type: "success",
+                });
+              }
+            } catch (e) {
+              // 忽略领取失败
+            }
+            check();
 
-        // 获取助威数据以判断次数
-        const rankRes = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "warguess_getrank",
-          { bfId: "" },
-          5000,
+            // 获取助威数据以判断次数
+            const rankRes = await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "warguess_getrank",
+              { bfId: "" },
+              5000,
+            );
+            check();
+
+            let totalGuessNum = 0;
+            if (rankRes && rankRes.list) {
+              const list = Array.isArray(rankRes.list)
+                ? rankRes.list
+                : Object.values(rankRes.list);
+              totalGuessNum = list.reduce(
+                (sum, item) => sum + (item.guessNum || 0),
+                0,
+              );
+            }
+
+            if (totalGuessNum === 20) {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `=== ${token.name} 助威次数已满 (${totalGuessNum}/20)，跳过 ===`,
+                type: "warning",
+              });
+              tokenStatus.value[tokenId] = "completed";
+              return;
+            }
+
+            let coinToUse = Number(guessCoin);
+            const remaining = 20 - totalGuessNum;
+
+            if (coinToUse > remaining) {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `=== ${token.name} 剩余助威次数不足，调整为 ${remaining} 次 (原计划: ${coinToUse}) ===`,
+                type: "info",
+              });
+              coinToUse = remaining;
+            }
+
+            if (coinToUse <= 0) {
+              tokenStatus.value[tokenId] = "completed";
+              return;
+            }
+
+            const result = await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "warguess_startguess",
+              { guessCoin: coinToUse, legionId },
+              5000,
+            );
+
+            if (result && result.guessLegion) {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `=== ${token.name} 助威成功 (当前次数: ${result.guessLegion.guessNum}/20) ===`,
+                type: "success",
+              });
+              tokenStatus.value[tokenId] = "completed";
+            } else {
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `=== ${token.name} 助威失败 ===`,
+                type: "error",
+              });
+              tokenStatus.value[tokenId] = "failed";
+            }
+          },
         );
-
-        let totalGuessNum = 0;
-        if (rankRes && rankRes.list) {
-          let list = [];
-          if (Array.isArray(rankRes.list)) {
-            list = rankRes.list;
-          } else {
-            list = Object.values(rankRes.list);
-          }
-          totalGuessNum = list.reduce(
-            (sum, item) => sum + (item.guessNum || 0),
-            0,
-          );
-        }
-
-        if (totalGuessNum === 20) {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `=== ${token.name} 助威次数已满 (${totalGuessNum}/20)，跳过 ===`,
-            type: "warning",
-          });
-          tokenStatus.value[tokenId] = "completed";
-          return;
-        }
-
-        let coinToUse = Number(guessCoin);
-        const remaining = 20 - totalGuessNum;
-
-        if (coinToUse > remaining) {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `=== ${token.name} 剩余助威次数不足，调整为 ${remaining} 次 (原计划: ${coinToUse}) ===`,
-            type: "info",
-          });
-          coinToUse = remaining;
-        }
-
-        if (coinToUse <= 0) {
-          tokenStatus.value[tokenId] = "completed";
-          return;
-        }
-
-        const result = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "warguess_startguess",
-          { guessCoin: coinToUse, legionId },
-          5000,
-        );
-
-        if (result && result.guessLegion) {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `=== ${token.name} 助威成功 (当前次数: ${result.guessLegion.guessNum}/20) ===`,
-            type: "success",
-          });
-          tokenStatus.value[tokenId] = "completed";
-        } else {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `=== ${token.name} 助威失败 ===`,
-            type: "error",
-          });
-          tokenStatus.value[tokenId] = "failed";
-        }
       } catch (error) {
         console.error(error);
 
-        // Handle specific error: 400000 - Item does not exist (feature locked)
-        if (
+        if (error?.interrupted) {
+          tokenStatus.value[tokenId] = "stopped";
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `${token.name} 助威已停止`,
+            type: "warning",
+          });
+        } else if (
           error.code === 400000 ||
           (error.message && error.message.includes("400000"))
         ) {
@@ -667,14 +764,6 @@ export function createTasksHangUp(deps) {
             type: "error",
           });
         }
-      } finally {
-        tokenStore.closeWebSocketConnection(tokenId);
-        releaseConnectionSlot();
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `${token.name} 连接已关闭`,
-          type: "info",
-        });
       }
     });
 

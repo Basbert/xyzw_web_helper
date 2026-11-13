@@ -7,19 +7,18 @@
     :show-label="true"
   >
     <NFormItem label="bin文件" :show-label="true">
-      <a-upload
+      <n-upload
         multiple
-        accept="*.bin,*.dmp"
-        @before-upload="uploadBin"
-        draggable
-        dropzone
-        placeholder="粘贴Token字符串..."
-        clearable
+        accept=".bin,.dmp"
+        :show-file-list="false"
+        @before-upload="handleBeforeUpload"
       >
-        <!-- <div class="dropzone-content">
-          请点击上传或将bind文件拖拽到此处
-        </div> -->
-      </a-upload>
+        <n-upload-dragger>
+          <div style="padding: 8px 0">
+            <span>点击或拖拽 .bin / .dmp 文件到此处</span>
+          </div>
+        </n-upload-dragger>
+      </n-upload>
     </NFormItem>
 
     <NFormItem label="角色命名格式" :show-label="true">
@@ -39,8 +38,8 @@
       @download="handleDownload"
     />
 
-    <a-list>
-      <a-list-item v-for="(role, roleIndex) in roleList" :key="roleIndex">
+    <n-list bordered>
+      <n-list-item v-for="(role, roleIndex) in roleList" :key="roleIndex">
         <div
           style="
             display: flex;
@@ -61,8 +60,8 @@
             删除
           </NButton>
         </div>
-      </a-list-item>
-    </a-list>
+      </n-list-item>
+    </n-list>
 
     <div class="form-actions">
       <NButton
@@ -224,6 +223,13 @@ const addSelectedRole = async (roleInfo: any) => {
     console.error("添加角色失败", e);
     message.error(`添加角色失败: ${e.message}`);
   }
+};
+
+const handleBeforeUpload = (data: { file: { file?: File | null } }) => {
+  if (data.file.file) {
+    uploadBin(data.file.file);
+  }
+  return false;
 };
 
 const uploadBin = (binFile: File) => {

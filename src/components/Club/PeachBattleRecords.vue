@@ -36,13 +36,13 @@
       </div>
 
       <div class="function-right">
-        <a-date-picker
-          v-model:value="queryDate"
-          @change="fetchBattleRecordsByDate"
-          value-format="YYYY/MM/DD"
-          :disabled-date="disabledDate"
-          :default-value="queryDate"
-          format="YYYY/MM/DD"
+        <n-date-picker
+          v-model:formatted-value="queryDate"
+          type="date"
+          value-format="yyyy/MM/dd"
+          format="yyyy/MM/dd"
+          :is-date-disabled="disabledDate"
+          @update:formatted-value="fetchBattleRecordsByDate"
         />
         <n-button
           size="small"
@@ -1387,13 +1387,14 @@ const handleImageError = (event) => {
   event.target.style.display = "none";
 };
 
-const disabledDate = (current) => {
-  return !isSameGameValue(current.getDay(), 0) || current > Date.now();
+const disabledDate = (ts) => {
+  const current = new Date(ts);
+  return !isSameGameValue(current.getDay(), 0) || ts > Date.now();
 };
 
 //日期选择时调用查询战绩方法
 const fetchBattleRecordsByDate = (val) => {
-  if (!isSameGameValue(undefined, val)) {
+  if (typeof val === "string" && val) {
     queryDate.value = val;
   } else {
     queryDate.value = getLastSunday();

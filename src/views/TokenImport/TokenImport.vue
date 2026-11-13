@@ -23,14 +23,14 @@
       </NAlert>
 
       <!-- Token导入区域 -->
-      <a-modal
+      <n-modal
         class="token-import-modal"
-        v-model:visible="showImportForm"
-        width="52rem"
-        :footer="false"
-        :default-visible="!tokenStore.hasTokens"
+        v-model:show="showImportForm"
+        preset="card"
+        style="width: 52rem; max-width: 95vw"
+        :bordered="false"
       >
-        <template #title>
+        <template #header>
           <h2>
             <NIcon>
               <Add />
@@ -85,7 +85,7 @@
             v-if="importMethod === 'singlebin'"
           />
         </div>
-      </a-modal>
+      </n-modal>
 
       <!-- Token列表 -->
       <div v-if="tokenStore.hasTokens" class="tokens-section">
@@ -213,7 +213,7 @@
         </div>
 
         <div class="tokens-grid" v-if="viewMode === 'card'">
-          <a-card
+          <n-card
             v-for="(gameToken, tokenIndex) in sortedTokens"
             :key="gameToken.id"
             draggable="true"
@@ -226,8 +226,8 @@
             }"
             @click="selectToken(gameToken)"
           >
-            <template #title>
-              <a-space class="token-name" align="center">
+            <template #header>
+              <n-space class="token-name" align="center" size="small">
                 <span
                   class="multi-game-token-checkbox"
                   @click.stop
@@ -253,23 +253,20 @@
                   fallback-src="/icons/xiaoyugan.png"
                 />
                 {{ gameToken.name }}
-                <a-tag
-                  :color="getServerTagColor(gameToken.id)"
+                <n-tag
+                  :type="getServerTagType(gameToken.id)"
+                  size="small"
                   v-if="gameToken.server"
-                  >{{ gameToken.server }}</a-tag
+                  >{{ gameToken.server }}</n-tag
                 >
                 <!-- 连接状态指示器 -->
-                <a-badge
-                  :status="getTokenStyle(gameToken.id)"
-                  :text="getConnectionStatusText(gameToken.id)"
-                />
-                <!-- 连接状态文字 -->
-                <!-- <a-tag color="green">
-                  {{ getConnectionStatusText(token.id) }}
-                </a-tag> -->
-              </a-space>
+                <span class="status-badge">
+                  <n-badge dot :type="getTokenStyle(gameToken.id)" />
+                  <span>{{ getConnectionStatusText(gameToken.id) }}</span>
+                </span>
+              </n-space>
             </template>
-            <template #extra>
+            <template #header-extra>
               <n-dropdown
                 :options="getTokenActions(gameToken)"
                 @select="(key) => handleTokenAction(key, gameToken)"
@@ -324,7 +321,8 @@
                 </NIcon>
               </div>
 
-              <a-button
+              <n-button
+                size="small"
                 :loading="refreshingTokens.has(gameToken.id)"
                 @click.stop="refreshToken(gameToken)"
               >
@@ -334,7 +332,7 @@
                   </NIcon>
                 </template>
                 {{ gameToken.sourceUrl ? "刷新" : "重新获取" }}
-              </a-button>
+              </n-button>
 
               <div class="token-timestamps">
                 <div class="timestamp-item">
@@ -411,7 +409,7 @@
                 </div>
               </div>
             </template>
-            <template #actions>
+            <template #action>
               <n-button
                 type="primary"
                 size="large"
@@ -427,7 +425,7 @@
                 进入控制台
               </n-button>
             </template>
-          </a-card>
+          </n-card>
         </div>
 
         <!-- List View -->
@@ -467,10 +465,10 @@
                 </span>
                 <!-- 连接状态 - 移动到最前端显示 -->
                 <div style="min-width: 65px">
-                  <a-badge
-                    :status="getTokenStyle(gameToken.id)"
-                    :text="getConnectionStatusText(gameToken.id)"
-                  />
+                  <span class="status-badge">
+                    <n-badge dot :type="getTokenStyle(gameToken.id)" />
+                    <span>{{ getConnectionStatusText(gameToken.id) }}</span>
+                  </span>
                 </div>
                 <!-- Avatar -->
                 <n-avatar
@@ -653,15 +651,19 @@
       </div>
 
       <!-- 空状态 -->
-      <a-empty v-if="!tokenStore.hasTokens && !showImportForm">
-        <template #image>
+      <n-empty
+        v-if="!tokenStore.hasTokens && !showImportForm"
+        description="还没有导入任何Token"
+      >
+        <template #icon>
           <i class="mdi:bed-empty"></i>
         </template>
-        还没有导入任何Token
-        <a-button type="link" @click="openshowImportForm"
-          >打开Token管理</a-button
-        >
-      </a-empty>
+        <template #extra>
+          <n-button text type="primary" @click="openshowImportForm">
+            打开Token管理
+          </n-button>
+        </template>
+      </n-empty>
     </div>
 
     <!-- 编辑Token模态框 -->
@@ -1246,23 +1248,17 @@ const getTokenStyle = (tokenId) => {
   const statusMap = {
     connected: "success",
     connecting: "warning",
-    disconnected: "danger",
-    error: "danger",
+    disconnected: "error",
+    error: "error",
     disconnecting: "warning",
   };
-  return statusMap[status] || "danger";
+  return statusMap[status] || "error";
 };
 
 const getServerTagType = (tokenId) => {
   const status = getConnectionStatus(tokenId);
   // 连接成功时服务器标签使用绿色，其他状态保持红色
   return status === "connected" ? "success" : "error";
-};
-
-const getServerTagColor = (tokenId) => {
-  const status = getConnectionStatus(tokenId);
-  // 连接成功时服务器标签使用绿色，其他状态保持红色
-  return status === "connected" ? "green" : "red";
 };
 
 const getTokenActions = (token) => {
@@ -1384,7 +1380,7 @@ const downloadTokenBin = async (token) => {
   try {
     let sourceBin;
     if (token.combUser) {
-      sourceBin = generateBinFromCombUser(token.combUser, token.serverId);
+      sourceBin = await generateBinFromCombUser(token.combUser, token.serverId);
     } else {
       sourceBin = await getArrayBuffer(token.id);
       if (!sourceBin) sourceBin = await getArrayBuffer(token.name);
@@ -2126,59 +2122,21 @@ onUnmounted(() => {
   align-items: center;
 }
 
-/* 深色主题强制覆盖（与全局 data-theme 保持一致） */
-[data-theme="dark"] .n-form-item-label,
-[data-theme="dark"] .n-form-item-label__text {
-  color: #ffffff !important;
-}
-
-[data-theme="dark"] .n-input__input,
-[data-theme="dark"] .n-input__textarea {
-  color: #ffffff !important;
-  background-color: rgba(255, 255, 255, 0.1) !important;
-}
-
-[data-theme="dark"] .n-input__placeholder {
-  color: rgba(255, 255, 255, 0.5) !important;
-}
-
-[data-theme="dark"] .n-card {
-  background-color: rgba(255, 255, 255, 0.1) !important;
-  color: #ffffff !important;
-}
-
 [data-theme="dark"] .import-card {
-  background: rgba(45, 55, 72, 0.9) !important;
-  color: #ffffff !important;
+  background: rgba(45, 55, 72, 0.9);
+  color: var(--text-primary);
 }
 
 [data-theme="dark"] .import-card h2 {
-  color: #ffffff !important;
+  color: var(--text-primary);
 }
 
 [data-theme="dark"] .import-card .subtitle {
-  color: rgba(255, 255, 255, 0.7) !important;
-}
-
-[data-theme="dark"] .n-collapse-item__header {
-  color: #ffffff !important;
-}
-
-[data-theme="dark"] .n-collapse-item__content-wrapper {
-  background-color: transparent !important;
-}
-
-[data-theme="dark"] .n-radio-button {
-  color: #ffffff !important;
-}
-
-[data-theme="dark"] .n-radio-button--checked {
-  background-color: rgba(16, 185, 129, 0.8) !important;
-  color: #ffffff !important;
+  color: var(--text-secondary);
 }
 
 [data-theme="dark"] .form-tip {
-  color: rgba(255, 255, 255, 0.6) !important;
+  color: var(--text-tertiary);
 }
 
 .optional-fields {
@@ -2696,8 +2654,15 @@ onUnmounted(() => {
   margin-top: var(--spacing-xs);
 }
 
-:global([data-theme="dark"] .token-import-modal .arco-modal) {
+:global([data-theme="dark"] .token-import-modal) {
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
 }
 
 [data-theme="dark"] .token-card {

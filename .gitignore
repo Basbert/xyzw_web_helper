@@ -38,6 +38,7 @@ Thumbs.db
 logs
 *.log
 *.md
+!docs/validation-checklist.md
 # Runtime data
 pids
 *.pid

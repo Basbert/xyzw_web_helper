@@ -20,7 +20,7 @@ async function createNavigationGuard(hasTokens = true) {
       "@/stores/tokenStore": {
         useTokenStore: () => ({ hasTokens, selectedToken: null }),
       },
-      "@/utils/clubBattleUtils": { isNowInLegionWarTime: () => true },
+      "@/utils/legionWarTime": { isNowInLegionWarTime: () => true },
     },
     { document: { title: "" } },
   );

@@ -3,13 +3,20 @@ import { isInCurrentWeek, sleep } from "@/utils/base";
 import { gameLogger } from "@/utils/logger";
 import { findAnswer } from "@/utils/studyQuestionsFromJSON";
 
+const isClientInactive = (client: XyzwSession["client"]) => {
+  if (!client) return true;
+  if (client.connected === false) return true;
+  const socket = (client as { socket?: { readyState?: number } }).socket;
+  return Boolean(socket && socket.readyState !== 1);
+};
+
 export const StudyPlugin = ({ onSome, $emit }: EVM) => {
   onSome(
     ["study", "studyresp", "study_startgame", "study_startgameresp"],
     async (data: XyzwSession) => {
       gameLogger.verbose(`收到学习答题事件: ${data.tokenId}`);
       const { body, gameData, client } = data;
-      if (!body) {
+      if (!body || isClientInactive(client)) {
         return;
       }
 
@@ -28,17 +35,28 @@ export const StudyPlugin = ({ onSome, $emit }: EVM) => {
         return;
       }
       gameLogger.info(`找到 ${questionList.length} 道题目，学习ID: ${studyId}`);
-      // 更新答题状态
+      const runTimestamp = Date.now();
+      // 更新当前账号的答题状态
       gameData.value.studyStatus = {
+        ...gameData.value.studyStatus,
         isAnswering: true,
         questionCount: questionList.length,
         answeredCount: 0,
         status: "answering",
-        timestamp: Date.now(),
+        timestamp: runTimestamp,
       };
+      const isRunActive = () =>
+        !isClientInactive(client) &&
+        gameData.value.studyStatus?.timestamp === runTimestamp;
       try {
         // 遍历题目并回答
         for (let i = 0; i < questionList.length; i++) {
+          if (!isRunActive()) {
+            gameLogger.warn(
+              `答题连接已断开或会话已切换，停止作答: ${data.tokenId}`,
+            );
+            return;
+          }
           const question = questionList[i];
           const questionText = question.question;
           const questionId = question.id;
@@ -49,6 +67,7 @@ export const StudyPlugin = ({ onSome, $emit }: EVM) => {
 
           // 查找答案（异步）
           let answer = await findAnswer(questionText);
+          if (!isRunActive()) return;
 
           if (answer === null) {
             answer = 1;
@@ -70,7 +89,9 @@ export const StudyPlugin = ({ onSome, $emit }: EVM) => {
           }
 
           // 更新已回答题目数量
-          gameData.value.studyStatus.answeredCount = i + 1;
+          if (gameData.value.studyStatus?.timestamp === runTimestamp) {
+            gameData.value.studyStatus.answeredCount = i + 1;
+          }
 
           // 添加短暂延迟，避免请求过快
           if (i < questionList.length - 1) {
@@ -79,7 +100,8 @@ export const StudyPlugin = ({ onSome, $emit }: EVM) => {
         }
         // 延迟1500ms后领取奖励
         await sleep(1500);
-        $emit.emit("I-study-week-forward", data);
+        if (!isRunActive()) return;
+        $emit.emit("I-study-week-forward", { ...data, runTimestamp });
       } catch (error) {
         gameLogger.error("处理学习答题响应失败:", error);
       }
@@ -106,46 +128,71 @@ export const StudyPlugin = ({ onSome, $emit }: EVM) => {
     );
   });
   //
-  onSome(["I-study-week-forward"], async (data: XyzwSession) => {
-    gameLogger.info("开始领取答题奖励");
-    const { gameData, client } = data;
-    // 更新状态为正在领取奖励
-    gameData.value.studyStatus.status = "claiming_rewards";
-    // 领取所有等级的奖励 (1-10)
-    for (let rewardId = 1; rewardId <= 10; rewardId++) {
-      try {
-        client?.send("study_claimreward", {
-          rewardId,
-        });
-        await new Promise((resolve) => setTimeout(resolve, 200));
-        gameLogger.verbose(`已发送奖励领取请求: rewardId=${rewardId}`);
-      } catch (error) {
-        gameLogger.error(`发送奖励领取请求失败 (rewardId=${rewardId}):`, error);
+  onSome(
+    ["I-study-week-forward"],
+    async (data: XyzwSession & { runTimestamp?: number }) => {
+      const { gameData, client } = data;
+      if (isClientInactive(client)) return;
+      const runTimestamp =
+        data.runTimestamp ?? gameData.value.studyStatus?.timestamp ?? null;
+      const isRunActive = () =>
+        !isClientInactive(client) &&
+        (runTimestamp === null ||
+          gameData.value.studyStatus?.timestamp === runTimestamp);
+
+      gameLogger.info("开始领取答题奖励");
+      // 更新状态为正在领取奖励
+      gameData.value.studyStatus.status = "claiming_rewards";
+      // 领取所有等级的奖励 (1-10)
+      for (let rewardId = 1; rewardId <= 10; rewardId++) {
+        if (!isRunActive()) {
+          gameLogger.warn(`答题领奖中断: ${data.tokenId}`);
+          return;
+        }
+        try {
+          client?.send("study_claimreward", {
+            rewardId,
+          });
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          gameLogger.verbose(`已发送奖励领取请求: rewardId=${rewardId}`);
+        } catch (error) {
+          gameLogger.error(
+            `发送奖励领取请求失败 (rewardId=${rewardId}):`,
+            error,
+          );
+        }
       }
-    }
 
-    gameLogger.info("一键答题完成！已尝试领取所有奖励");
+      if (!isRunActive()) return;
+      gameLogger.info("一键答题完成！已尝试领取所有奖励");
 
-    // 更新状态为完成
-    gameData.value.studyStatus.status = "completed";
+      // 更新状态为完成
+      gameData.value.studyStatus.status = "completed";
 
-    // 3秒后重置状态
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    gameData.value.studyStatus = {
-      isAnswering: false,
-      questionCount: 0,
-      answeredCount: 0,
-      status: "",
-      timestamp: null,
-    };
+      // 1秒后重置状态
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      if (
+        runTimestamp !== null &&
+        gameData.value.studyStatus?.timestamp !== runTimestamp
+      ) {
+        return;
+      }
+      gameData.value.studyStatus = {
+        isAnswering: false,
+        questionCount: 0,
+        answeredCount: 0,
+        status: "",
+        timestamp: null,
+      };
 
-    // 1秒后更新游戏数据
-    try {
-      // client?.send('role_getroleinfo', {})
-      client?.debounceSend("role_getroleinfo", {});
-      gameLogger.debug("已请求更新角色信息");
-    } catch (error) {
-      gameLogger.error("请求角色信息更新失败:", error);
-    }
-  });
+      // 更新游戏数据
+      try {
+        // client?.send('role_getroleinfo', {})
+        client?.debounceSend("role_getroleinfo", {});
+        gameLogger.debug("已请求更新角色信息");
+      } catch (error) {
+        gameLogger.error("请求角色信息更新失败:", error);
+      }
+    },
+  );
 };

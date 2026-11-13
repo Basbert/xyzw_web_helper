@@ -254,7 +254,6 @@ import html2canvas from "html2canvas";
 import { useMessage } from "naive-ui";
 import { storeToRefs } from "pinia";
 import { computed, nextTick, onMounted, onUnmounted, ref } from "vue";
-import * as XLSX from "xlsx";
 import { useLegionWarStore } from "@/stores/legionWarStore";
 import { useTokenStore } from "@/stores/tokenStore";
 import { isLegionWarAccessible } from "@/utils/clubBattleUtils";
@@ -283,7 +282,7 @@ const {
 const viewMode = ref("legion"); // legion | individual
 const exporting = ref(false);
 const tableMaxHeight = ref(600);
-const exportExcel = () => {
+const exportExcel = async () => {
   if (!validData.value) {
     message.warning("无数据可导出");
     return;
@@ -340,6 +339,7 @@ const exportExcel = () => {
     return;
   }
 
+  const XLSX = await import("xlsx");
   const ws = XLSX.utils.json_to_sheet(dataToExport);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "Sheet1");

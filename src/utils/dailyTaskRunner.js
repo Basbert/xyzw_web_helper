@@ -96,10 +96,29 @@ export class DailyTaskRunner {
    * @returns {Promise<*>} Server response.
    */
   async sendRequest(tokenId, request) {
-    if (!this.restoringFormation) this.throwIfInterrupted(tokenId);
+    if (this.restoringFormation) this.assertRunConnection(tokenId);
+    else this.throwIfInterrupted(tokenId);
     const response = await request();
-    if (!this.restoringFormation) this.throwIfInterrupted(tokenId);
+    if (this.restoringFormation) this.assertRunConnection(tokenId);
+    else this.throwIfInterrupted(tokenId);
     return response;
+  }
+
+  getRunConnection(tokenId) {
+    return (
+      this.tokenStore.getWebSocketClient?.(tokenId) ??
+      this.tokenStore.wsConnections?.[tokenId]?.client ??
+      null
+    );
+  }
+
+  assertRunConnection(tokenId) {
+    if (
+      !this.initialConnection ||
+      this.getRunConnection(tokenId) !== this.initialConnection ||
+      this.tokenStore.getWebSocketStatus?.(tokenId) !== "connected"
+    )
+      throw new Error("原连接已变化，未恢复阵容，请在游戏中检查");
   }
 
   async executeGameCommand(
@@ -309,6 +328,7 @@ export class DailyTaskRunner {
 
   async runTasks(tokenId, callbacks = {}, customSettings = null) {
     this.callbacks = callbacks;
+    this.initialConnection = this.getRunConnection(tokenId);
     this.taskDay = undefined;
     this.activeCondition = undefined;
     this.originalFormation = undefined;
@@ -1077,14 +1097,10 @@ export class DailyTaskRunner {
         }
       }
     } finally {
-      if (
-        this.formationChanged &&
-        this.originalFormation !== undefined &&
-        (!this.tokenStore.getWebSocketStatus ||
-          this.tokenStore.getWebSocketStatus(tokenId) === "connected")
-      ) {
+      if (this.formationChanged && this.originalFormation !== undefined) {
         this.restoringFormation = true;
         try {
+          this.assertRunConnection(tokenId);
           await this.switchToFormationIfNeeded(
             tokenId,
             this.originalFormation,

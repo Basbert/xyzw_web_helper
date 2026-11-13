@@ -3,7 +3,9 @@
  * 用于一键答题功能，从公共目录读取题目数据
  */
 
-const queryPromise = (async () => {
+let queryPromise = null;
+
+async function fetchQuestionsData() {
   // Try loading from the app base URL first (supports Vite `base` config / GitHub Pages subpaths),
   // then fall back to common locations.
   const base =
@@ -36,7 +38,7 @@ const queryPromise = (async () => {
           console.warn(
             `studyQuestionsFromJSON: ${url} returned non-JSON response (length ${text.length})`,
           );
-        } catch (e) {
+        } catch {
           // ignore
         }
         continue;
@@ -54,13 +56,26 @@ const queryPromise = (async () => {
 
   console.error("❌ 加载答题数据失败: 无法找到 answer.json（尝试了多个路径）");
   return [];
-})();
+}
 
 /**
- * 异步加载答题数据
+ * 异步加载答题数据（按需懒加载并缓存）
  * @returns {Promise<Array>} 题目数据数组
  */
 export async function loadQuestionsData() {
+  if (!queryPromise) {
+    queryPromise = fetchQuestionsData()
+      .then((data) => {
+        if (!Array.isArray(data) || data.length === 0) {
+          queryPromise = null;
+        }
+        return Array.isArray(data) ? data : [];
+      })
+      .catch((error) => {
+        queryPromise = null;
+        throw error;
+      });
+  }
   return queryPromise;
 }
 
@@ -145,5 +160,5 @@ export async function preloadQuestions() {
  * 清除缓存，强制重新加载（用于调试）
  */
 export function clearCache() {
-  // 降噪
+  queryPromise = null;
 }

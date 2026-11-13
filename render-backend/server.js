@@ -8,7 +8,14 @@ import dotenv from "dotenv";
 import express from "express";
 import cron from "node-cron";
 import { createApiKeyMiddleware } from "./lib/apiKeyAuth.js";
-import { GameClient } from "./lib/gameClient.js";
+import { GameClient, validateWebSocketUrl } from "./lib/gameClient.js";
+import {
+  createCorsOptions,
+  ExecutionMutex,
+  isValidRecordId,
+  sanitizeTaskPayload,
+  sanitizeTokenInsert,
+} from "./lib/security.js";
 
 dotenv.config();
 
@@ -18,8 +25,10 @@ function sleep(ms) {
 }
 
 const app = express();
-app.use(cors());
-app.use(express.json());
+app.use(cors(createCorsOptions(() => process.env.ALLOWED_ORIGINS)));
+app.use(express.json({ limit: "64kb" }));
+
+const executionMutex = new ExecutionMutex();
 
 // ==================== Supabase 客户端 ====================
 const supabase = createClient(
@@ -168,148 +177,207 @@ async function loadTokens() {
 }
 
 // ==================== 任务执行引擎 ====================
-async function executeTask(task) {
-  addLog("INFO", "task", `开始执行任务: ${task.name}`, { taskId: task.id });
+async function runTaskForToken(task, token, allCommands, taskKeys) {
+  let tokenData;
+  try {
+    tokenData =
+      typeof token.token === "string" && token.token.startsWith("{")
+        ? JSON.parse(token.token)
+        : {
+            roleToken: token.token,
+            roleId: token.roleId,
+            sessId: token.sessId,
+            connId: token.connId,
+            isRestore: token.isRestore,
+          };
+  } catch (err) {
+    addLog("ERROR", "task", `Token解析失败: ${token.name}`, {
+      error: err.message,
+    });
+    return;
+  }
 
-  // 兼容旧字段 token_ids 和新字段 selected_tokens
-  let tokenIds = task.selected_tokens || task.token_ids;
-  if (typeof tokenIds === "string") {
+  tokenData.name = token.name;
+
+  let client;
+  try {
+    client = new GameClient(
+      tokenData,
+      token.ws_url,
+      process.env.ALLOWED_WS_HOSTS,
+    );
+  } catch (err) {
+    addLog("ERROR", "task", `WebSocket 地址无效 (${token.name})`, {
+      taskId: task.id,
+      error: err.message,
+    });
+    await logToDb(
+      task.id,
+      token.name,
+      taskKeys.join(","),
+      "error",
+      err.message,
+    );
+    return;
+  }
+
+  try {
+    await client.connect(15000);
     try {
-      tokenIds = JSON.parse(tokenIds);
-    } catch {
-      tokenIds = [];
-    }
-  }
-  if (!Array.isArray(tokenIds) || tokenIds.length === 0) {
-    addLog("WARN", "task", "没有选中的token，跳过", { taskId: task.id });
-    return;
-  }
-
-  // 支持多任务：selected_tasks 是数组，每个元素是 TASK_DEFINITIONS 的 key
-  let taskKeys = task.selected_tasks;
-  if (typeof taskKeys === "string") {
-    try {
-      taskKeys = JSON.parse(taskKeys);
-    } catch {
-      taskKeys = [];
-    }
-  }
-  // 兼容旧字段 task_type（单个任务）
-  if ((!Array.isArray(taskKeys) || taskKeys.length === 0) && task.task_type) {
-    taskKeys = [task.task_type];
-  }
-  if (!Array.isArray(taskKeys) || taskKeys.length === 0) {
-    addLog("ERROR", "task", "没有选择任何任务类型", { taskId: task.id });
-    return;
-  }
-
-  // 收集所有需要执行的命令（去重）
-  const allCommands = [];
-  const seenCmds = new Set();
-  for (const key of taskKeys) {
-    const taskDef = TASK_DEFINITIONS[key];
-    if (!taskDef) {
-      addLog("WARN", "task", `未知任务类型: ${key}，跳过`, { taskId: task.id });
-      continue;
-    }
-    for (const cmd of taskDef.commands) {
-      const cmdKey = cmd.cmd + JSON.stringify(cmd.params);
-      if (!seenCmds.has(cmdKey)) {
-        seenCmds.add(cmdKey);
-        allCommands.push(cmd);
-      }
-    }
-  }
-  if (allCommands.length === 0) {
-    addLog("ERROR", "task", "没有有效的命令可执行", { taskId: task.id });
-    return;
-  }
-
-  const allTokens = await loadTokens();
-  const targetTokens = allTokens.filter((t) => tokenIds.includes(t.id));
-  if (targetTokens.length === 0) {
-    addLog("WARN", "task", "没有找到匹配的tokens", { taskId: task.id });
-    return;
-  }
-
-  addLog("INFO", "task", `将执行于 ${targetTokens.length} 个角色`, {
-    taskId: task.id,
-  });
-
-  for (const token of targetTokens) {
-    let tokenData;
-    try {
-      tokenData =
-        typeof token.token === "string" && token.token.startsWith("{")
-          ? JSON.parse(token.token)
-          : {
-              roleToken: token.token,
-              roleId: token.roleId,
-              sessId: token.sessId,
-              connId: token.connId,
-              isRestore: token.isRestore,
-            };
-    } catch (err) {
-      addLog("ERROR", "task", `Token解析失败: ${token.name}`, {
-        error: err.message,
+      await client.sendWithPromise("role_getroleinfo", {}, 8000);
+      await sleep(500);
+    } catch (e) {
+      addLog("WARN", "task", `获取角色信息失败 (${token.name})`, {
+        error: e.message,
       });
-      continue;
     }
 
-    tokenData.name = token.name;
-    const client = new GameClient(tokenData, token.ws_url);
+    const cmdResults = await client.executeBatch(allCommands, 800);
 
-    try {
-      await client.connect(15000);
-      try {
-        await client.sendWithPromise("role_getroleinfo", {}, 8000);
-        await sleep(500);
-      } catch (e) {
-        addLog("WARN", "task", `获取角色信息失败 (${token.name})`, {
-          error: e.message,
-        });
-      }
-
-      const cmdResults = await client.executeBatch(allCommands, 800);
-
-      for (const r of cmdResults) {
-        const logLevel = r.success ? "INFO" : "ERROR";
-        addLog(
-          logLevel,
-          "task",
-          `[${token.name}] ${r.cmd}: ${r.success ? "OK" : r.error}`,
-          { taskId: task.id },
-        );
-        await logToDb(
-          task.id,
-          token.name,
-          r.cmd,
-          r.success ? "success" : "error",
-          r.success ? undefined : r.error,
-        );
-      }
-    } catch (err) {
-      addLog("ERROR", "task", `执行失败 (${token.name}): ${err.message}`, {
-        taskId: task.id,
-      });
+    for (const r of cmdResults) {
+      const logLevel = r.success ? "INFO" : "ERROR";
+      addLog(
+        logLevel,
+        "task",
+        `[${token.name}] ${r.cmd}: ${r.success ? "OK" : r.error}`,
+        { taskId: task.id },
+      );
       await logToDb(
         task.id,
         token.name,
-        taskKeys.join(","),
-        "error",
-        err.message,
+        r.cmd,
+        r.success ? "success" : "error",
+        r.success ? undefined : r.error,
       );
-    } finally {
-      client.disconnect();
     }
-    await sleep(2000);
+  } catch (err) {
+    addLog("ERROR", "task", `执行失败 (${token.name}): ${err.message}`, {
+      taskId: task.id,
+    });
+    await logToDb(
+      task.id,
+      token.name,
+      taskKeys.join(","),
+      "error",
+      err.message,
+    );
+  } finally {
+    client.disconnect();
+  }
+  await sleep(2000);
+}
+
+async function executeTask(task) {
+  return executionMutex.runTaskExclusive(task.id, async () => {
+    addLog("INFO", "task", `开始执行任务: ${task.name}`, { taskId: task.id });
+
+    // 兼容旧字段 token_ids 和新字段 selected_tokens
+    let tokenIds = task.selected_tokens || task.token_ids;
+    if (typeof tokenIds === "string") {
+      try {
+        tokenIds = JSON.parse(tokenIds);
+      } catch {
+        tokenIds = [];
+      }
+    }
+    if (!Array.isArray(tokenIds) || tokenIds.length === 0) {
+      addLog("WARN", "task", "没有选中的token，跳过", { taskId: task.id });
+      return;
+    }
+
+    // 支持多任务：selected_tasks 是数组，每个元素是 TASK_DEFINITIONS 的 key
+    let taskKeys = task.selected_tasks;
+    if (typeof taskKeys === "string") {
+      try {
+        taskKeys = JSON.parse(taskKeys);
+      } catch {
+        taskKeys = [];
+      }
+    }
+    // 兼容旧字段 task_type（单个任务）
+    if ((!Array.isArray(taskKeys) || taskKeys.length === 0) && task.task_type) {
+      taskKeys = [task.task_type];
+    }
+    if (!Array.isArray(taskKeys) || taskKeys.length === 0) {
+      addLog("ERROR", "task", "没有选择任何任务类型", { taskId: task.id });
+      return;
+    }
+
+    // 收集所有需要执行的命令（去重）
+    const allCommands = [];
+    const seenCmds = new Set();
+    for (const key of taskKeys) {
+      const taskDef = TASK_DEFINITIONS[key];
+      if (!taskDef) {
+        addLog("WARN", "task", `未知任务类型: ${key}，跳过`, {
+          taskId: task.id,
+        });
+        continue;
+      }
+      for (const cmd of taskDef.commands) {
+        const cmdKey = cmd.cmd + JSON.stringify(cmd.params);
+        if (!seenCmds.has(cmdKey)) {
+          seenCmds.add(cmdKey);
+          allCommands.push(cmd);
+        }
+      }
+    }
+    if (allCommands.length === 0) {
+      addLog("ERROR", "task", "没有有效的命令可执行", { taskId: task.id });
+      return;
+    }
+
+    const allTokens = await loadTokens();
+    const targetTokens = allTokens.filter((t) => tokenIds.includes(t.id));
+    if (targetTokens.length === 0) {
+      addLog("WARN", "task", "没有找到匹配的tokens", { taskId: task.id });
+      return;
+    }
+
+    addLog("INFO", "task", `将执行于 ${targetTokens.length} 个角色`, {
+      taskId: task.id,
+    });
+
+    for (const token of targetTokens) {
+      await executionMutex.withTokenLock(token.id, () =>
+        runTaskForToken(task, token, allCommands, taskKeys),
+      );
+    }
+
+    await supabase
+      .from("cron_tasks")
+      .update({ last_run_at: new Date().toISOString() })
+      .eq("id", task.id);
+    addLog("INFO", "task", `任务完成: ${task.name}`, { taskId: task.id });
+  });
+}
+
+async function executeLatestTaskById(taskId, { requireEnabled = true } = {}) {
+  if (executionMutex.isTaskRunning(taskId)) {
+    addLog("WARN", "task", "任务仍在执行中，跳过重复触发", { taskId });
+    return { skipped: true, reason: "already_running" };
   }
 
-  await supabase
+  const { data: latestTask, error } = await supabase
     .from("cron_tasks")
-    .update({ last_run_at: new Date().toISOString() })
-    .eq("id", task.id);
-  addLog("INFO", "task", `任务完成: ${task.name}`, { taskId: task.id });
+    .select("*")
+    .eq("id", taskId)
+    .single();
+  if (error || !latestTask) {
+    addLog("WARN", "task", "未找到待执行任务，跳过", {
+      taskId,
+      error: error?.message,
+    });
+    return { skipped: true, reason: "not_found" };
+  }
+  if (requireEnabled && !latestTask.enabled) {
+    addLog("INFO", "task", `任务已禁用，跳过执行: ${latestTask.name}`, {
+      taskId,
+    });
+    return { skipped: true, reason: "disabled" };
+  }
+
+  return executeTask(latestTask);
 }
 
 async function logToDb(taskId, tokenName, taskType, status, message) {
@@ -357,11 +425,14 @@ function registerCron(task) {
     const job = cron.schedule(
       cronExpr,
       () => {
-        executeTask(task).catch((err) => {
-          addLog("ERROR", "cron", `任务执行异常: ${task.name}`, {
-            error: err.message,
-          });
-        });
+        executeLatestTaskById(task.id, { requireEnabled: true }).catch(
+          (err) => {
+            addLog("ERROR", "cron", `任务执行异常: ${task.name}`, {
+              taskId: task.id,
+              error: err.message,
+            });
+          },
+        );
       },
       { timezone: "Asia/Shanghai" },
     );
@@ -437,25 +508,45 @@ app.get("/api/tokens", async (req, res) => {
     .from("tokens")
     .select("*")
     .order("created_at");
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) {
+    addLog("ERROR", "api", "读取 tokens 失败", { error: error.message });
+    return res.status(500).json({ error: "读取 tokens 失败" });
+  }
   res.json(data);
 });
 
 app.post("/api/tokens", async (req, res) => {
+  let payload;
+  try {
+    payload = sanitizeTokenInsert(req.body, (url) =>
+      validateWebSocketUrl(url, process.env.ALLOWED_WS_HOSTS),
+    );
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
   const { data, error } = await supabase
     .from("tokens")
-    .insert(req.body)
+    .insert(payload)
     .select();
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) {
+    addLog("ERROR", "api", "创建 token 失败", { error: error.message });
+    return res.status(400).json({ error: "保存 token 失败" });
+  }
   res.json(data);
 });
 
 app.delete("/api/tokens/:id", async (req, res) => {
+  if (!isValidRecordId(req.params.id)) {
+    return res.status(400).json({ error: "无效的记录 ID" });
+  }
   const { error } = await supabase
     .from("tokens")
     .delete()
     .eq("id", req.params.id);
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) {
+    addLog("ERROR", "api", "删除 token 失败", { error: error.message });
+    return res.status(400).json({ error: "删除 token 失败" });
+  }
   res.json({ ok: true });
 });
 
@@ -464,50 +555,94 @@ app.get("/api/tasks", async (req, res) => {
     .from("cron_tasks")
     .select("*")
     .order("created_at");
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) {
+    addLog("ERROR", "api", "读取定时任务失败", { error: error.message });
+    return res.status(500).json({ error: "读取定时任务失败" });
+  }
   res.json(data);
 });
 
 app.post("/api/tasks", async (req, res) => {
+  let payload;
+  try {
+    payload = sanitizeTaskPayload(req.body, {
+      partial: false,
+      validTaskKeys: Object.keys(TASK_DEFINITIONS),
+      validateCron: (expr) => cron.validate(expr),
+    });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
   const { data, error } = await supabase
     .from("cron_tasks")
-    .insert(req.body)
+    .insert(payload)
     .select();
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) {
+    addLog("ERROR", "api", "创建定时任务失败", { error: error.message });
+    return res.status(400).json({ error: "创建定时任务失败" });
+  }
   if (data && data[0]) registerCron(data[0]);
   res.json(data);
 });
 
 app.patch("/api/tasks/:id", async (req, res) => {
+  if (!isValidRecordId(req.params.id)) {
+    return res.status(400).json({ error: "无效的记录 ID" });
+  }
+  let payload;
+  try {
+    payload = sanitizeTaskPayload(req.body, {
+      partial: true,
+      validTaskKeys: Object.keys(TASK_DEFINITIONS),
+      validateCron: (expr) => cron.validate(expr),
+    });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
   const { data, error } = await supabase
     .from("cron_tasks")
-    .update(req.body)
+    .update(payload)
     .eq("id", req.params.id)
     .select();
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) {
+    addLog("ERROR", "api", "更新定时任务失败", { error: error.message });
+    return res.status(400).json({ error: "更新定时任务失败" });
+  }
   await registerAllCrons();
   res.json(data);
 });
 
 app.delete("/api/tasks/:id", async (req, res) => {
+  if (!isValidRecordId(req.params.id)) {
+    return res.status(400).json({ error: "无效的记录 ID" });
+  }
   const { error } = await supabase
     .from("cron_tasks")
     .delete()
     .eq("id", req.params.id);
-  if (error) return res.status(400).json({ error: error.message });
+  if (error) {
+    addLog("ERROR", "api", "删除定时任务失败", { error: error.message });
+    return res.status(400).json({ error: "删除定时任务失败" });
+  }
   await registerAllCrons();
   res.json({ ok: true });
 });
 
 app.post("/api/tasks/:id/run", async (req, res) => {
-  const { data: task } = await supabase
+  if (!isValidRecordId(req.params.id)) {
+    return res.status(400).json({ error: "无效的记录 ID" });
+  }
+  if (executionMutex.isTaskRunning(req.params.id)) {
+    return res.status(409).json({ error: "任务正在执行中" });
+  }
+  const { data: task, error } = await supabase
     .from("cron_tasks")
     .select("*")
     .eq("id", req.params.id)
     .single();
-  if (!task) return res.status(404).json({ error: "任务不存在" });
-  executeTask(task).catch((err) =>
-    addLog("ERROR", "api", `手动执行失败: ${err.message}`),
+  if (error || !task) return res.status(404).json({ error: "任务不存在" });
+  executeLatestTaskById(task.id, { requireEnabled: false }).catch((err) =>
+    addLog("ERROR", "api", `手动执行失败: ${err.message}`, { taskId: task.id }),
   );
   res.json({ status: "running", task: task.name });
 });
@@ -524,7 +659,10 @@ app.get("/api/logs/db", async (req, res) => {
     .select("*")
     .order("created_at", { ascending: false })
     .limit(limit);
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) {
+    addLog("ERROR", "api", "读取任务日志失败", { error: error.message });
+    return res.status(500).json({ error: "读取任务日志失败" });
+  }
   res.json(data);
 });
 
@@ -535,6 +673,20 @@ app.get("/api/task-definitions", (req, res) => {
     commands: val.commands.map((c) => c.cmd),
   }));
   res.json(list);
+});
+
+app.use((err, _req, res, _next) => {
+  if (err?.message === "Origin not allowed") {
+    return res.status(403).json({ error: "Origin not allowed" });
+  }
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({ error: "请求体过大" });
+  }
+  if (err instanceof SyntaxError) {
+    return res.status(400).json({ error: "无效的 JSON 请求体" });
+  }
+  addLog("ERROR", "server", "未处理请求异常", { error: err?.message });
+  return res.status(500).json({ error: "服务器内部错误" });
 });
 
 const PORT = process.env.PORT || 3000;

@@ -39,6 +39,49 @@ const parseSettings = (value) => {
   }
 };
 
+/** Refuse damaged or ambiguous records before an execution can spend resources. */
+export function readDailyTaskSettingsForExecution(
+  token,
+  tokens = [],
+  storage = globalThis.localStorage,
+) {
+  if (!token?.id) throw new Error("无法识别角色，请检查每日任务设置");
+  const inspect = (key) => {
+    if (!key) return null;
+    const raw = storage.getItem(key);
+    if (raw === null) return null;
+    const parsed = parseSettings(raw);
+    if (!parsed) throw new Error("每日任务设置记录损坏，请前往日常页核对设置");
+    for (const [name, fallback] of Object.entries(DAILY_TASK_DEFAULTS)) {
+      if (!Object.prototype.hasOwnProperty.call(parsed, name)) continue;
+      const value = parsed[name];
+      if (
+        (typeof fallback === "boolean" && typeof value !== "boolean") ||
+        (typeof fallback === "number" &&
+          (!Number.isSafeInteger(value) || value < 0))
+      )
+        throw new Error("每日任务设置值无效，请前往日常页核对设置");
+    }
+    return parsed;
+  };
+  const stableKey = roleKey(token);
+  const stable = inspect(stableKey);
+  const current = inspect(tokenKey(token));
+  if (!stable && !current && stableKey) {
+    const candidates = tokens
+      .filter(
+        (other) =>
+          other.id !== token.id &&
+          roleIdentity(other.roleId) === roleIdentity(token.roleId),
+      )
+      .map((other) => inspect(tokenKey(other)))
+      .filter(Boolean);
+    if (new Set(candidates.map((value) => JSON.stringify(value))).size > 1)
+      throw new Error("每日任务设置存在冲突，请前往日常页核对设置");
+  }
+  return readDailyTaskSettings(token, tokens, storage);
+}
+
 /** Read a role's settings, migrating the previous token-specific format. */
 export function readDailyTaskSettings(
   token,

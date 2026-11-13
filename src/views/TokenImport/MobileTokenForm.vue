@@ -82,8 +82,8 @@
       @download="handleDownload"
     />
 
-    <a-list>
-      <a-list-item v-for="(role, roleIndex) in roleList" :key="role.id">
+    <n-list bordered>
+      <n-list-item v-for="(role, roleIndex) in roleList" :key="role.id">
         <div class="role-row">
           <div>
             <strong>角色名称:</strong> {{ role.name }}<br />
@@ -94,8 +94,8 @@
             >删除</NButton
           >
         </div>
-      </a-list-item>
-    </a-list>
+      </n-list-item>
+    </n-list>
 
     <div class="form-actions">
       <NButton
@@ -151,6 +151,7 @@ import {
 import { g_utils } from "@/utils/bonProtocol";
 import { encodeHortorLoginPayload } from "@/utils/hortorMobileLogin";
 import { getServerList, getTokenId, transformToken } from "@/utils/token";
+import { encodeCombUserBin } from "@/utils/xyzwRuntime";
 
 const emit = defineEmits(["cancel", "ok"]);
 const message = useMessage();
@@ -321,29 +322,6 @@ const sendVerificationCode = async () => {
   }
 };
 
-const createGameLoginBuffer = (combUser: unknown) => {
-  const encryptionModule = (window as any).__require?.("13");
-  if (!encryptionModule?.encMsg || !encryptionModule?.lz4XorEncode) {
-    throw new Error("游戏加密模块未加载，不能生成登录凭据");
-  }
-  return new Uint8Array(
-    encryptionModule.encMsg(
-      {
-        platform: "hortor",
-        platformExt: "mix",
-        info: combUser,
-        serverId: null,
-        scene: 0,
-        referrerInfo: "",
-      },
-      {
-        decrypt: encryptionModule.lz4XorDecode,
-        encrypt: encryptionModule.lz4XorEncode,
-      },
-    ),
-  );
-};
-
 const loginWithVerificationCode = async () => {
   if (!requirePhone()) return;
   if (!/^\d{4,8}$/.test(mobileForm.code.trim())) {
@@ -400,7 +378,7 @@ const loginWithVerificationCode = async () => {
     const data = ensureSuccess(await response.json(), "登录失败");
     if (!data?.combUser) throw new Error("登录响应缺少用户凭据");
     currentCombUser.value = data.combUser;
-    await loadRoles(createGameLoginBuffer(data.combUser));
+    await loadRoles(new Uint8Array(await encodeCombUserBin(data.combUser)));
     message.success("登录成功，请选择需要添加的角色");
   } catch (error: any) {
     message.error(`登录失败：${error.message || error}`);

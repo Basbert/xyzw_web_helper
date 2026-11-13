@@ -3,13 +3,13 @@
     <div class="toolbar">
       <div class="left">
         <span class="title">查询日期:</span>
-        <a-date-picker
-          v-model:value="queryDate"
-          @change="fetchBattleRecordsByDate"
-          value-format="YYYY/MM/DD"
-          :disabled-date="disabledDate"
-          :default-value="queryDate"
-          format="YYYY/MM/DD"
+        <n-date-picker
+          v-model:formatted-value="queryDate"
+          type="date"
+          value-format="yyyy/MM/dd"
+          format="yyyy/MM/dd"
+          :is-date-disabled="disabledDate"
+          @update:formatted-value="fetchBattleRecordsByDate"
         />
       </div>
       <div class="right">
@@ -27,7 +27,7 @@
         <NButton
           size="small"
           :disabled="loading"
-          @click="fetchBattleRecordsByDate"
+          @click="fetchBattleInfo"
           class="refresh-btn"
         >
           <template #icon>
@@ -1268,7 +1268,7 @@ const columns = [
 
 //日期选择时调用查询战绩方法
 const fetchBattleRecordsByDate = (val) => {
-  if (!isSameGameValue(undefined, val)) {
+  if (typeof val === "string" && val) {
     queryDate.value = val;
   } else {
     queryDate.value = getLastSunday();

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
+import { reactive, watch } from "vue";
 
 const component = await readFile(
   new URL("../src/components/GameStatus.vue", import.meta.url),
@@ -33,6 +34,7 @@ function fixture(result) {
     combinedProgress: { value: "" },
     combinedRunningName: { value: "" },
     combinedResults: { value: {} },
+    combinedGeneration: 0,
     message: new Proxy(
       {},
       { get: (_, type) => (text) => messages.push({ type, text }) },
@@ -110,4 +112,68 @@ test("the running label keeps the initiating account after switching", async () 
   assert.equal(f.context.combinedRunningName.value, "");
   assert.equal(f.context.combinedResults.value.a.type, "success");
   assert.equal(f.context.combinedResults.value.b, undefined);
+});
+
+test("the runner observes account/connection or page invalidation after it starts", async () => {
+  const f = fixture(null);
+  let finish;
+  let shouldStop;
+  f.context.runBottleAndHangUp = (options) => {
+    shouldStop = options.shouldStop;
+    return new Promise((resolve) => {
+      finish = resolve;
+    });
+  };
+  const operation = f.run();
+  assert.equal(typeof shouldStop, "function");
+  assert.equal(shouldStop(), false);
+  f.context.combinedGeneration++;
+  assert.equal(shouldStop(), true);
+  finish({ sent: 0, remaining: 0, legacy: { status: "acknowledged" } });
+  await operation;
+});
+
+test("account A→B→A, disconnect and page unmount each invalidate the run immediately", () => {
+  const generationWatch = source.statements.find(
+    (statement) =>
+      ts.isExpressionStatement(statement) &&
+      statement.getText(source).startsWith("watch(") &&
+      statement.getText(source).includes("combinedGeneration++"),
+  );
+  const unmountHook = source.statements.find(
+    (statement) =>
+      ts.isExpressionStatement(statement) &&
+      statement.getText(source).startsWith("onBeforeUnmount(") &&
+      statement.getText(source).includes("combinedGeneration++"),
+  );
+  assert.ok(generationWatch && unmountHook);
+  const tokenStore = reactive({
+    selectedToken: { id: "a" },
+    wsConnections: { a: { client: {} }, b: { client: {} } },
+    status: "connected",
+    getWebSocketStatus() {
+      return this.status;
+    },
+  });
+  let unmount;
+  const context = {
+    tokenStore,
+    watch,
+    onBeforeUnmount: (fn) => {
+      unmount = fn;
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(
+    `let combinedGeneration = 0; ${generationWatch.getText(source)} ${unmountHook.getText(source)} globalThis.getGeneration = () => combinedGeneration;`,
+    context,
+  );
+  const initial = context.getGeneration();
+  tokenStore.selectedToken = { id: "b" };
+  tokenStore.selectedToken = { id: "a" };
+  assert.equal(context.getGeneration(), initial + 2);
+  tokenStore.status = "disconnected";
+  assert.equal(context.getGeneration(), initial + 3);
+  unmount();
+  assert.equal(context.getGeneration(), initial + 4);
 });

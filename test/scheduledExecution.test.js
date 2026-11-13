@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
+import { runScheduledOccurrence } from "../src/utils/batch/scheduledClock.js";
 import {
   createScheduledRunQueue,
   summarizeScheduledRun,
@@ -41,6 +42,36 @@ const declarations = source.statements
   .map((statement) => statement.getText(source))
   .join("\n");
 
+test("已经入队但等待超过半小时的计划不会开始执行", async () => {
+  const f = fixture();
+  const task = {
+    id: "expired",
+    name: "expired",
+    enabled: true,
+    selectedTokens: ["A"],
+    selectedTasks: ["any"],
+  };
+  f.context.runScheduledOccurrence = runScheduledOccurrence;
+  f.context.schedulerPageActive = true;
+  f.context.navigator = {
+    locks: { request: (name, callback) => callback({ name }) },
+  };
+  f.context.localStorage.getItem = (key) =>
+    key === "scheduledTasks" ? JSON.stringify([task]) : null;
+  f.context.message.warning = () => {};
+  let called = false;
+  f.handlers.any = () => {
+    called = true;
+  };
+  const result = await f.enqueueScheduledTask(task, Date.now() - 31 * 60_000);
+  assert.equal(result.status, "stopped");
+  assert.equal(result.reason, "expired");
+  assert.equal(called, false);
+  assert.ok(
+    f.logs.some((entry) => entry.message.includes("排队已超过 30 分钟")),
+  );
+});
+
 function fixture() {
   const logs = [];
   const calls = [];
@@ -51,6 +82,7 @@ function fixture() {
   const context = {
     createScheduledRunQueue,
     summarizeScheduledRun,
+    requireCurrentScheduledConfig: () => true,
     selectedTokens,
     activeScheduledRun,
     scheduledQueueSize: { value: 0 },

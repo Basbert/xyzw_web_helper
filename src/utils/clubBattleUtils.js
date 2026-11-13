@@ -1,176 +1,12 @@
 /**
- * 获取最近的周六日期
- * 如果今天是周六，返回今天的日期；否则返回上周六的日期
- * @returns {string} 格式化的日期字符串 YYYY/MM/DD
- */
-import * as XLSX from "xlsx";
-/**
  * 俱乐部战斗工具函数
  */
 
-import { isSameGameValue } from "./gameValue.js";
-
-export function getLastSaturday() {
-  const today = new Date();
-  const dayOfWeek = today.getDay(); // 0=周日, 1=周一, ..., 6=周六
-  today.getDate(); // 当天日期
-  const year = today.getFullYear();
-  const month = today.getMonth();
-
-  let daysToSubtract = 0;
-  if (dayOfWeek === 6) {
-    // 今天是周六
-    daysToSubtract = 0;
-  } else if (dayOfWeek === 0) {
-    // 今天是周日，需要判断是否是本月的第四周周日
-    // 计算本月第四个周日的日期
-    const firstDay = new Date(year, month, 1);
-    const firstDayOfWeek = firstDay.getDay();
-
-    // 计算本月第一个周日的日期
-    const firstSunday = new Date(year, month, 1);
-    if (firstDayOfWeek === 0) {
-      // 本月第一天就是周日
-      firstSunday.setDate(1);
-    } else {
-      // 否则，第一个周日是7 - firstDayOfWeek天后
-      firstSunday.setDate(1 + (7 - firstDayOfWeek));
-    }
-
-    // 计算第四个周日的日期
-    const fourthSunday = new Date(firstSunday);
-    fourthSunday.setDate(firstSunday.getDate() + 21); // 21天 = 3周
-
-    // 判断今天是否是第四个周日
-    if (today.getDate() === fourthSunday.getDate()) {
-      // 今天是第四周周日，返回今天
-      daysToSubtract = 0;
-    } else {
-      // 不是第四周周日，返回昨天（周六）
-      daysToSubtract = 1;
-    }
-  } else {
-    // 周一到周五，计算距离上周六的天数
-    daysToSubtract = dayOfWeek + 1;
-  }
-
-  const targetDate = new Date(today);
-  targetDate.setDate(today.getDate() - daysToSubtract);
-
-  const targetYear = targetDate.getFullYear();
-  const targetMonth = String(targetDate.getMonth() + 1).padStart(2, "0");
-  const targetDay = String(targetDate.getDate()).padStart(2, "0");
-
-  return `${targetYear}/${targetMonth}/${targetDay}`;
-}
-
-/**
- * 判断当前时间是否是盐场时间
- */
-export function isNowInLegionWarTime() {
-  const today = new Date();
-  const dayOfWeek = today.getDay();
-  const date = today.getDate();
-  const hours = today.getHours();
-  const minutes = today.getMinutes();
-  //用分钟好计算
-  const minutesCount = hours * 60 + minutes;
-  //获取本月周日的数组
-  const getSundayOfMonths = (year, month) => {
-    const sundayArr = [];
-    for (let d = 0; d < 31; d++) {
-      const temp = new Date(year, month, d);
-      if (
-        isSameGameValue(temp.getMonth(), month) &&
-        isSameGameValue(temp.getDay(), 0)
-      ) {
-        sundayArr.push(d);
-      }
-    }
-    return sundayArr;
-  };
-
-  //当前时间是20.00~21.00,周日月赛则是20.00~21.30
-  //前提是周六或第四周周日 1200=20*60   1260=21*60
-  if (
-    isSameGameValue(dayOfWeek, 6) &&
-    minutesCount >= 1195 &&
-    minutesCount <= 1260
-  ) {
-    return true;
-  }
-  const sundayArr = getSundayOfMonths(today.getFullYear(), today.getMonth());
-  //取第四个周末的日期
-  if (
-    isSameGameValue(dayOfWeek, 0) &&
-    sundayArr.length >= 4 &&
-    isSameGameValue(date, sundayArr[3]) &&
-    minutesCount >= 1195 &&
-    minutesCount <= 1290
-  ) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * 判断当前是否允许使用盐场功能
- * 规则：
- * 1. 每月前四周周六
- * 2. 每月第四周周日
- * 3. 特殊修正：2026年3月1日
- */
-export function isLegionWarAccessible() {
-  const today = new Date();
-  const year = today.getFullYear();
-  const month = today.getMonth(); // 0-11
-  const date = today.getDate();
-  const dayOfWeek = today.getDay(); // 0-6, 0 is Sunday
-
-  const hours = today.getHours();
-  const minutes = today.getMinutes();
-  const minutesCount = hours * 60 + minutes;
-
-  // 辅助函数：检查时间是否在允许范围内
-  // 周六: 19:55 - 21:00 (1195 - 1260)
-  // 周日: 19:55 - 21:30 (1195 - 1290)
-  const isTimeAllowed = (isSunday) => {
-    const start = 1195; // 19:55
-    const end = isSunday ? 1290 : 1260; // 21:30 or 21:00
-    return minutesCount >= start && minutesCount <= end;
-  };
-  // 辅助函数：获取某个月的所有特定星期几的日期列表
-  const getDaysOfMonth = (y, m, targetDayOfWeek) => {
-    const days = [];
-    const d = new Date(y, m, 1);
-    while (d.getMonth() === m) {
-      if (d.getDay() === targetDayOfWeek) {
-        days.push(d.getDate());
-      }
-      d.setDate(d.getDate() + 1);
-    }
-    return days;
-  };
-
-  if (dayOfWeek === 6) {
-    // 周六
-    const saturdays = getDaysOfMonth(year, month, 6);
-    // 判断是否是前四个周六 (index 0, 1, 2, 3)
-    const index = saturdays.indexOf(date);
-    if (index >= 0 && index < 4) {
-      return isTimeAllowed(false);
-    }
-  } else if (dayOfWeek === 0) {
-    // 周日
-    const sundays = getDaysOfMonth(year, month, 0);
-    // 判断是否是第四个周日 (index 3)
-    if (sundays.length >= 4 && sundays[3] === date) {
-      return isTimeAllowed(true);
-    }
-  }
-
-  return false;
-}
+export {
+  getLastSaturday,
+  isLegionWarAccessible,
+  isNowInLegionWarTime,
+} from "./legionWarTime.js";
 
 export function formatTimestamp1(timestamp) {
   const date = new Date(timestamp);
@@ -329,9 +165,9 @@ export function parseAttackType(attackType) {
  * 格式化成员战绩数据用于导出
  * @param {Array} roleDetailsList - 成员详情列表
  * @param {string} queryDate - 查询日期
- * @returns {string} 格式化的文本
+ * @returns {Promise<string>} 格式化的文本
  */
-export function formatBattleRecordsForExport(roleDetailsList, queryDate) {
+export async function formatBattleRecordsForExport(roleDetailsList, queryDate) {
   if (!roleDetailsList || roleDetailsList.length === 0) {
     return "暂无战绩数据";
   }
@@ -449,6 +285,8 @@ export function formatBattleRecordsForExport(roleDetailsList, queryDate) {
       formatTimestamp(battle.timestamp || 0),
     ]),
   ];
+  // 仅在真正导出 Excel 时按需加载 xlsx
+  const XLSX = await import("xlsx");
   // 创建工作簿
   const workbook = XLSX.utils.book_new();
   const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);

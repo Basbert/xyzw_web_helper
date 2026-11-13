@@ -23,3 +23,6 @@ export { createTasksLegacy } from "./tasksLegacy.js";
 export { createTasksStore } from "./tasksStore.js";
 export { createTasksTower } from "./tasksTower.js";
 export { createTasksXuanwuBlessing } from "./tasksXuanwuBlessing.js";
+
+// View & schedule UI helpers
+export * from "./viewHelpers.js";

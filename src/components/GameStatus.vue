@@ -111,7 +111,7 @@
       aria-label="爬塔和阵容"
     >
       <WeirdTowerStatus />
-      <TowerStatus v-show="isShowTowerStatus" />
+      <TowerStatus v-if="activeSection === 'daily' && isShowTowerStatus" />
       <TeamFormation />
     </section>
 
@@ -140,16 +140,16 @@
     </details>
 
     <!-- 无限阵容助手（提取组件） -->
-    <Unlimitedlineup v-show="activeSection === 'tools'" />
+    <Unlimitedlineup v-if="activeSection === 'tools'" />
 
     <!-- 宝箱助手（提取组件） -->
-    <BoxHelperCard v-show="activeSection === 'tools'" />
+    <BoxHelperCard v-if="activeSection === 'tools'" />
 
     <!-- 钓鱼助手（提取组件） -->
-    <FishHelperCard v-show="activeSection === 'tools'" />
+    <FishHelperCard v-if="activeSection === 'tools'" />
 
     <!-- 招募助手（提取组件） -->
-    <RecruitHelperCard v-show="activeSection === 'tools'" />
+    <RecruitHelperCard v-if="activeSection === 'tools'" />
 
     <!-- 升星助手（提取组件） -->
     <StarUpgradeCard v-if="activeSection === 'tools'" />
@@ -255,13 +255,13 @@
     <BossTower v-if="activeSection === 'activity'" />
 
     <!-- 月度任务进度（提取组件） -->
-    <MonthlyTasksCard v-show="activeSection === 'activity'" />
+    <MonthlyTasksCard v-if="activeSection === 'activity'" />
 
     <!-- 咸鱼大冲关（提取组件） -->
-    <StudyChallengeCard v-show="activeSection === 'activity'" />
+    <StudyChallengeCard v-if="activeSection === 'activity'" />
 
     <!-- 换皮闯关 -->
-    <SkinChallengeCard v-show="activeSection === 'activity'" />
+    <SkinChallengeCard v-if="activeSection === 'activity'" />
 
     <!-- 逐鹿盐山分组 -->
     <div
@@ -470,6 +470,7 @@ import {
   defineAsyncComponent,
   h,
   nextTick,
+  onBeforeUnmount,
   onMounted,
   onUnmounted,
   ref,
@@ -481,16 +482,8 @@ import { runBottleAndHangUp } from "@/utils/bottleAndHangUp";
 
 import ApexGuessCard from "./cards/ApexGuessCard.vue";
 import BottleHelperCard from "./cards/BottleHelperCard.vue";
-import BoxHelperCard from "./cards/BoxHelperCard.vue";
-import FishHelperCard from "./cards/FishHelperCard.vue";
 import HangUpStatusCard from "./cards/HangUpStatusCard.vue";
-import MonthlyTasksCard from "./cards/MonthlyTasksCard.vue";
-import RecruitHelperCard from "./cards/RecruitHelperCard.vue";
-import SkinChallengeCard from "./cards/SkinChallengeCard.vue";
-import StudyChallengeCard from "./cards/StudyChallengeCard.vue";
-import Unlimitedlineup from "./cards/Unlimitedlineup.vue";
 import DailyActivityReminders from "./DailyActivityReminders.vue";
-import TowerStatus from "./Tower/TowerStatus.vue";
 import WeirdTowerStatus from "./Tower/WeirdTowerStatus.vue";
 
 const loadingSection = {
@@ -513,6 +506,25 @@ const lazySection = (loader) =>
     loadingComponent: loadingSection,
     errorComponent: failedSection,
   });
+
+const BoxHelperCard = lazySection(() => import("./cards/BoxHelperCard.vue"));
+const FishHelperCard = lazySection(() => import("./cards/FishHelperCard.vue"));
+const MonthlyTasksCard = lazySection(
+  () => import("./cards/MonthlyTasksCard.vue"),
+);
+const RecruitHelperCard = lazySection(
+  () => import("./cards/RecruitHelperCard.vue"),
+);
+const SkinChallengeCard = lazySection(
+  () => import("./cards/SkinChallengeCard.vue"),
+);
+const StudyChallengeCard = lazySection(
+  () => import("./cards/StudyChallengeCard.vue"),
+);
+const Unlimitedlineup = lazySection(
+  () => import("./cards/Unlimitedlineup.vue"),
+);
+const TowerStatus = lazySection(() => import("./Tower/TowerStatus.vue"));
 
 const CompassCard = lazySection(() => import("./cards/CompassCard.vue"));
 const ApexChallenge = lazySection(() => import("./Apex/ApexChallenge.vue"));
@@ -582,6 +594,22 @@ const combinedBusy = ref(false);
 const combinedProgress = ref("");
 const combinedRunningName = ref("");
 const combinedResults = ref({});
+let combinedGeneration = 0;
+watch(
+  () => {
+    const id = tokenStore.selectedToken?.id;
+    return [
+      id,
+      id ? tokenStore.getWebSocketStatus(id) : null,
+      id ? tokenStore.wsConnections?.[id]?.client : null,
+    ];
+  },
+  () => combinedGeneration++,
+  { flush: "sync" },
+);
+onBeforeUnmount(() => {
+  combinedGeneration++;
+});
 const combinedResult = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
   return tokenId ? combinedResults.value[tokenId] : null;
@@ -596,13 +624,17 @@ const runCombinedDailyAction = async () => {
   if (!tokenId) return message.warning("请先选择Token");
   if (combinedBusy.value) return;
   const accountName = tokenStore.selectedToken?.name || "当前角色";
+  const generation = combinedGeneration;
   combinedBusy.value = true;
   combinedRunningName.value = accountName;
   try {
     const result = await runBottleAndHangUp({
       tokenStore,
       tokenId,
-      onProgress: (text) => (combinedProgress.value = text),
+      shouldStop: () => combinedGeneration !== generation,
+      onProgress: (text) => {
+        if (combinedGeneration === generation) combinedProgress.value = text;
+      },
     });
     const legacyText =
       result.legacy.status === "acknowledged"
@@ -1508,7 +1540,7 @@ onUnmounted(() => {
     flex-wrap: wrap;
   }
 
-  .game-status-container :deep(.dream-helper .merchant-actions .arco-btn) {
+  .game-status-container :deep(.dream-helper .merchant-actions .n-button) {
     max-width: 100%;
     height: auto;
     min-height: 32px;

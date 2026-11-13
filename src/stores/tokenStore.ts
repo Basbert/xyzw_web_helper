@@ -2,7 +2,7 @@ import type { ProtoMsg } from "@/utils/bonProtocol";
 import { useLocalStorage } from "@vueuse/core";
 import { defineStore } from "pinia";
 
-import { computed, onScopeDispose, ref } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import router from "@/router";
 import { createAccountGameData } from "@/utils/accountGameData";
@@ -12,6 +12,7 @@ import { createConnectionRecovery } from "@/utils/connectionRecovery";
 import { gameLogger, tokenLogger, wsLogger } from "@/utils/logger";
 import { generateRandomSeed } from "@/utils/randomSeed";
 import {
+  fetchTokenPayloadFromUrl,
   scheduleAuthUserRequest,
   setAuthUserRateLimiterCallback,
   transformToken,
@@ -33,28 +34,39 @@ declare interface TokenData {
   wsUrl: string | null; // 可选的自定义WebSocket URL
   server: string;
   remark?: string; // 备注信息
+  level?: number;
+  profession?: string;
+  createdAt?: string;
+  lastUsed?: string;
+  isActive?: boolean;
   importMethod?:
     "manual" | "bin" | "url" | "wxQrcode" | "mobile" | "wxForceLogout";
-  sourceUrl?: string; // 当importMethod为url时，存储url链接
+  sourceUrl?: string | null; // 当importMethod为url时，存储url链接
   avatar?: string; // 用户头像URL
   upgradedToPermanent?: boolean; // 是否升级为长期有效
   upgradedAt?: string; // 升级时间
   updatedAt?: string; // 更新时间
-  combUser?: Record<string, unknown>;
-  serverId?: string | number;
-  roleId?: string | number;
-  roleIndex?: number;
+  lastRefreshed?: number;
+  combUser?: Record<string, unknown> | null;
+  serverId?: string | number | null;
+  roleId?: string | number | null;
+  roleIndex?: number | null;
 }
 
 declare interface WebSocketConnection {
   status:
     "connecting" | "connected" | "disconnecting" | "disconnected" | "error";
   client: XyzwWebSocketClient | null;
-  lastError: { timestamp: string; error: string } | null;
+  lastError: { timestamp: string; error: string; url?: string } | null;
   tokenId: string;
+  wsUrl?: string;
+  actualToken?: string;
   sessionId: string;
   createdAt: string;
+  connectedAt?: string | null;
   lastMessageAt: string | null;
+  lastMessage?: { timestamp: string; data: unknown; cmd?: string } | null;
+  reconnectAttempts?: number;
   randomSeedSynced?: boolean;
   lastRandomSeedSource?: number | null;
   lastRandomSeed?: number | null;
@@ -69,6 +81,15 @@ declare interface ConnectLock {
   sessionId: string;
 }
 declare type LockCtx = Record<string, Partial<ConnectLock>>;
+
+declare interface CrossTabConnectionState {
+  action: string;
+  sessionId: string;
+  timestamp: number;
+}
+
+const getErrorMessage = (error: unknown, fallback = "未知错误") =>
+  error instanceof Error ? error.message : String(error || fallback);
 
 // 分组接口定义
 declare interface TokenGroup {
@@ -89,7 +110,9 @@ export const selectedToken = computed(() => {
 export const selectedRoleInfo = useLocalStorage<any>("selectedRoleInfo", null);
 
 // 跨标签页连接协调
-const activeConnections = useLocalStorage("activeConnections", {});
+const activeConnections = useLocalStorage<
+  Record<string, CrossTabConnectionState>
+>("activeConnections", {});
 
 // Token分组管理
 export const tokenGroups = useLocalStorage<TokenGroup[]>("tokenGroups", []);
@@ -222,14 +245,16 @@ export const useTokenStore = defineStore("tokens", () => {
   // Token管理
   /**
    * Persist a token record under its existing byte-derived identity.
-   * @param {TokenData} tokenData Imported credential and role metadata.
+   * @param {Partial<TokenData> & Pick<TokenData, "name" | "token">} tokenData Imported credential and role metadata.
    * @returns {TokenData} Stored token record.
    */
-  const addToken = (tokenData: TokenData) => {
+  const addToken = (
+    tokenData: Partial<TokenData> & Pick<TokenData, "name" | "token">,
+  ) => {
     const id =
       tokenData.id ||
       `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const newToken = {
+    const newToken: TokenData = {
       id,
       name: tokenData.name,
       token: tokenData.token, // 保存原始Base64 token
@@ -263,9 +288,10 @@ export const useTokenStore = defineStore("tokens", () => {
    */
   const updateToken = (tokenId: string, updates: Partial<TokenData>) => {
     const index = gameTokens.value.findIndex((token) => token.id === tokenId);
-    if (index !== -1) {
+    const existing = gameTokens.value[index];
+    if (index !== -1 && existing) {
       gameTokens.value[index] = {
-        ...gameTokens.value[index],
+        ...existing,
         ...updates,
         updatedAt: new Date().toISOString(),
       };
@@ -296,19 +322,33 @@ export const useTokenStore = defineStore("tokens", () => {
   const removeToken = async (tokenId: string) => {
     gameTokens.value = gameTokens.value.filter((token) => token.id !== tokenId);
 
-    // 关闭对应的WebSocket连接
+    // 如果删除的是当前选中token，先清除选中状态防止恢复定时器重启连接
+    if (selectedTokenId.value === tokenId) {
+      selectedTokenId.value = "";
+    }
+    desiredConnections.delete(tokenId);
+    connectionRecovery.cancel(tokenId);
+
+    // 关闭对应的WebSocket连接（等待异步释放锁和跨标签页状态）
     if (wsConnections.value[tokenId]) {
-      closeWebSocketConnection(tokenId);
+      await closeWebSocketConnectionAsync(tokenId);
     }
 
-    // 如果删除的是当前选中token，清除选中状态
-    if (selectedTokenId.value === tokenId) {
-      selectedTokenId.value = null;
-    }
     accountGameData.remove(tokenId);
+    cleanupInvalidTokens();
 
     // 同时删除IndexedDB中的数据
     await deleteArrayBuffer(tokenId);
+
+    delete activeConnections.value[tokenId];
+    Object.keys(connectionLocks.value).forEach((lockKey) => {
+      if (lockKey.startsWith(`${tokenId}_`)) {
+        delete connectionLocks.value[lockKey];
+      }
+    });
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem(`ws_connection_${tokenId}`);
+    }
 
     return true;
   };
@@ -400,12 +440,11 @@ export const useTokenStore = defineStore("tokens", () => {
       if (gameToken.importMethod === "url" && gameToken.sourceUrl) {
         // URL形式token刷新
         const token = await scheduleAuthUserRequest(async () => {
-          const response = await fetch(gameToken.sourceUrl!);
-          if (response.ok) {
-            const data = await response.json();
-            if (data.token) {
-              return data.token;
-            }
+          const data = await fetchTokenPayloadFromUrl(gameToken.sourceUrl!, {
+            timeoutMs: 10000,
+          });
+          if (typeof data.token === "string" && data.token.trim()) {
+            return data.token;
           }
           return null;
         });
@@ -416,11 +455,11 @@ export const useTokenStore = defineStore("tokens", () => {
         }
       } else if (gameToken.combUser) {
         const refreshed = await refreshTokenFromCombUser(
-          gameToken.combUser as any,
+          gameToken.combUser as Parameters<typeof refreshTokenFromCombUser>[0],
           {
-            serverId: gameToken.serverId,
-            roleIndex: gameToken.roleIndex,
-            roleId: gameToken.roleId,
+            serverId: gameToken.serverId ?? undefined,
+            roleIndex: gameToken.roleIndex ?? undefined,
+            roleId: gameToken.roleId ?? undefined,
           },
         );
         updateToken(tokenId, {
@@ -430,7 +469,7 @@ export const useTokenStore = defineStore("tokens", () => {
           roleId: refreshed.role.roleId,
           roleIndex: roleIndexFromServerId(refreshed.role.serverId),
           lastRefreshed: Date.now(),
-        } as any);
+        });
         refreshSuccess = true;
       } else if (gameToken.importMethod === "wxForceLogout") {
         wsLogger.error(`Token刷新失败: 未保存 combUser [${tokenId}]`);
@@ -536,7 +575,8 @@ export const useTokenStore = defineStore("tokens", () => {
       }
 
       const cmd = message.cmd?.toLowerCase();
-      const body = message.getData();
+      const body = message.getData() as
+        { role?: { roleId?: string | number; headImg?: string } } | undefined;
 
       if (cmd === "role_getroleinforesp") {
         syncRandomSeedFromStatistics(tokenId, body, client);
@@ -627,7 +667,7 @@ export const useTokenStore = defineStore("tokens", () => {
     } catch (error) {
       return {
         success: false,
-        error: `解析失败：${error.message}`,
+        error: `解析失败：${getErrorMessage(error)}`,
       };
     }
   };
@@ -672,10 +712,11 @@ export const useTokenStore = defineStore("tokens", () => {
         details: `实际Token: ${displayToken}`,
       };
     } catch (error) {
+      const messageText = getErrorMessage(error);
       return {
         success: false,
-        error: error.message,
-        message: `Token "${name}" 添加失败: ${error.message}`,
+        error: messageText,
+        message: `Token "${name}" 添加失败: ${messageText}`,
       };
     }
   };
@@ -688,7 +729,7 @@ export const useTokenStore = defineStore("tokens", () => {
   // 获取连接锁
   const acquireConnectionLock = async (
     tokenId: string,
-    operation = "connect",
+    operation: ConnectLock["operation"] = "connect",
   ) => {
     const lockKey = `${tokenId}_${operation}`;
     const connect = connectionLocks.value;
@@ -754,7 +795,8 @@ export const useTokenStore = defineStore("tokens", () => {
       const stored = localStorage.getItem(storageKey);
       if (stored) {
         const state = JSON.parse(stored);
-        const isRecent = Date.now() - state.timestamp < 30000; // 30秒内的状态认为是活跃的
+        // Heartbeats renew the owner's lease; allow slack for background timer delays.
+        const isRecent = Date.now() - state.timestamp < 120000;
         const isDifferentSession = state.sessionId !== currentSessionId;
 
         if (
@@ -772,15 +814,29 @@ export const useTokenStore = defineStore("tokens", () => {
     return null;
   };
 
+  let monitorTimer: ReturnType<typeof setInterval> | null = null;
+  let storageListener: ((event: StorageEvent) => void) | null = null;
+  let tokenStoreInitialized = false;
+
   // Only the currently selected account is restored after an unexpected close.
   const desiredConnections = new Set<string>();
+  const connectionRecoveryStatus = ref<Record<string, string>>({});
+  const shouldKeepRecovering = (tokenId: string) => {
+    const status = wsConnections.value[tokenId]?.status;
+    return (
+      desiredConnections.has(tokenId) &&
+      selectedTokenId.value === tokenId &&
+      gameTokens.value.some((token) => token.id === tokenId) &&
+      status !== "connected" &&
+      status !== "disconnecting"
+    );
+  };
   const connectionRecovery = createConnectionRecovery({
+    shouldKeepTrying: shouldKeepRecovering,
     canRecover: (tokenId: string) => {
       const connection = wsConnections.value[tokenId];
       return (
-        desiredConnections.has(tokenId) &&
-        selectedTokenId.value === tokenId &&
-        gameTokens.value.some((token) => token.id === tokenId) &&
+        shouldKeepRecovering(tokenId) &&
         (typeof navigator === "undefined" || navigator.onLine !== false) &&
         !["connected", "connecting", "disconnecting"].includes(
           connection?.status || "",
@@ -793,7 +849,18 @@ export const useTokenStore = defineStore("tokens", () => {
       if (!token) return null;
       return createWebSocketConnection(tokenId, token.token, token.wsUrl, true);
     },
+    onState: (tokenId: string, state: string) => {
+      if (state === "stopped") delete connectionRecoveryStatus.value[tokenId];
+      else connectionRecoveryStatus.value[tokenId] = state;
+    },
   });
+  watch(
+    selectedTokenId,
+    (current, previous) => {
+      if (previous && current !== previous) connectionRecovery.cancel(previous);
+    },
+    { flush: "sync" },
+  );
 
   const restoreSelectedConnection = () => {
     const tokenId = selectedTokenId.value;
@@ -824,15 +891,21 @@ export const useTokenStore = defineStore("tokens", () => {
     }
     if (typeof window !== "undefined" && window.removeEventListener) {
       window.removeEventListener("online", restoreSelectedConnection);
+      if (storageListener) {
+        window.removeEventListener("storage", storageListener);
+        storageListener = null;
+      }
     }
+    connectionMonitor.stopMonitoring();
     connectionRecovery.dispose();
+    tokenStoreInitialized = false;
   });
 
   // WebSocket连接管理（重构版 - 防重连）
   const createWebSocketConnection = async (
     tokenId: string,
     base64Token: string,
-    customWsUrl = null,
+    customWsUrl: string | null = null,
     fromRecovery = false,
   ) => {
     wsLogger.info(`开始创建连接: ${tokenId}`);
@@ -895,6 +968,7 @@ export const useTokenStore = defineStore("tokens", () => {
       const baseWsUrl = `wss://xxz-xyzw.hortorgames.com/agent?p=${encodeURIComponent(actualToken)}&e=x&lang=chinese`;
 
       const wsUrl = customWsUrl || baseWsUrl;
+      const safeWsUrl = wsUrl.split("?")[0];
 
       // 7. 创建新的WebSocket客户端（增强版）
       const wsClient = new XyzwWebSocketClient({
@@ -908,7 +982,7 @@ export const useTokenStore = defineStore("tokens", () => {
         client: wsClient,
         status: "connecting",
         tokenId,
-        wsUrl,
+        wsUrl: safeWsUrl,
         actualToken,
         sessionId: currentSessionId,
         connectedAt: null,
@@ -923,7 +997,7 @@ export const useTokenStore = defineStore("tokens", () => {
       // Capture the reactive record: an older client's callbacks must not update its replacement.
       const connection = wsConnections.value[tokenId];
       const isCurrentConnection = () =>
-        wsConnections.value[tokenId] === connection;
+        Boolean(connection && wsConnections.value[tokenId] === connection);
 
       // 9. 设置事件监听（增强版）
       wsClient.onConnect = () => {
@@ -949,7 +1023,27 @@ export const useTokenStore = defineStore("tokens", () => {
         }
       };
 
-      wsClient.onDisconnect = async (event) => {
+      wsClient.onHeartbeat = () => {
+        if (!isCurrentConnection() || connection?.status !== "connected")
+          return;
+        try {
+          const key = `ws_connection_${tokenId}`;
+          const owner = JSON.parse(localStorage.getItem(key) || "null");
+          if (
+            owner?.sessionId === currentSessionId &&
+            owner.action === "connected" &&
+            Date.now() - owner.timestamp >= 10000
+          )
+            updateCrossTabConnectionState(tokenId, "connected");
+        } catch (error) {
+          wsLogger.warn("续期跨标签页连接状态失败", error);
+        }
+      };
+
+      wsClient.onDisconnect = async (event: {
+        code?: number;
+        reason?: string;
+      }) => {
         if (!isCurrentConnection()) return;
         const reason = event.code === 1006 ? "异常断开" : event.reason || "";
         wsLogger.wsDisconnect(tokenId, reason);
@@ -981,15 +1075,15 @@ export const useTokenStore = defineStore("tokens", () => {
         }
       };
 
-      wsClient.onError = (error) => {
+      wsClient.onError = (error: unknown) => {
         if (!isCurrentConnection()) return;
         wsLogger.wsError(tokenId, error);
         if (wsConnections.value[tokenId]) {
           wsConnections.value[tokenId].status = "error";
           wsConnections.value[tokenId].lastError = {
             timestamp: new Date().toISOString(),
-            error: error.toString(),
-            url: wsUrl,
+            error: getErrorMessage(error),
+            url: safeWsUrl,
           };
         }
         releaseConnectionLock(tokenId, "connect");
@@ -1148,7 +1242,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
       return true;
     } catch (error) {
-      wsLogger.error(`发送失败 [${tokenId}] ${cmd}:`, error.message);
+      wsLogger.error(`发送失败 [${tokenId}] ${cmd}:`, getErrorMessage(error));
       return false;
     }
   };
@@ -1209,7 +1303,10 @@ export const useTokenStore = defineStore("tokens", () => {
     } catch (error) {
       // 特殊日志：fight_starttower 错误
       if (cmd === "fight_starttower") {
-        wsLogger.error(`🗼 [咸将塔] 爬塔请求失败 [${tokenId}]:`, error.message);
+        wsLogger.error(
+          `🗼 [咸将塔] 爬塔请求失败 [${tokenId}]:`,
+          getErrorMessage(error),
+        );
       }
       return Promise.reject(error);
     }
@@ -1229,12 +1326,12 @@ export const useTokenStore = defineStore("tokens", () => {
     try {
       // 增加超时时间到15秒，并添加重试机制
       const timeout = 15000;
-      const roleInfo = await sendMessageWithPromise(
+      const roleInfo = (await sendMessageWithPromise(
         tokenId,
         "role_getroleinfo",
         params,
         timeout,
-      );
+      )) as { role?: unknown } | undefined;
 
       // 手动更新游戏数据（因为响应可能不会自动触发消息处理）
       if (roleInfo) {
@@ -1247,7 +1344,10 @@ export const useTokenStore = defineStore("tokens", () => {
 
       return roleInfo;
     } catch (error) {
-      gameLogger.error(`获取角色信息失败 [${tokenId}]:`, error.message);
+      gameLogger.error(
+        `获取角色信息失败 [${tokenId}]:`,
+        getErrorMessage(error),
+      );
 
       // 重试机制：最多重试2次，每次间隔1秒
       if (retryCount < 2) {
@@ -1310,7 +1410,10 @@ export const useTokenStore = defineStore("tokens", () => {
     tokenId: string,
     cmd: string,
     params = {},
-    options = {},
+    options: { usePromise?: boolean; timeout?: number } & Record<
+      string,
+      unknown
+    > = {},
   ) => {
     if (options.usePromise) {
       return sendMessageWithPromise(tokenId, cmd, params, options.timeout);
@@ -1383,7 +1486,7 @@ export const useTokenStore = defineStore("tokens", () => {
         return { success: false, message: "导入数据格式错误" };
       }
     } catch (error) {
-      return { success: false, message: `导入失败：${error.message}` };
+      return { success: false, message: `导入失败：${getErrorMessage(error)}` };
     }
   };
 
@@ -1394,7 +1497,7 @@ export const useTokenStore = defineStore("tokens", () => {
     });
 
     gameTokens.value = [];
-    selectedTokenId.value = null;
+    selectedTokenId.value = "";
     accountGameData.clear();
 
     // 清空IndexedDB
@@ -1420,7 +1523,7 @@ export const useTokenStore = defineStore("tokens", () => {
         return false;
       }
       // 手动导入的token按原逻辑处理（24小时过期）
-      const lastUsed = new Date(token.lastUsed || token.createdAt);
+      const lastUsed = new Date(token.lastUsed || token.createdAt || 0);
       return lastUsed <= oneDayAgo;
     });
 
@@ -1469,13 +1572,17 @@ export const useTokenStore = defineStore("tokens", () => {
       );
       // 保留最新的连接，关闭旧连接
       const sortedConnections = connections.sort(
-        (a, b) => new Date(b.connectedAt || 0) - new Date(a.connectedAt || 0),
+        (a, b) =>
+          new Date(b.connectedAt || 0).getTime() -
+          new Date(a.connectedAt || 0).getTime(),
       );
 
       for (let i = 1; i < sortedConnections.length; i++) {
         const oldConnection = sortedConnections[i];
         wsLogger.debug(`关闭重复连接: ${tokenId}`);
-        closeWebSocketConnectionAsync(oldConnection.tokenId);
+        if (oldConnection?.tokenId) {
+          closeWebSocketConnectionAsync(oldConnection.tokenId);
+        }
       }
 
       return false; // 检测到重复连接
@@ -1488,7 +1595,8 @@ export const useTokenStore = defineStore("tokens", () => {
   const connectionMonitor = {
     // 定期检查连接状态
     startMonitoring: () => {
-      setInterval(() => {
+      if (monitorTimer !== null) return;
+      monitorTimer = setInterval(() => {
         const now = Date.now();
 
         // 检查连接超时（超过30秒未活动）
@@ -1512,7 +1620,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
         // 清理过期的连接锁（超过10分钟）
         Object.entries(connectionLocks.value).forEach(([tokenId, lock]) => {
-          if (now - lock.timestamp > 600000) {
+          if (now - (lock.timestamp || 0) > 600000) {
             delete connectionLocks.value[tokenId];
             wsLogger.debug(`清理过期连接锁: ${tokenId}`);
           }
@@ -1529,6 +1637,13 @@ export const useTokenStore = defineStore("tokens", () => {
       }, 10000); // 每10秒检查一次
     },
 
+    stopMonitoring: () => {
+      if (monitorTimer !== null) {
+        clearInterval(monitorTimer);
+        monitorTimer = null;
+      }
+    },
+
     // 获取连接统计信息
     getStats: () => {
       const duplicateTokens: string[] = [];
@@ -1536,18 +1651,35 @@ export const useTokenStore = defineStore("tokens", () => {
         totalConnections: Object.keys(wsConnections.value).length,
         connectedCount: 0,
         connectingCount: 0,
+        disconnectingCount: 0,
         disconnectedCount: 0,
         errorCount: 0,
         duplicateTokens,
         activeLocks: Object.keys(connectionLocks.value).length,
         crossTabStates: Object.keys(activeConnections.value).length,
       };
+      const statusCountMap: Record<
+        WebSocketConnection["status"],
+        keyof typeof stats
+      > = {
+        connected: "connectedCount",
+        connecting: "connectingCount",
+        disconnecting: "disconnectingCount",
+        disconnected: "disconnectedCount",
+        error: "errorCount",
+      };
 
       // 统计连接状态
-      const tokenCounts = new Map();
+      const tokenCounts = new Map<string, number>();
       Object.values(wsConnections.value).forEach((connection) => {
-        stats[`${connection.status}Count`]++;
+        if (connection.status && connection.status in statusCountMap) {
+          const statField = statusCountMap[connection.status];
+          if (typeof stats[statField] === "number") {
+            (stats[statField] as number)++;
+          }
+        }
 
+        if (!connection.tokenId) return;
         // 检测重复token
         const count = tokenCounts.get(connection.tokenId) || 0;
         tokenCounts.set(connection.tokenId, count + 1);
@@ -1570,17 +1702,22 @@ export const useTokenStore = defineStore("tokens", () => {
 
       await Promise.all(cleanupPromises);
 
-      // TODO:
       // 清理所有锁和状态
-      // connectionLocks.value.clear()
-      // activeConnections.value.clear()
+      connectionLocks.value = {};
+      activeConnections.value = {};
+      desiredConnections.clear();
+      Object.keys(connectionRecoveryStatus.value).forEach((id) => {
+        connectionRecovery.cancel(id);
+      });
 
       // 清理localStorage中的跨标签页状态
-      Object.keys(localStorage).forEach((key) => {
-        if (key.startsWith("ws_connection_")) {
-          localStorage.removeItem(key);
-        }
-      });
+      if (typeof localStorage !== "undefined") {
+        Object.keys(localStorage).forEach((key) => {
+          if (key.startsWith("ws_connection_")) {
+            localStorage.removeItem(key);
+          }
+        });
+      }
 
       wsLogger.info("强制清理完成");
     },
@@ -1588,7 +1725,14 @@ export const useTokenStore = defineStore("tokens", () => {
 
   // 监听localStorage变化（跨标签页通信）
   const setupCrossTabListener = () => {
-    window.addEventListener("storage", (event) => {
+    if (
+      storageListener ||
+      typeof window === "undefined" ||
+      !window.addEventListener
+    ) {
+      return;
+    }
+    storageListener = (event: StorageEvent) => {
       if (event.key?.startsWith("ws_connection_")) {
         const tokenId = event.key.replace("ws_connection_", "");
         wsLogger.debug(
@@ -1617,11 +1761,11 @@ export const useTokenStore = defineStore("tokens", () => {
           }
         }
       }
-    });
+    };
+    window.addEventListener("storage", storageListener);
   };
 
   // 初始化
-  let tokenStoreInitialized = false;
   const initTokenStore = () => {
     if (tokenStoreInitialized) return;
     tokenStoreInitialized = true;
@@ -1783,7 +1927,9 @@ export const useTokenStore = defineStore("tokens", () => {
     gameTokens,
     selectedTokenId,
     wsConnections,
+    connectionRecoveryStatus,
     gameData,
+    getAccountGameData: (tokenId: string) => accountGameData.forToken(tokenId),
 
     // 计算属性
     hasTokens,

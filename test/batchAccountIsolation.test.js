@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import * as connectionManager from "../src/utils/batch/connectionManager.js";
 import { createTasksArena } from "../src/utils/batch/tasksArena.js";
 import * as dailyState from "../src/utils/dailyTaskState.js";
 import { loadModule } from "./helpers/loadModule.js";
@@ -9,6 +10,7 @@ const { createTasksItem } = await loadModule(
   {
     "@/utils/HeroList": { HERO_DICT: {} },
     "@/utils/PeachTaskIds": { PEACH_TASKS: [] },
+    "./connectionManager.js": connectionManager,
   },
 );
 const { createTasksTower } = await loadModule(
@@ -17,6 +19,7 @@ const { createTasksTower } = await loadModule(
     "@/utils/gameValue.js": { isSameGameValue: (a, b) => a === b },
     "../towerActId.js": { getTowerActId: () => 1 },
     "../towerClimbLimit.js": { normalizeWeirdTowerMaxClimb: (value) => value },
+    "./connectionManager.js": connectionManager,
   },
   {
     setTimeout: (callback) => {

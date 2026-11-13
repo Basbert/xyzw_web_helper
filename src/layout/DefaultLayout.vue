@@ -31,7 +31,12 @@
           </router-link>
           <n-dropdown
             trigger="click"
-            :options="getSecondaryNavigation().map((item) => ({ label: item.label, key: item.to }))"
+            :options="
+              getSecondaryNavigation().map((item) => ({
+                label: item.label,
+                key: item.to,
+              }))
+            "
             @select="router.push"
           >
             <button type="button" class="nav-item nav-more">更多功能</button>
@@ -48,6 +53,11 @@
               role="button"
               tabindex="0"
               aria-label="打开账号菜单"
+              :title="
+                [selectedToken?.name, selectedToken?.server]
+                  .filter(Boolean)
+                  .join(' · ')
+              "
               @keydown.enter.prevent="$event.currentTarget.click()"
               @keydown.space.prevent="$event.currentTarget.click()"
             >
@@ -110,7 +120,7 @@ import { ref } from "vue";
 import { useRouter } from "vue-router";
 import ThemeToggle from "@/components/Common/ThemeToggle.vue";
 import { selectedToken, useTokenStore } from "@/stores/tokenStore";
-import { isNowInLegionWarTime } from "@/utils/clubBattleUtils";
+import { isNowInLegionWarTime } from "@/utils/legionWarTime";
 
 const tokenStore = useTokenStore();
 const router = useRouter();
@@ -127,7 +137,11 @@ const primaryNavigation = [
   { to: "/admin/PushingLevels", label: "主线推关", icon: ArrowUpCircle },
 ];
 const secondaryNavigation = [
-  { to: "/admin/message-test", label: "消息测试", icon: ChatbubbleEllipsesSharp },
+  {
+    to: "/admin/message-test",
+    label: "消息测试",
+    icon: ChatbubbleEllipsesSharp,
+  },
   { to: "/admin/legion-war", label: "实时盐场", icon: LockOpen, warOnly: true },
   { to: "/admin/profile", label: "个人设置", icon: Settings },
 ];
@@ -198,6 +212,7 @@ const handleUserAction = (key) => {
   font-size: var(--font-size-lg);
   font-weight: var(--font-weight-semibold);
   color: var(--text-primary);
+  white-space: nowrap;
 }
 
 .brand-toggle {
@@ -296,6 +311,9 @@ const handleUserAction = (key) => {
 }
 
 @media (max-width: 1100px) {
+  .nav-brand {
+    margin-right: var(--spacing-sm);
+  }
   .nav-user {
     gap: 4px;
   }

@@ -13,7 +13,7 @@
       <div class="time-display">宝库当前层数：{{ currentTower ?? "—" }}</div>
     </template>
     <template #action>
-      <a-button
+      <n-button
         type="primary"
         secondary
         size="small"
@@ -21,7 +21,7 @@
         :loading="state.isRunning"
         :disabled="state.isRunning"
         @click="extendbosstower"
-        >宝库战斗</a-button
+        >宝库战斗</n-button
       >
     </template>
   </MyCard>

@@ -56,6 +56,8 @@ const CmdDebounceMap = {
   system_getdatabundlever: 1000,
 };
 
+let sendCacheSequence = 0;
+
 /** 为日志生成安全的 body 预览，避免控制台再次解析原始对象 */
 const formatBodyForLog = (body) => {
   if (!body) return "";
@@ -506,11 +508,17 @@ export class XyzwWebSocketClient {
     this.sendQueueTimer = null;
     this.heartbeatTimer = null;
     this.heartbeatStartTimer = null;
+    this.heartbeatWorker = null;
+    this.lastWorkerHeartbeatAt = null;
+    this.handshakeTimer = null;
     this.reconnectTimer = null;
     this.reconnectResetTimer = null;
     this.dialogResetTimer = null;
     this.heartbeatInterval = heartbeatMs;
-    this.sendCache = $CacheManager.getCache(this.url, { timeout: 1000 });
+    this.sendCacheKey = `ws-send:${++sendCacheSequence}`;
+    this.sendCache = $CacheManager.getCache(this.sendCacheKey, {
+      timeout: 1000,
+    });
 
     this.dialogStatus = false;
     this.messageListener = null;
@@ -530,6 +538,7 @@ export class XyzwWebSocketClient {
     this.onConnect = null;
     this.onDisconnect = null;
     this.onError = null;
+    this.onHeartbeat = null;
   }
 
   /** 初始化连接 */
@@ -542,14 +551,37 @@ export class XyzwWebSocketClient {
       this.isReconnecting = false;
     }
     if (this.socket) this.disconnect();
+    this.sendCache = $CacheManager.getCache(this.sendCacheKey, {
+      timeout: 1000,
+    });
     const socket = new WebSocket(this.url);
     this.socket = socket;
     this.serverTime = undefined;
     this.wireSeq = 0;
     this.ack = 0;
 
+    // Browsers can leave a socket in CONNECTING indefinitely without firing
+    // open/error/close. Retire it so the store can schedule a new attempt.
+    const handshakeTimer = setTimeout(() => {
+      if (this.handshakeTimer !== handshakeTimer || this.socket !== socket)
+        return;
+      this.socket = null;
+      this.connected = false;
+      this._clearTimers();
+      $CacheManager.delCache?.(this.sendCacheKey);
+      try {
+        socket.close();
+      } catch (error) {
+        wsLogger.warn("关闭超时连接失败", error);
+      }
+      this.onDisconnect?.({ code: 1006, reason: "连接握手超时" });
+    }, 15000);
+    this.handshakeTimer = handshakeTimer;
+
     socket.onopen = () => {
       if (this.socket !== socket) return;
+      clearTimeout(this.handshakeTimer);
+      this.handshakeTimer = null;
       wsLogger.info("连接成功");
       this.connected = true;
       // 启动心跳机制
@@ -730,18 +762,24 @@ export class XyzwWebSocketClient {
       });
       this.connected = false;
       this._clearTimers();
+      $CacheManager.delCache?.(this.sendCacheKey);
       if (this.onDisconnect) this.onDisconnect(evt);
-      if (this.sendCache) {
-        $CacheManager.delCache(this.url);
-      }
     };
 
     socket.onerror = (error) => {
       if (this.socket !== socket) return;
       wsLogger.error("WebSocket 错误:", error);
+      this.socket = null;
       this.connected = false;
       this._clearTimers();
+      $CacheManager.delCache?.(this.sendCacheKey);
+      try {
+        socket.close();
+      } catch (closeError) {
+        wsLogger.warn("关闭错误连接失败", closeError);
+      }
       if (this.onError) this.onError(error);
+      this.onDisconnect?.({ code: 1006, reason: "连接错误" });
     };
   }
 
@@ -892,6 +930,7 @@ export class XyzwWebSocketClient {
     this.socket = null;
     this.connected = false;
     this._clearTimers();
+    $CacheManager.delCache?.(this.sendCacheKey);
     socket?.close();
   }
 
@@ -998,8 +1037,17 @@ export class XyzwWebSocketClient {
 
   /** 发送心跳 */
   sendHeartbeat() {
-    wsLogger.verbose("发送心跳消息");
-    this.send("heart_beat", {}, { respKey: "_sys/ack" });
+    const socket = this.socket;
+    if (!this.connected || socket?.readyState !== WebSocket.OPEN) return;
+    try {
+      // Heartbeats have sequence zero and need not wait behind game commands.
+      const packet = this.registry.build("heart_beat", this.ack, 0, {});
+      socket.send(this.registry.encodePacket(packet));
+      wsLogger.verbose("发送心跳消息");
+      this.onHeartbeat?.();
+    } catch (error) {
+      wsLogger.warn("发送心跳失败", error);
+    }
   }
 
   /** 获取角色信息 */
@@ -1026,8 +1074,56 @@ export class XyzwWebSocketClient {
 
   /** 设置心跳 */
   _setupHeartbeat() {
-    // 延迟3秒后开始发送第一个心跳，避免连接刚建立就发送
     const socket = this.socket;
+    this.lastWorkerHeartbeatAt = null;
+    // A worker can reduce background timer throttling, but cannot prevent the
+    // browser or OS from suspending an inactive page.
+    if (typeof Worker !== "undefined") {
+      let worker;
+      try {
+        worker = new Worker("/heartbeat-worker.js");
+        this.heartbeatWorker = worker;
+        worker.onmessage = (event) => {
+          if (
+            event.data === "tick" &&
+            this.heartbeatWorker === worker &&
+            this.socket === socket &&
+            this.connected &&
+            socket?.readyState === WebSocket.OPEN
+          ) {
+            // Worker messages may pile up while the page is suspended.
+            const now = Date.now();
+            if (
+              this.lastWorkerHeartbeatAt !== null &&
+              now >= this.lastWorkerHeartbeatAt &&
+              now - this.lastWorkerHeartbeatAt < 1000
+            )
+              return;
+            this.lastWorkerHeartbeatAt = now;
+            this.sendHeartbeat();
+          }
+        };
+        worker.onerror = (event) => {
+          event.preventDefault?.();
+          if (this.heartbeatWorker !== worker) return;
+          this.heartbeatWorker = null;
+          worker.terminate();
+          if (this.socket === socket && this.connected)
+            this._setupHeartbeatTimers(socket);
+        };
+        worker.postMessage({ interval: this.heartbeatInterval });
+        return;
+      } catch (error) {
+        if (worker) worker.terminate();
+        this.heartbeatWorker = null;
+        wsLogger.warn("心跳 Worker 不可用，使用普通计时器", error);
+      }
+    }
+    this._setupHeartbeatTimers(socket);
+  }
+
+  _setupHeartbeatTimers(socket) {
+    // 延迟3秒后开始发送第一个心跳，避免连接刚建立就发送
     const heartbeatTimer = setTimeout(() => {
       if (this.heartbeatStartTimer !== heartbeatTimer) return;
       this.heartbeatStartTimer = null;
@@ -1058,22 +1154,51 @@ export class XyzwWebSocketClient {
 
   /** 队列处理循环 */
   _processQueueLoop() {
-    if (this.sendQueueTimer) clearInterval(this.sendQueueTimer);
+    if (this.sendQueueTimer) {
+      clearTimeout(this.sendQueueTimer);
+      this.sendQueueTimer = null;
+    }
 
     const socket = this.socket;
-    this.sendQueueTimer = setInterval(async () => {
-      if (!this.sendQueue.length) return;
+    let timerId = null;
+
+    const scheduleNext = () => {
       if (
+        this.sendQueueTimer !== timerId ||
+        this.socket !== socket ||
+        !this.connected
+      ) {
+        return;
+      }
+      timerId = setTimeout(runStep, 50);
+      this.sendQueueTimer = timerId;
+    };
+
+    const runStep = async () => {
+      if (
+        this.sendQueueTimer !== timerId ||
         this.socket !== socket ||
         !this.connected ||
         socket?.readyState !== WebSocket.OPEN
-      )
+      ) {
         return;
+      }
+
+      if (!this.sendQueue.length) {
+        scheduleNext();
+        return;
+      }
 
       const task = this.sendQueue.shift();
-      if (!task) return;
+      if (!task) {
+        scheduleNext();
+        return;
+      }
       const request = task.request;
-      if (request && this.promises[request.seq] !== request) return;
+      if (request && this.promises[request.seq] !== request) {
+        scheduleNext();
+        return;
+      }
       // Server sequences must be contiguous: cancelled or failed unsent commands use no number.
       const wireSeq =
         task.cmd === "heart_beat" && !request ? 0 : this.wireSeq + 1;
@@ -1150,13 +1275,18 @@ export class XyzwWebSocketClient {
           }
         }
 
-        // 可选延时
+        // 可选延时（下一次循环会在本次 sleep 结束后再排期）
         if (task.sleep) await sleep(task.sleep);
       } catch (error) {
         if (request) this._rejectRequest(request.seq, error);
         wsLogger.error(`发送消息失败: ${task.cmd}`, error);
+      } finally {
+        scheduleNext();
       }
-    }, 50);
+    };
+
+    timerId = setTimeout(runStep, 50);
+    this.sendQueueTimer = timerId;
   }
 
   /** 处理 Promise 响应 */
@@ -1428,8 +1558,14 @@ export class XyzwWebSocketClient {
   /** Cancel the connection's requests, unsent commands and scheduled callbacks. */
   _clearTimers() {
     this.sendQueue.length = 0;
+    this.lastWorkerHeartbeatAt = null;
+    if (this.heartbeatWorker) {
+      this.heartbeatWorker.terminate();
+      this.heartbeatWorker = null;
+    }
     for (const field of [
       "heartbeatStartTimer",
+      "handshakeTimer",
       "reconnectTimer",
       "reconnectResetTimer",
       "dialogResetTimer",
@@ -1449,7 +1585,7 @@ export class XyzwWebSocketClient {
       this.heartbeatTimer = null;
     }
     if (this.sendQueueTimer) {
-      clearInterval(this.sendQueueTimer);
+      clearTimeout(this.sendQueueTimer);
       this.sendQueueTimer = null;
     }
   }

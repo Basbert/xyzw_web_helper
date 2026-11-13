@@ -490,7 +490,7 @@ const startTowerClimb = async () => {
     const reason = {
       stopped: "已停止",
       energy: "小鱼干不足",
-      uncertain: "本次战斗结果未确认，请核对后再试",
+      uncertain: result.detail || "本次战斗结果未确认，请核对后再试",
     }[result.reason];
     climbProgress.value = `${reason}，本次收到 ${result.attempts} 次挑战响应。`;
   } catch (error) {

@@ -1,17 +1,25 @@
 /** Retry an intended connection without replaying any game commands. */
 export function createConnectionRecovery({
   canRecover,
+  shouldKeepTrying = canRecover,
   reconnect,
+  onState = /** @type {(id: string, state: string) => void} */ (() => {}),
   setTimer = setTimeout,
   clearTimer = clearTimeout,
   delays = [1000, 2000, 4000, 8000, 16000],
+  slowRetryMs = 60000,
   stableMs = 30000,
 }) {
   const states = new Map();
   let disposed = false;
   const getState = (id) => {
     if (!states.has(id))
-      states.set(id, { attempts: 0, retry: null, stable: null });
+      states.set(id, {
+        attempts: 0,
+        retry: null,
+        stable: null,
+        recovering: false,
+      });
     return states.get(id);
   };
   const cancel = (id) => {
@@ -20,10 +28,15 @@ export function createConnectionRecovery({
     if (state.retry !== null) clearTimer(state.retry);
     if (state.stable !== null) clearTimer(state.stable);
     states.delete(id);
+    onState(id, "stopped");
   };
   const schedule = (id, { reset = false, immediate = false } = {}) => {
-    if (disposed || !canRecover(id)) return false;
+    if (disposed || !shouldKeepTrying(id)) return false;
     const state = getState(id);
+    if (!state.recovering) {
+      state.recovering = true;
+      onState(id, "waiting");
+    }
     if (state.stable !== null) clearTimer(state.stable);
     state.stable = null;
     if (reset) state.attempts = 0;
@@ -31,18 +44,31 @@ export function createConnectionRecovery({
       clearTimer(state.retry);
       state.retry = null;
     }
-    if (state.retry !== null || state.attempts >= delays.length) return false;
-    const delay = immediate ? 0 : delays[state.attempts];
+    if (state.retry !== null) return false;
+    const available = canRecover(id);
+    const delay = !available
+      ? slowRetryMs
+      : immediate
+        ? 0
+        : (delays[state.attempts] ?? slowRetryMs);
     state.retry = setTimer(async () => {
       if (disposed || states.get(id) !== state) return;
       state.retry = null;
-      if (!canRecover(id)) return;
-      state.attempts++;
+      if (!shouldKeepTrying(id)) {
+        cancel(id);
+        return;
+      }
+      if (!canRecover(id)) {
+        schedule(id);
+        return;
+      }
+      state.attempts = Math.min(state.attempts + 1, delays.length);
       try {
         const started = await reconnect(id);
-        if (!started && canRecover(id)) schedule(id);
+        if (!started && states.get(id) === state && shouldKeepTrying(id))
+          schedule(id);
       } catch {
-        if (canRecover(id)) schedule(id);
+        if (states.get(id) === state && shouldKeepTrying(id)) schedule(id);
       }
     }, delay);
     return true;
@@ -52,6 +78,10 @@ export function createConnectionRecovery({
     if (state.retry !== null) clearTimer(state.retry);
     if (state.stable !== null) clearTimer(state.stable);
     state.retry = null;
+    if (state.recovering) {
+      state.recovering = false;
+      onState(id, "restored");
+    }
     state.stable = setTimer(() => {
       if (states.get(id) !== state) return;
       state.stable = null;

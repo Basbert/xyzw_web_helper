@@ -7,102 +7,105 @@
       </div>
 
       <h2>基本信息</h2>
-      <a-card>
-        <a-form :model="userInfo" label-placement="left" label-width="80px">
-          <a-form-item label="用户名">
-            <a-input v-model:value="userInfo.username" readonly />
-          </a-form-item>
-          <a-form-item label="邮箱">
-            <a-input v-model:value="userInfo.email" />
-          </a-form-item>
-          <a-form-item label="昵称">
-            <a-input
+      <n-card>
+        <n-form :model="userInfo" label-placement="left" label-width="80px">
+          <n-form-item label="用户名">
+            <n-input v-model:value="userInfo.username" readonly />
+          </n-form-item>
+          <n-form-item label="邮箱">
+            <n-input v-model:value="userInfo.email" />
+          </n-form-item>
+          <n-form-item label="昵称">
+            <n-input
               v-model:value="userInfo.nickname"
               placeholder="请输入昵称"
             />
-          </a-form-item>
-          <a-form-item label="手机">
-            <a-input
+          </n-form-item>
+          <n-form-item label="手机">
+            <n-input
               v-model:value="userInfo.phone"
               placeholder="请输入手机号"
             />
-          </a-form-item>
-        </a-form>
+          </n-form-item>
+        </n-form>
 
-        <template #actions>
-          <a-button type="primary" @click="saveProfile"> 保存更改 </a-button>
+        <template #action>
+          <n-button type="primary" @click="saveProfile"> 保存更改 </n-button>
         </template>
-      </a-card>
+      </n-card>
 
       <h2>密码修改</h2>
-      <a-card>
-        <a-form
+      <n-card>
+        <n-form
           :model="passwordForm"
           ref="passwordFormRef"
           label-placement="left"
           label-width="100px"
         >
-          <a-form-item label="当前密码" prop="currentPassword">
-            <a-input
+          <n-form-item label="当前密码" path="currentPassword">
+            <n-input
               v-model:value="passwordForm.currentPassword"
               type="password"
+              show-password-on="mousedown"
               placeholder="请输入当前密码"
             />
-          </a-form-item>
-          <a-form-item label="新密码" prop="newPassword">
-            <a-input
+          </n-form-item>
+          <n-form-item label="新密码" path="newPassword">
+            <n-input
               v-model:value="passwordForm.newPassword"
               type="password"
+              show-password-on="mousedown"
               placeholder="请输入新密码"
             />
-          </a-form-item>
-          <a-form-item label="确认新密码" prop="confirmPassword">
-            <a-input
+          </n-form-item>
+          <n-form-item label="确认新密码" path="confirmPassword">
+            <n-input
               v-model:value="passwordForm.confirmPassword"
               type="password"
+              show-password-on="mousedown"
               placeholder="请再次输入新密码"
             />
-          </a-form-item>
-        </a-form>
-        <template #actions>
-          <a-button type="primary" @click="changePassword"> 修改密码 </a-button>
+          </n-form-item>
+        </n-form>
+        <template #action>
+          <n-button type="primary" @click="changePassword"> 修改密码 </n-button>
         </template>
-      </a-card>
+      </n-card>
 
       <h2>系统偏好</h2>
-      <a-card>
-        <a-form>
-          <a-form-item label="主题设置">
+      <n-card>
+        <n-form>
+          <n-form-item label="主题设置">
             <n-select
               v-model:value="preferences.theme"
               :options="themeOptions"
               @update:value="updateTheme"
             />
-            <template #extra> 选择您喜欢的界面主题 </template>
-          </a-form-item>
-          <a-form-item label="语言设置">
+            <template #feedback> 选择您喜欢的界面主题 </template>
+          </n-form-item>
+          <n-form-item label="语言设置">
             <n-select
               v-model:value="preferences.language"
               :options="languageOptions"
             />
-            <template #extra> 选择界面显示语言 </template>
-          </a-form-item>
-          <a-form-item label="通知设置">
+            <template #feedback> 选择界面显示语言 </template>
+          </n-form-item>
+          <n-form-item label="通知设置">
             <n-switch v-model:value="preferences.notifications" />
-            <template #extra> 接收任务完成通知 </template>
-          </a-form-item>
-          <a-form-item label="自动执行">
+            <template #feedback> 接收任务完成通知 </template>
+          </n-form-item>
+          <n-form-item label="自动执行">
             <n-switch v-model:value="preferences.autoExecute" />
-            <template #extra> 默认开启任务自动执行 </template>
-          </a-form-item>
-        </a-form>
-      </a-card>
+            <template #feedback> 默认开启任务自动执行 </template>
+          </n-form-item>
+        </n-form>
+      </n-card>
 
       <h2>Token管理</h2>
       <TokenManager />
 
       <h2>账户安全</h2>
-      <a-card>
+      <n-card>
         <div class="security-items">
           <div class="security-item">
             <div class="security-info">
@@ -136,7 +139,7 @@
             <n-button type="error" @click="deleteAccount"> 删除 </n-button>
           </div>
         </div>
-      </a-card>
+      </n-card>
     </div>
   </div>
 </template>
@@ -145,12 +148,14 @@
 import { useDialog, useMessage } from "naive-ui";
 import { onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
+import { useTheme } from "@/composables/useTheme";
 import { useAuthStore } from "@/stores/auth";
 
 useRouter();
 const message = useMessage();
 const dialog = useDialog();
 const authStore = useAuthStore();
+const { themeMode, setThemeMode } = useTheme();
 const passwordFormRef = ref(null);
 
 // 用户信息
@@ -205,19 +210,7 @@ const changePassword = () => {
 
 const updateTheme = (theme) => {
   preferences.theme = theme;
-  localStorage.setItem("theme", theme);
-  if (theme === "dark") {
-    document.documentElement.setAttribute("data-theme", "dark");
-  } else if (theme === "light") {
-    document.documentElement.removeAttribute("data-theme");
-  } else {
-    const prefersDark =
-      window.matchMedia &&
-      window.matchMedia("(prefers-color-scheme: dark)").matches;
-    if (prefersDark)
-      document.documentElement.setAttribute("data-theme", "dark");
-    else document.documentElement.removeAttribute("data-theme");
-  }
+  setThemeMode(theme);
 };
 
 const setupTwoFactor = () => {
@@ -260,6 +253,7 @@ onMounted(() => {
       console.error("解析用户偏好失败:", error);
     }
   }
+  preferences.theme = themeMode.value;
 });
 </script>
 

@@ -48,13 +48,13 @@
       </div>
 
       <div class="function-right">
-        <a-date-picker
-          v-model:value="queryDate"
-          :default-value="queryDate"
-          @change="fetchBattleRecordsByDate"
-          value-format="YYYY/MM/DD"
-          format="YYYY/MM/DD"
-          :disabled-date="disabledDate"
+        <n-date-picker
+          v-model:formatted-value="queryDate"
+          type="date"
+          value-format="yyyy/MM/dd"
+          format="yyyy/MM/dd"
+          :is-date-disabled="disabledDate"
+          @update:formatted-value="fetchBattleRecordsByDate"
         />
         <n-button
           size="small"
@@ -956,17 +956,18 @@ const handleImageError = (event) => {
   event.target.style.display = "none";
 };
 
-const disabledDate = (current) => {
+const disabledDate = (ts) => {
+  const current = new Date(ts);
   return (
     (!isSameGameValue(current.getDay(), 6) &&
       !isSameGameValue(current.getDay(), 0)) ||
-    current > Date.now()
+    ts > Date.now()
   );
 };
 
 //日期选择时调用查询战绩方法
 const fetchBattleRecordsByDate = (val) => {
-  if (!isSameGameValue(undefined, val)) {
+  if (typeof val === "string" && val) {
     queryDate.value = val;
   } else {
     queryDate.value = getLastSaturday();
@@ -1037,7 +1038,7 @@ const handleExport = async () => {
 
   try {
     if (exportmethod.value.includes("1")) {
-      formatBattleRecordsForExport(
+      await formatBattleRecordsForExport(
         battleRecords.value.roleDetailsList,
         queryDate.value,
       );

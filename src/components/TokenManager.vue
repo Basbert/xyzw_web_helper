@@ -1,6 +1,6 @@
 <template>
-  <a-card>
-    <template #extra>
+  <n-card>
+    <template #header-extra>
       <div class="header-actions">
         <n-button size="small" @click="refreshTokens">
           <template #icon>
@@ -130,13 +130,13 @@
       </div>
     </template>
     <!-- 批量操作 -->
-    <template #actions>
+    <template #action>
       <n-button type="warning" @click="cleanExpiredTokens">
         清理过期Token
       </n-button>
       <n-button type="error" @click="clearAllTokens"> 清除所有Token </n-button>
     </template>
-  </a-card>
+  </n-card>
 </template>
 
 <script setup>

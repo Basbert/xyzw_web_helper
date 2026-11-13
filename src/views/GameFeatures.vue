@@ -32,6 +32,9 @@
 
     <!-- 反馈提示区域 -->
     <div v-if="showFeedback" class="feedback-section" />
+    <p v-if="recoveryNote" class="container recovery-note" role="status">
+      {{ recoveryNote }}
+    </p>
 
     <!-- 功能模块网格 -->
     <div class="features-grid-section">
@@ -109,6 +112,16 @@ const connectionClass = computed(() => {
 
 const isConnected = computed(() => {
   return connectionStatus.value === "connected";
+});
+
+const recoveryNote = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  const state = tokenId && tokenStore.connectionRecoveryStatus?.[tokenId];
+  if (state === "waiting")
+    return "连接中断，正在自动尝试重连。切到后台时浏览器可能暂停页面或延迟重连。";
+  if (state === "restored")
+    return "连接已恢复，请先核对中断任务的状态和游戏内结果，再决定是否继续。";
+  return "";
 });
 
 // 方法
@@ -218,6 +231,9 @@ const initializeGameData = async () => {
     tokenStore.sendMessage(tokenId, "tower_getinfo");
     tokenStore.sendMessage(tokenId, "evotower_getinfo");
     tokenStore.sendMessage(tokenId, "presetteam_getinfo");
+    // This command's side effects are not confirmed. On automatic recovery,
+    // retain the previously known battle version and do not send it again.
+    if (tokenStore.connectionRecoveryStatus?.[tokenId] === "restored") return;
     const res = await tokenStore.sendMessageWithPromise(
       tokenId,
       "fight_startlevel",
@@ -256,6 +272,13 @@ onUnmounted(() => {
   max-width: 1400px;
   margin: 0 auto;
   padding: 0 var(--spacing-lg);
+}
+
+.recovery-note {
+  margin-top: var(--spacing-md);
+  color: var(--text-secondary);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
 }
 
 @media (max-width: 768px) {

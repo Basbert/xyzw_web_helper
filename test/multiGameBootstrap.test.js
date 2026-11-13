@@ -20,10 +20,9 @@ const expectedRuntimeFiles = [
   "cocos2d-js-min.a5841.js",
   "xh.js",
   "sh1.js",
-  "diagnose_require.js",
 ];
 
-function executeBootstrap(boot) {
+function executeBootstrap(boot, search = "") {
   const messages = [];
   const loadedScripts = [];
   const splash = { style: {}, textContent: "" };
@@ -70,7 +69,7 @@ function executeBootstrap(boot) {
       return boot([...loadedScripts], { binTool });
     },
     document,
-    location: { origin: "https://helper.example" },
+    location: { origin: "https://helper.example", search },
     parent: {
       postMessage(payload, origin) {
         messages.push({ payload, origin });
@@ -171,4 +170,16 @@ test("multi-game bootstrap reports boot rejection as fatal", async () => {
   assert.equal(messages.length, 1);
   assert.equal(messages[0].payload.type, "fatal");
   assert.equal(messages[0].payload.code, "runtime-load-failed");
+});
+
+test("multi-game bootstrap loads diagnose_require.js only when debug=1", async () => {
+  const { loadedScripts } = executeBootstrap(
+    () => Promise.resolve(),
+    "?debug=1",
+  );
+  await flushBootstrap();
+  assert.deepEqual(loadedScripts, [
+    ...expectedRuntimeFiles,
+    "diagnose_require.js",
+  ]);
 });

@@ -8,7 +8,9 @@ import { g_utils } from "@/utils/bonProtocol";
  * @returns {string} Hexadecimal digest used as the stable local token key.
  */
 export const getTokenId = (token: string | ArrayBuffer | Uint8Array) => {
-  const binHash = MD5(lib.WordArray.create(token)).toString(enc.Hex);
+  const binHash = MD5(
+    lib.WordArray.create(token as Parameters<typeof lib.WordArray.create>[0]),
+  ).toString(enc.Hex);
   return binHash;
 };
 
@@ -44,7 +46,7 @@ class RateLimiter {
       return;
     }
 
-    const oldestRequest = this.requests[0];
+    const oldestRequest = this.requests[0] ?? Date.now();
     const waitTime = oldestRequest + this.windowMs - Date.now();
 
     if (waitTime > 0) {
@@ -108,6 +110,112 @@ export const scheduleAuthUserRequest = <T>(
   return authUserRateLimiter.schedule(fn);
 };
 
+const BLOCKED_TOKEN_URL_HOSTS = new Set([
+  "0.0.0.0",
+  "[::]",
+  "metadata.google.internal",
+]);
+const LINK_LOCAL_HOST_RE = /^169\.254\./;
+const DEFAULT_TOKEN_HTTP_TIMEOUT_MS = 15000;
+
+/**
+ * Validate a user-supplied URL used for fetching token payloads.
+ * @param {string} rawUrl Candidate URL string.
+ * @returns {URL} Parsed and validated HTTP(S) URL.
+ */
+export const validateTokenSourceUrl = (rawUrl: string): URL => {
+  const trimmed = typeof rawUrl === "string" ? rawUrl.trim() : "";
+  if (!trimmed) {
+    throw new Error("请输入 Token 源 URL");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("请输入有效的 HTTP(S) URL 地址");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("仅支持 http 或 https 协议的 URL");
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error("URL 不允许包含内嵌账号或密码");
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (
+    !host ||
+    BLOCKED_TOKEN_URL_HOSTS.has(host) ||
+    LINK_LOCAL_HOST_RE.test(host)
+  ) {
+    throw new Error("不支持访问该目标主机地址");
+  }
+
+  return parsed;
+};
+
+/**
+ * Fetch and validate a JSON token payload from a remote or local URL with timeout protection.
+ * @param {string} rawUrl Candidate URL string.
+ * @param {object} [options] Optional timeout and fetch implementation overrides.
+ * @param {number} [options.timeoutMs] Request timeout in milliseconds.
+ * @param {Function} [options.fetcher] Custom fetch implementation for testing.
+ * @returns {Promise<Record<string, unknown>>} Parsed JSON object payload.
+ */
+export const fetchTokenPayloadFromUrl = async (
+  rawUrl: string,
+  options: { timeoutMs?: number; fetcher?: typeof fetch } = {},
+): Promise<Record<string, unknown>> => {
+  const parsed = validateTokenSourceUrl(rawUrl);
+  const timeoutMs = options.timeoutMs ?? 10000;
+  const fetcher = options.fetcher ?? fetch;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetcher(parsed.toString(), {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+      },
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP 状态码：${response.status}`);
+    }
+
+    let data: unknown;
+    try {
+      data = await response.json();
+    } catch {
+      throw new Error("返回数据不是有效的 JSON 格式");
+    }
+
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error("返回数据格式无效");
+    }
+
+    return data as Record<string, unknown>;
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "name" in error &&
+      error.name === "AbortError"
+    ) {
+      throw new Error(`请求超时（${timeoutMs}ms）`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
 /**
  * Exchange credential bytes through the shared login limiter and create session metadata.
  * @param {ArrayBuffer} arrayBuffer Imported credential bytes.
@@ -122,15 +230,15 @@ export const transformToken = async (arrayBuffer: ArrayBuffer) => {
         params: {
           _seq: 1,
         },
+        timeout: DEFAULT_TOKEN_HTTP_TIMEOUT_MS,
         headers: {
           "Content-Type": "application/octet-stream",
-          referrerPolicy: "no-referrer",
         },
         responseType: "arraybuffer",
       },
     );
     const msg = g_utils.parse(res.data);
-    const data = msg.getData();
+    const data = (msg.getData() ?? {}) as Record<string, unknown>;
     const currentTime = Date.now();
     const sessId = currentTime * 100 + Math.floor(Math.random() * 100);
     const connId = currentTime + Math.floor(Math.random() * 10);
@@ -153,9 +261,9 @@ export const getServerList = async (arrayBuffer: ArrayBuffer) => {
       params: {
         _seq: 3,
       },
+      timeout: DEFAULT_TOKEN_HTTP_TIMEOUT_MS,
       headers: {
         "Content-Type": "application/octet-stream",
-        referrerPolicy: "no-referrer",
       },
       responseType: "arraybuffer",
     },
@@ -165,8 +273,8 @@ export const getServerList = async (arrayBuffer: ArrayBuffer) => {
   const msg = g_utils.parse(res.data);
   // console.log("解析结果:", msg);
 
-  const data = msg.getData();
+  const data = (msg.getData() ?? {}) as { roles?: Record<string, unknown> };
   return JSON.stringify({
-    ...data.roles,
+    ...(data.roles ?? {}),
   });
 };

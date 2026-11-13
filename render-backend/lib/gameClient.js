@@ -126,12 +126,60 @@ const RESP_MAP = {
   syncpushresp: ["system_mysharecallback"],
 };
 
+const DEFAULT_WS_URL = "wss://xxz-xyzw.hortorgames.com/agent";
+const LOCALHOST_WS_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+const OFFICIAL_WS_HOST_RE = /^(?:[a-z0-9-]+\.)*hortorgames\.com$/i;
+
+/**
+ * Validate a backend WebSocket target URL against allowed schemes and hosts.
+ * @param {string} rawUrl Candidate WebSocket URL.
+ * @param {string} [extraHostsRaw] Optional comma-separated extra host allow-list (defaults to env ALLOWED_WS_HOSTS).
+ * @returns {string} Validated WebSocket URL string.
+ */
+function validateWebSocketUrl(rawUrl, extraHostsRaw = "") {
+  const trimmed = typeof rawUrl === "string" ? rawUrl.trim() : "";
+  if (!trimmed) {
+    throw new Error("WebSocket 地址不能为空");
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("无效的 WebSocket 地址");
+  }
+
+  if (parsed.protocol !== "wss:" && parsed.protocol !== "ws:") {
+    throw new Error("WebSocket 地址仅支持 ws 或 wss 协议");
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new Error("WebSocket 地址不能包含内嵌凭证");
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  const extraHosts = String(extraHostsRaw || "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (
+    !OFFICIAL_WS_HOST_RE.test(host) &&
+    !LOCALHOST_WS_HOSTS.has(host) &&
+    !extraHosts.includes(host)
+  ) {
+    throw new Error(`不允许连接的 WebSocket 主机: ${host}`);
+  }
+
+  return parsed.toString();
+}
+
 class GameClient {
-  constructor(tokenData, wsUrl) {
+  constructor(tokenData, wsUrl, extraWsHosts = "") {
     this.token = tokenData;
-    this._wsUrl =
+    const rawWsUrl =
       wsUrl ||
-      `wss://xxz-xyzw.hortorgames.com/agent?p=${encodeURIComponent(
+      `${DEFAULT_WS_URL}?p=${encodeURIComponent(
         JSON.stringify({
           roleToken: tokenData.roleToken,
           roleId: tokenData.roleId,
@@ -140,6 +188,7 @@ class GameClient {
           isRestore: tokenData.isRestore,
         }),
       )}&e=x&lang=chinese`;
+    this._wsUrl = validateWebSocketUrl(rawWsUrl, extraWsHosts);
 
     this.ws = null;
     this.connected = false;
@@ -464,4 +513,4 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-export { GameClient };
+export { GameClient, validateWebSocketUrl };

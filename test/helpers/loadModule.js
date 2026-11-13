@@ -29,6 +29,7 @@ export async function loadModule(url, dependencies = {}, globals = {}) {
         return dependencies[name];
       },
       console,
+      URL,
       setTimeout,
       clearTimeout,
       ...globals,

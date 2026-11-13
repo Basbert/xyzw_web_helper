@@ -4,6 +4,12 @@
  */
 
 (function () {
+  if (
+    typeof window !== "undefined" &&
+    !/(?:^|[?&])debug=1(?:&|$)/.test(window.location?.search || "")
+  ) {
+    return;
+  }
   console.log("=== __require 模块诊断工具 ===\n");
 
   // 1. 检查 __require 是否存在

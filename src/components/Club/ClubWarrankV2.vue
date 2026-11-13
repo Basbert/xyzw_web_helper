@@ -86,14 +86,14 @@
         </div>
 
         <div class="function-right">
-          <a-date-picker
-            v-model:value="inputDate1"
-            :default-value="inputDate1"
-            value-format="YYYY/MM/DD"
-            format="YYYY/MM/DD"
-            :allow-clear="false"
-            :disabled-date="disabledDate"
-            @change="fetchBattleRecordsByDate"
+          <n-date-picker
+            v-model:formatted-value="inputDate1"
+            type="date"
+            value-format="yyyy/MM/dd"
+            format="yyyy/MM/dd"
+            :clearable="false"
+            :is-date-disabled="disabledDate"
+            @update:formatted-value="fetchBattleRecordsByDate"
           />
           <n-button
             size="small"
@@ -2177,7 +2177,7 @@ const selectStatCalendarDate = (value) => {
 
 //日期选择时调用查询战绩方�?
 const fetchBattleRecordsByDate = (val) => {
-  if (!isSameGameValue(undefined, val)) {
+  if (typeof val === "string" && val) {
     inputDate1.value = val;
   } else {
     inputDate1.value = getLastSaturday();
@@ -2716,7 +2716,7 @@ const handleExport1 = async () => {
 
   try {
     if (exportmethod.value.includes("1")) {
-      formatWarrankRecordsForExport(
+      await formatWarrankRecordsForExport(
         battleRecords1.value.legionRankList,
         queryDate.value,
       );

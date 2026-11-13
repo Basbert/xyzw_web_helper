@@ -1,4 +1,5 @@
 import { getServerList, transformToken } from "@/utils/token";
+import { encodeCombUserBin } from "@/utils/xyzwRuntime";
 
 export interface SavedCombUser {
   encryptCombUser: string;
@@ -13,40 +14,16 @@ export interface RoleMatchConfig {
   roleId?: string | number;
 }
 
-function getGameCrypto() {
-  const dm = (globalThis as any).__require?.("13");
-  if (!dm?.encMsg || !dm?.lz4XorEncode || !dm?.lz4XorDecode) {
-    throw new Error("游戏加密模块未加载，无法使用保存的 combUser 生成 bin");
-  }
-  return dm;
-}
-
 /** 使用服务端返回的 combUser 重新生成登录 bin。 */
-export function generateBinFromCombUser(
+export async function generateBinFromCombUser(
   combUser: SavedCombUser,
   serverId: string | number | null = null,
-): ArrayBuffer {
+): Promise<ArrayBuffer> {
   if (!combUser?.encryptCombUser || !combUser.timestamp || !combUser.sign) {
     throw new Error("保存的 combUser 数据不完整");
   }
 
-  const dm = getGameCrypto();
-  const encrypted = dm.encMsg(
-    {
-      platform: "hortor",
-      platformExt: "mix",
-      info: combUser,
-      serverId: serverId == null ? null : Number(serverId),
-      scene: 0,
-      referrerInfo: "",
-    },
-    { decrypt: dm.lz4XorDecode, encrypt: dm.lz4XorEncode },
-  );
-  const bytes = new Uint8Array(encrypted);
-  return bytes.buffer.slice(
-    bytes.byteOffset,
-    bytes.byteOffset + bytes.byteLength,
-  );
+  return await encodeCombUserBin(combUser, serverId);
 }
 
 export function roleIndexFromServerId(serverId: unknown): number {
@@ -69,7 +46,7 @@ export async function refreshTokenFromCombUser(
   combUser: SavedCombUser,
   config: RoleMatchConfig,
 ) {
-  const baseBin = generateBinFromCombUser(combUser);
+  const baseBin = await generateBinFromCombUser(combUser);
   const listStr = await getServerList(baseBin);
   const roles = JSON.parse(listStr || "{}");
   const roleList = Object.values(roles || {}) as any[];
@@ -90,7 +67,7 @@ export async function refreshTokenFromCombUser(
     );
   }
 
-  const roleBin = generateBinFromCombUser(combUser, matched.serverId);
+  const roleBin = await generateBinFromCombUser(combUser, matched.serverId);
   const token = await transformToken(roleBin);
   return { token, bin: roleBin, role: matched };
 }

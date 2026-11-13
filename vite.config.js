@@ -45,12 +45,6 @@ export default defineConfig(async () => {
     "unplugin-vue-components/vite",
     "component auto-registration",
   );
-  const componentsResolversModule = componentsModule
-    ? await safeImport(
-        "unplugin-vue-components/resolvers",
-        "component resolvers",
-      )
-    : null;
   const unoCssModule = await safeImport("unocss/vite", "UnoCSS");
   const vueDevToolsModule = await safeImport(
     "vite-plugin-vue-devtools",
@@ -64,7 +58,13 @@ export default defineConfig(async () => {
   const routerPlugin = routerModule?.default?.({
     routesFolder: "src/views",
     logs: true,
-    exclude: ["**/components/**", "**/test**.vue", "**/**Modal.vue"],
+    exclude: [
+      "**/components/**",
+      "**/test**.vue",
+      "**/**Modal.vue",
+      "**/TokenImport/*Form.vue",
+      "**/*.js",
+    ],
     importMode: "async",
     dts: "src/typed-router.d.ts",
   });
@@ -74,17 +74,9 @@ export default defineConfig(async () => {
     dts: "src/auto-imports.d.ts",
   });
 
-  const { ArcoResolver } = componentsResolversModule ?? {};
   const componentsPlugin = componentsModule?.default?.({
     dirs: ["src/components"],
     globsExclude: ["**/Private/**"],
-    resolvers: ArcoResolver
-      ? [
-          ArcoResolver({
-            importStyle: false,
-          }),
-        ]
-      : [],
   });
 
   const unoCssPlugin = unoCssModule?.default?.();
@@ -206,6 +198,34 @@ export default defineConfig(async () => {
         scss: {
           api: "modern",
           additionalData: '@use "@/assets/styles/variables.scss" as vars;',
+        },
+      },
+    },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes("node_modules")) return;
+            if (
+              id.includes("/node_modules/vue/") ||
+              id.includes("/node_modules/@vue/") ||
+              id.includes("/node_modules/pinia/") ||
+              id.includes("/node_modules/vue-router/") ||
+              id.includes("/node_modules/vue-i18n/") ||
+              id.includes("/node_modules/@vueuse/")
+            ) {
+              return "vue-vendor";
+            }
+            if (id.includes("/node_modules/@vicons/")) {
+              return "icons";
+            }
+            if (id.includes("/node_modules/naive-ui/")) {
+              return "ui-vendor";
+            }
+            if (id.includes("/node_modules/xlsx/")) {
+              return "xlsx";
+            }
+          },
         },
       },
     },

@@ -148,16 +148,31 @@ export const useLocalTokenStore = defineStore("localToken", () => {
         maxReconnectAttempts: 5,
       });
 
+      let initTimerId = null;
+
       // 设置事件监听器
       wsAgent.onOpen = () => {
-        // 降噪
+        const current = wsConnections.value[roleId];
+        if (!current || current.agent !== wsAgent) return;
 
         // 更新连接状态
-        wsConnections.value[roleId].status = "connected";
-        wsConnections.value[roleId].connectedAt = new Date().toISOString();
+        current.status = "connected";
+        current.connectedAt = new Date().toISOString();
 
         // 发送初始化命令
-        setTimeout(() => {
+        if (initTimerId !== null) {
+          clearTimeout(initTimerId);
+        }
+        initTimerId = setTimeout(() => {
+          initTimerId = null;
+          const active = wsConnections.value[roleId];
+          if (
+            !active ||
+            active.agent !== wsAgent ||
+            active.status !== "connected"
+          ) {
+            return;
+          }
           // 获取角色信息
           wsAgent.send(gameCommands.role_getroleinfo(0, 0, { roleId }));
 
@@ -166,14 +181,7 @@ export const useLocalTokenStore = defineStore("localToken", () => {
         }, 1000);
       };
 
-      wsAgent.onMessage = (message) => {
-        // 降噪
-
-        // 处理不同类型的消息
-        if (message.cmd) {
-          handleGameMessage(roleId, message);
-        }
-      };
+      wsAgent.onMessage = () => {};
 
       wsAgent.onError = (error) => {
         console.error(`❌ WebSocket错误 [${roleId}]:`, error);
@@ -200,6 +208,12 @@ export const useLocalTokenStore = defineStore("localToken", () => {
 
       // 构建WebSocket URL
       const baseWsUrl = "wss://xxz-xyzw.hortorgames.com/agent";
+      if (customWsUrl) {
+        const parsed = new URL(customWsUrl);
+        if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+          throw new Error("WebSocket地址必须使用 ws:// 或 wss:// 协议");
+        }
+      }
       const wsUrl =
         customWsUrl ||
         WsAgent.buildUrl(baseWsUrl, {
@@ -208,14 +222,25 @@ export const useLocalTokenStore = defineStore("localToken", () => {
           lang: "chinese",
         });
 
-      // 保存连接信息
+      // 保存连接信息（不在响应态中持久化敏感凭据或含 token 的完整 URL）
       wsConnections.value[roleId] = {
         agent: wsAgent,
         gameCommands,
         status: "connecting",
         roleId,
-        wsUrl,
-        actualToken,
+        wsOrigin: (() => {
+          try {
+            return new URL(wsUrl).origin;
+          } catch {
+            return "";
+          }
+        })(),
+        clearInitTimer: () => {
+          if (initTimerId !== null) {
+            clearTimeout(initTimerId);
+            initTimerId = null;
+          }
+        },
         createdAt: new Date().toISOString(),
         lastError: null,
         reconnectAttempt: 0,
@@ -235,45 +260,12 @@ export const useLocalTokenStore = defineStore("localToken", () => {
     }
   };
 
-  // 处理游戏消息
-  const handleGameMessage = (roleId, message) => {
-    const { cmd } = message;
-
-    switch (cmd) {
-      case "role_getroleinfo":
-        // 降噪
-        break;
-
-      case "system_getdatabundlever":
-        // 降噪
-        break;
-
-      case "task_claimdailyreward":
-        // 降噪
-        break;
-
-      case "system_signinreward":
-        // 降噪
-        break;
-
-      default:
-      // 降噪
-    }
-  };
-
   const closeWebSocketConnection = (roleId) => {
     const connection = wsConnections.value[roleId];
     if (connection) {
-      // 如果是新的WsAgent实例
+      connection.clearInitTimer?.();
       if (connection.agent && typeof connection.agent.close === "function") {
         connection.agent.close();
-      }
-      // 如果是旧的WebSocket实例
-      else if (
-        connection.connection &&
-        typeof connection.connection.close === "function"
-      ) {
-        connection.connection.close();
       }
 
       delete wsConnections.value[roleId];
@@ -365,7 +357,7 @@ export const useLocalTokenStore = defineStore("localToken", () => {
     return {
       status: connection.status,
       roleId: connection.roleId,
-      wsUrl: connection.wsUrl,
+      wsOrigin: connection.wsOrigin,
       connectedAt: connection.connectedAt,
       createdAt: connection.createdAt,
       lastError: connection.lastError,

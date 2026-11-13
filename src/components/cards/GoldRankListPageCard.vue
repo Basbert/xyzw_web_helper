@@ -1646,7 +1646,7 @@ const handleExport1 = async () => {
       loadingMsg.destroy(); // 完成后销毁
       prepareMsg.destroy(); // 销毁准备导出的提示
 
-      formatWarrankRecordsForExport(
+      await formatWarrankRecordsForExport(
         allData,
         queryDate.value || formatTimestamp1(new Date()),
       );

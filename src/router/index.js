@@ -1,9 +1,16 @@
 import { createRouter, createWebHistory } from "vue-router";
 import * as autoRoutes from "vue-router/auto-routes";
 import { useTokenStore } from "@/stores/tokenStore";
-import { isNowInLegionWarTime } from "@/utils/clubBattleUtils";
+import { isNowInLegionWarTime } from "@/utils/legionWarTime";
 
-const generatedRoutes = autoRoutes.routes ?? [];
+const generatedRoutes = (autoRoutes.routes ?? []).filter(
+  (route) =>
+    typeof route?.path === "string" &&
+    !route.path.startsWith("/TokenImport/") &&
+    !["/", "/tokens", "/game", "/multi-game", "/websocket-test"].includes(
+      route.path.toLowerCase(),
+    ),
+);
 
 const my_routes = [
   {
@@ -130,8 +137,6 @@ const my_routes = [
           requiresToken: true,
         },
       },
-      // 增加自动路由引用
-      ...generatedRoutes,
     ],
   },
   {

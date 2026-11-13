@@ -84,6 +84,8 @@ function fixture(progress = {}) {
   };
   const store = {
     gameTokens: [{ id: "account-a", name: "Test account" }],
+    selectedToken: { id: "account-a" },
+    wsConnections: { "account-a": { client: {} } },
     getWebSocketStatus: () => (connected ? "connected" : "disconnected"),
     async sendGetRoleInfo() {
       calls.push({ cmd: "role_getroleinfo" });
@@ -663,6 +665,58 @@ test("unchanged formations are not queried again just to restore them", async ()
     0,
   );
 });
+
+for (const scenario of ["reconnected", "aba", "reconnected-during-restore"]) {
+  test(`formation restoration remains bound to the original connection: ${scenario}`, async () => {
+    const f = fixture({ 13: 0 });
+    let formation = 1;
+    let stopped = false;
+    let queries = 0;
+    const send = f.store.sendMessageWithPromise;
+    f.store.sendMessageWithPromise = async (...args) => {
+      const [id, cmd, params] = args;
+      if (cmd === "presetteam_getinfo") {
+        f.calls.push({ cmd, params });
+        queries++;
+        if (scenario === "reconnected-during-restore" && queries === 2)
+          f.store.wsConnections[id] = { client: {} };
+        return { presetTeamInfo: { useTeamId: formation } };
+      }
+      if (cmd === "presetteam_saveteam") {
+        f.calls.push({ cmd, params });
+        formation = params.teamId;
+        if (formation === 2) {
+          stopped = true;
+          if (scenario === "reconnected")
+            f.store.wsConnections[id] = { client: {} };
+          if (scenario === "aba") {
+            f.store.selectedToken = { id: "account-b" };
+            f.store.selectedToken = { id };
+          }
+        }
+        return {};
+      }
+      return send(...args);
+    };
+    await assert.rejects(
+      f.runner().run(
+        "account-a",
+        { shouldStop: () => stopped },
+        {
+          ...settings,
+          arenaEnable: true,
+          arenaFormation: 2,
+        },
+      ),
+      /停止/,
+    );
+    const saves = f.calls
+      .filter((c) => c.cmd === "presetteam_saveteam")
+      .map((c) => c.params.teamId);
+    assert.deepEqual(saves, scenario === "aba" ? [2, 1] : [2]);
+    assert.equal(queries, scenario === "reconnected" ? 1 : 2);
+  });
+}
 
 test("hang-up resumes from the server deficit and never substitutes share commands", async () => {
   const f = fixture({ 5: 3 });

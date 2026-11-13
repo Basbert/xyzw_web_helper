@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { effectScope, reactive } from "vue";
 import {
   readDailyTaskSettings,
+  readDailyTaskSettingsForExecution,
   useDailyTaskSettings,
   writeDailyTaskSettings,
 } from "../src/utils/dailyTaskSettings.js";
@@ -161,4 +162,54 @@ test("梦境购买开关按角色保存且支持关闭", () => {
   store.selectedToken = a;
   assert.equal(binding.settings.dreamShopPurchase, false);
   binding.stop();
+});
+
+test("首页区分首次无记录与损坏的设置，不静默开启默认付费选项", () => {
+  const storage = memoryStorage();
+  const token = { id: "a", roleId: "role-a" };
+  assert.equal(
+    readDailyTaskSettingsForExecution(token, [token], storage),
+    null,
+  );
+  for (const invalid of [
+    "",
+    "{",
+    "null",
+    "[]",
+    '{"dreamShopPurchase":"false"}',
+    '{"payRecruit":null}',
+  ]) {
+    storage.setItem("daily-settings:a", invalid);
+    assert.throws(
+      () => readDailyTaskSettingsForExecution(token, [token], storage),
+      /设置.*损坏|设置.*无效/,
+    );
+    storage.removeItem("daily-settings:a");
+  }
+  storage.setItem(
+    "daily-role-settings:role-a",
+    JSON.stringify({ dreamShopPurchase: false }),
+  );
+  storage.setItem("daily-settings:a", "{");
+  assert.throws(
+    () => readDailyTaskSettingsForExecution(token, [token], storage),
+    /设置.*损坏/,
+  );
+});
+
+test("首页不会将不同旧账号的冲突设置当作首次设置", () => {
+  const storage = memoryStorage();
+  const token = { id: "new", roleId: "r" };
+  const oldA = { id: "old-a", roleId: "r" };
+  const oldB = { id: "old-b", roleId: "r" };
+  storage.setItem("daily-settings:old-a", JSON.stringify({ payRecruit: true }));
+  storage.setItem(
+    "daily-settings:old-b",
+    JSON.stringify({ payRecruit: false }),
+  );
+  assert.throws(
+    () =>
+      readDailyTaskSettingsForExecution(token, [token, oldA, oldB], storage),
+    /设置.*冲突/,
+  );
 });

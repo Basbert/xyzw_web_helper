@@ -44,11 +44,12 @@ function fixture({ running = true, occupiedSlots = 1 } = {}) {
     role,
     tokenStore,
     disconnect: () => (connected = false),
-    run: () =>
+    run: (options = {}) =>
       runBottleAndHangUp({
         tokenStore,
         tokenId: "account-a",
         sleep: async () => {},
+        ...options,
       }),
   };
 }
@@ -104,10 +105,7 @@ test("a failed reward claim never proceeds to add time", async () => {
     if (args[1] === "system_claimhangupreward") throw new Error("请求失败");
     return send(...args);
   };
-  await assert.rejects(
-    f.run(),
-    /挂机奖励领取失败.*功法残卷领取请求已完成/,
-  );
+  await assert.rejects(f.run(), /挂机奖励领取失败.*功法残卷领取请求已完成/);
   assert.equal(
     f.calls.some((call) => call.command === "system_mysharecallback"),
     false,
@@ -146,6 +144,59 @@ test("switching accounts after stopping restarts the original bottle without cla
   assert.deepEqual(
     f.calls.map((call) => call.command),
     ["role_getroleinfo", "bottlehelper_stop", "bottlehelper_start"],
+  );
+});
+
+test("an A→B→A change during the role request cannot resume the old operation", async () => {
+  const f = fixture({ running: false });
+  let active = true;
+  const send = f.tokenStore.sendMessageWithPromise;
+  f.tokenStore.sendMessageWithPromise = async (...args) => {
+    const response = await send(...args);
+    if (args[1] === "role_getroleinfo") {
+      active = false;
+      f.tokenStore.selectedToken = { id: "other" };
+      f.tokenStore.selectedToken = { id: "account-a" };
+    }
+    return response;
+  };
+  await assert.rejects(f.run({ shouldStop: () => !active }), /已停止|已变化/);
+  assert.deepEqual(
+    f.calls.map((call) => call.command),
+    ["role_getroleinfo"],
+  );
+});
+
+test("leaving after a confirmed bottle stop restores the original bottle once and sends nothing else", async () => {
+  const f = fixture();
+  let active = true;
+  const send = f.tokenStore.sendMessageWithPromise;
+  f.tokenStore.sendMessageWithPromise = async (...args) => {
+    const response = await send(...args);
+    if (args[1] === "bottlehelper_stop") active = false;
+    return response;
+  };
+  await assert.rejects(f.run({ shouldStop: () => !active }), /已停止|已变化/);
+  assert.deepEqual(
+    f.calls.map((call) => call.command),
+    ["role_getroleinfo", "bottlehelper_stop", "bottlehelper_start"],
+  );
+});
+
+test("cancelling during the fragment request never repeats the request", async () => {
+  const f = fixture({ running: false, occupiedSlots: 4 });
+  let active = true;
+  const send = f.tokenStore.sendMessageWithPromise;
+  f.tokenStore.sendMessageWithPromise = async (...args) => {
+    const response = await send(...args);
+    if (args[1] === "legacy_claimhangup") active = false;
+    return response;
+  };
+  const result = await f.run({ shouldStop: () => !active });
+  assert.equal(result.legacy.status, "unconfirmed");
+  assert.equal(
+    f.calls.filter((call) => call.command === "legacy_claimhangup").length,
+    1,
   );
 });
 

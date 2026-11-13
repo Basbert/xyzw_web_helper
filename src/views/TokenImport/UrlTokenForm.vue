@@ -73,7 +73,6 @@
 </template>
 <script lang="ts" setup>
 import { CloudUpload } from "@vicons/ionicons5";
-import axios from "axios";
 import {
   NButton,
   NCollapse,
@@ -87,6 +86,10 @@ import {
 
 import { reactive, ref } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import {
+  fetchTokenPayloadFromUrl,
+  validateTokenSourceUrl,
+} from "@/utils/token";
 
 const $emit = defineEmits(["cancel", "ok"]);
 const tokenStore = useTokenStore();
@@ -117,7 +120,21 @@ const urlRules = {
   ],
   url: [
     { required: true, message: "请输入Token获取地址", trigger: "blur" },
-    { type: "url", message: "请输入有效的URL地址", trigger: "blur" },
+    {
+      validator: (_rule: unknown, value: string) => {
+        try {
+          validateTokenSourceUrl(value);
+          return true;
+        } catch (error) {
+          return new Error(
+            error instanceof Error
+              ? error.message
+              : "请输入有效的 HTTP(S) URL 地址",
+          );
+        }
+      },
+      trigger: "blur",
+    },
   ],
 };
 
@@ -131,17 +148,34 @@ const handleUrlImport = async () => {
     return;
   }
 
+  const trimmedWsUrl = urlForm.wsUrl.trim();
+  if (trimmedWsUrl) {
+    try {
+      const parsedWs = new URL(trimmedWsUrl);
+      if (parsedWs.protocol !== "ws:" && parsedWs.protocol !== "wss:") {
+        message.error("自定义连接地址仅支持 ws:// 或 wss:// 协议");
+        return;
+      }
+    } catch {
+      message.error("自定义连接地址格式无效");
+      return;
+    }
+  }
+
   isImporting.value = true;
   try {
-    const response = await axios.get(urlForm.url);
-    if (response.status === 200 && response.data && response.data.token) {
+    const validatedUrl = validateTokenSourceUrl(urlForm.url).toString();
+    const data = await fetchTokenPayloadFromUrl(validatedUrl, {
+      timeoutMs: 10000,
+    });
+    if (typeof data.token === "string" && data.token.trim()) {
       const newToken = {
-        name: urlForm.name,
-        token: response.data.token,
+        name: urlForm.name.trim(),
+        token: data.token,
         server: urlForm.server || "未知",
-        wsUrl: urlForm.wsUrl || "",
+        wsUrl: trimmedWsUrl,
         id: Date.now().toString(),
-        sourceUrl: urlForm.url,
+        sourceUrl: validatedUrl,
         importMethod: "url",
       };
       tokenStore.addToken(newToken);
@@ -156,7 +190,11 @@ const handleUrlImport = async () => {
       message.error("接口返回数据格式不正确，未找到token字段");
     }
   } catch (error) {
-    message.error("获取Token失败，请检查URL地址或网络连接");
+    message.error(
+      error instanceof Error
+        ? error.message
+        : "获取Token失败，请检查URL地址或网络连接",
+    );
   } finally {
     isImporting.value = false;
   }

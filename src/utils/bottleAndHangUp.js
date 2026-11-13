@@ -5,6 +5,7 @@ export async function runBottleAndHangUp({
   tokenStore,
   tokenId,
   onProgress = () => {},
+  shouldStop = () => false,
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
   return runWithDailyTaskLock(tokenId, async () => {
@@ -20,6 +21,7 @@ export async function runBottleAndHangUp({
     };
     const check = () => {
       checkConnection();
+      if (shouldStop()) throw new Error("任务已停止，请重新检查两项状态");
       if (tokenStore.selectedToken?.id !== tokenId)
         throw new Error("账号或连接已变化，请重新检查两项状态");
     };
