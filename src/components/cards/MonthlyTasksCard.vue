@@ -84,7 +84,7 @@
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import MyCard from "../Common/MyCard.vue";
 
@@ -101,6 +101,8 @@ const monthActivity = ref(null);
 let isUnmounted = false;
 let sessionGeneration = 0;
 let monthlyRequestId = 0;
+let clockTimer = null;
+const currentTimeMs = ref(Date.now());
 
 const now = new Date();
 const daysInMonth = new Date(
@@ -147,10 +149,11 @@ const isConnected = computed(() => {
   );
 });
 
-const isArenaActivityOpen = computed(() => {
-  const hour = new Date().getHours();
+const isArenaOpenAt = (timeMs) => {
+  const hour = new Date(timeMs + 8 * 60 * 60 * 1000).getUTCHours();
   return hour >= 6 && hour < 22;
-});
+};
+const isArenaActivityOpen = computed(() => isArenaOpenAt(currentTimeMs.value));
 
 const fetchMonthlyActivity = async (
   targetTokenId = tokenStore.selectedToken?.id,
@@ -398,8 +401,9 @@ const autoTopUpArena = async (need, shouldBe, target) => {
   if (!isConnected.value) return message.warning("请先建立WS连接");
   if (readMonthlyProgress(monthActivity.value, "arena") === null)
     return message.warning("请先刷新并确认月度竞技场进度");
+  currentTimeMs.value = Date.now();
   if (!isArenaActivityOpen.value)
-    return message.warning("竞技场活动已关闭，请在 6:00-22:00 时间段内操作");
+    return message.warning("竞技场活动已关闭，请在北京时间 6:00-22:00 操作");
   arenaToppingUp.value = true;
   try {
     const tokenId = tokenStore.selectedToken.id;
@@ -562,9 +566,16 @@ watch(
   { immediate: true },
 );
 
+onMounted(() => {
+  currentTimeMs.value = Date.now();
+  clockTimer = setInterval(() => {
+    currentTimeMs.value = Date.now();
+  }, 30000);
+});
 onUnmounted(() => {
   isUnmounted = true;
   sessionGeneration++;
+  if (clockTimer !== null) clearInterval(clockTimer);
 });
 
 defineExpose({ fetchMonthlyActivity });

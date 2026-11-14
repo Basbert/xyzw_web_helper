@@ -1613,6 +1613,61 @@ test("monthly fishing stops when the same client reconnects with a new socket", 
   }
 });
 
+test("monthly arena hours follow Beijing time and update while the page stays open", async () => {
+  let timeMs = Date.parse("2026-11-13T21:59:00Z");
+  let tick;
+  let cleared = false;
+  class FakeDate extends Date {
+    constructor(...args) {
+      super(...(args.length ? args : [timeMs]));
+    }
+    static now() {
+      return timeMs;
+    }
+  }
+  const store = vue.reactive({
+    selectedToken: null,
+    wsConnections: {},
+    getWebSocketStatus: () => "disconnected",
+  });
+  const env = await loadSfcSetup(
+    new URL("../src/components/cards/MonthlyTasksCard.vue", import.meta.url),
+    {
+      "naive-ui": { useMessage: () => createMessageMock() },
+      "@/stores/tokenStore": { useTokenStore: () => store },
+      "../Common/MyCard.vue": { default: {} },
+    },
+    {
+      Date: FakeDate,
+      setInterval(fn, interval) {
+        assert.equal(interval, 30000);
+        tick = fn;
+        return 123;
+      },
+      clearInterval(id) {
+        assert.equal(id, 123);
+        cleared = true;
+      },
+    },
+  );
+  try {
+    env.mount();
+    assert.equal(env.bindings.isArenaActivityOpen.value, false);
+    timeMs = Date.parse("2026-11-13T22:00:00Z");
+    tick();
+    assert.equal(env.bindings.isArenaActivityOpen.value, true);
+    timeMs = Date.parse("2026-11-14T13:59:00Z");
+    tick();
+    assert.equal(env.bindings.isArenaActivityOpen.value, true);
+    timeMs = Date.parse("2026-11-14T14:00:00Z");
+    tick();
+    assert.equal(env.bindings.isArenaActivityOpen.value, false);
+  } finally {
+    env.cleanup();
+  }
+  assert.equal(cleared, true);
+});
+
 test("monthly top-ups stop when progress or a battle result cannot be confirmed", async () => {
   for (const scenario of [
     "fish-progress",
