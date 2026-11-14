@@ -164,11 +164,13 @@ pnpm run format   # 代码格式化
 
 ### 发布前检查
 
-本项目的 GitHub Actions CI 使用 `.nvmrc` 中的 Node 版本和锁文件，依次安装依赖、运行测试、lint、格式检查和构建。发布到 Cloudflare 前，应确认对应提交的这些检查全部通过；也可以在本地按上面的命令先执行。
+本项目的 GitHub Actions CI 使用 `.nvmrc` 中的 Node 版本和锁文件，依次安装依赖、运行测试、lint、格式检查和构建；独立后端使用 `npm ci --prefix render-backend` 安装，并运行 `npm test --prefix render-backend` 检查定时器兼容性。发布到 Cloudflare 前，应确认对应提交的这些检查全部通过；也可以在本地先执行。
 
 Cloudflare Pages 的 Git 自动部署与 GitHub Actions 是独立流程。仅添加工作流不会阻止推送后自动部署；如需强制等待 CI，应通过受保护分支与必需状态检查，或调整 Cloudflare 的自动部署设置。
 
 真实账号和浏览器仍需核实的事项列在 [待验证清单](docs/validation-checklist.md)。定时任务由批量日常页面调度：页面关闭或离开后不会运行，后台和锁屏时还会受浏览器节流影响。
+
+表格导出使用 SheetJS 0.20.3。`vendor/xlsx-0.20.3.tgz` 来自 [SheetJS 官方发行包](https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz)，SHA-256 为 `8dc73fc3b00203e72d176e85b50938627c7b086e607c682e8d3c22c02bb99fe8`。项目保留安装包以便按锁文件构建时不依赖 CDN；包内包含原项目许可证。
 
 需要检查窄屏布局时，可先启动 `pnpm dev --host 127.0.0.1 --port 4173 --strictPort`，再运行 `node test/visualSmoke.mjs`。脚本使用独立浏览器配置、虚构账号并禁用游戏连接，检查 360、390、768 像素的深浅色页面；默认使用 macOS 的 Microsoft Edge，其他环境可通过 `XYZW_BROWSER` 指定 Chromium 兼容浏览器路径。截图默认保存在系统临时目录，可通过 `XYZW_SCREENSHOTS` 指定。此检查不能代替真实账号、触屏及加载实际商品后的验收。
 
