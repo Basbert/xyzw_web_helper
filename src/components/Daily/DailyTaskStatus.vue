@@ -117,6 +117,16 @@
 
       <div class="settings-content">
         <p class="settings-note">更改后自动保存到当前角色</p>
+        <n-alert v-if="settingsIssue" type="warning" title="设置需要修复">
+          {{
+            settingsIssue
+          }}。可以重置本角色的设置；所有项目将恢复默认，付费招募、黑市及梦境购买会关闭。
+          <div>
+            <n-button size="small" @click="resetInvalidSettings"
+              >重置设置并关闭付费项目</n-button
+            >
+          </div>
+        </n-alert>
         <section class="settings-group" aria-label="常用设置">
           <div class="settings-group-heading">
             <h3>常用设置</h3>
@@ -375,7 +385,11 @@ import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
 import { runDailyDreamPurchase } from "@/utils/dailyDreamPurchase";
 import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
-import { useDailyTaskSettings } from "@/utils/dailyTaskSettings";
+import {
+  DAILY_TASK_DEFAULTS,
+  readDailyTaskSettingsForExecution,
+  useDailyTaskSettings,
+} from "@/utils/dailyTaskSettings";
 import {
   getDailyTaskStates,
   loadDailyTaskConfig,
@@ -410,10 +424,35 @@ watch(
 );
 
 // 任务设置
-const settings = useDailyTaskSettings(tokenStore, (error) => {
-  console.error("每日任务设置读写失败:", error);
-  message.warning("无法保存或读取每日任务设置，请检查浏览器存储权限");
-});
+const settingsIssue = ref("");
+watch(
+  () => [tokenStore.selectedToken?.id, tokenStore.selectedToken?.roleId],
+  () => {
+    settingsIssue.value = "";
+  },
+  { flush: "sync" },
+);
+const settingsControls = {};
+const settings = useDailyTaskSettings(
+  tokenStore,
+  (error) => {
+    console.error("每日任务设置读写失败:", error);
+    settingsIssue.value = error.message || "无法保存或读取每日任务设置";
+    message.warning(
+      error.message || "无法保存或读取每日任务设置，请检查浏览器存储权限",
+    );
+  },
+  settingsControls,
+);
+const resetInvalidSettings = () => {
+  try {
+    settingsControls.reset();
+    settingsIssue.value = "";
+    message.success("设置已重置，付费项目已关闭，请检查其他选项");
+  } catch (error) {
+    message.error(error.message || "设置重置失败，请检查浏览器存储权限");
+  }
+};
 const shanghaiNow = useShanghaiClock();
 const showDreamShopSummary = computed(
   () =>
@@ -581,10 +620,31 @@ const runDailyFix = async () => {
     return;
   }
 
+  const runToken = tokenStore.selectedToken;
+  let runSettings;
+  try {
+    runSettings = {
+      ...DAILY_TASK_DEFAULTS,
+      ...readDailyTaskSettingsForExecution(
+        runToken,
+        tokenStore.gameTokens || [],
+      ),
+    };
+    if (
+      Object.keys(DAILY_TASK_DEFAULTS).some(
+        (key) => runSettings[key] !== settings[key],
+      )
+    )
+      throw new Error("每日任务设置已变化或保存失败，请重新打开并核对设置");
+  } catch (error) {
+    settingsIssue.value = error.message || "无法读取每日任务设置";
+    message.warning(error.message || "无法读取每日任务设置，请检查后重试");
+    return;
+  }
+
   busy.value = true;
   showLog.value = true;
   logList.value = [];
-  const runToken = tokenStore.selectedToken;
   const runGeneration = runConnectionGeneration;
   const accountName = runToken.name || "当前角色";
   const account = `执行账号：${accountName}`;
@@ -602,8 +662,8 @@ const runDailyFix = async () => {
     const runner = new DailyTaskRunner(
       tokenStore,
       {
-        commandDelay: settings.commandDelay,
-        taskDelay: settings.taskDelay,
+        commandDelay: runSettings.commandDelay,
+        taskDelay: runSettings.taskDelay,
       },
       {
         onDreamShopChecked: markDreamShopChecked,
@@ -635,7 +695,7 @@ const runDailyFix = async () => {
           log(`服务器每日任务完成并领奖: ${progress}%`);
         },
       },
-      settings,
+      runSettings,
     ); // 执行器会固定本次任务的设置
 
     const incomplete = result.incomplete;

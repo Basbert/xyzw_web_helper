@@ -39,6 +39,25 @@ const parseSettings = (value) => {
   }
 };
 
+// Used only when existing settings cannot be trusted. First-time users keep
+// the established defaults; a damaged record must not enable paid actions.
+export const SAFE_DAILY_TASK_DEFAULTS = Object.freeze({
+  ...DAILY_TASK_DEFAULTS,
+  payRecruit: false,
+  blackMarketPurchase: false,
+  dreamShopPurchase: false,
+});
+
+const executionDefaults = {
+  ...DAILY_TASK_DEFAULTS,
+  towerFormation: 1,
+  freeGachaEnable: true,
+};
+const settingsConflict = (left, right) =>
+  Object.entries(executionDefaults).some(
+    ([key, fallback]) => (left[key] ?? fallback) !== (right[key] ?? fallback),
+  );
+
 /** Refuse damaged or ambiguous records before an execution can spend resources. */
 export function readDailyTaskSettingsForExecution(
   token,
@@ -52,7 +71,7 @@ export function readDailyTaskSettingsForExecution(
     if (raw === null) return null;
     const parsed = parseSettings(raw);
     if (!parsed) throw new Error("每日任务设置记录损坏，请前往日常页核对设置");
-    for (const [name, fallback] of Object.entries(DAILY_TASK_DEFAULTS)) {
+    for (const [name, fallback] of Object.entries(executionDefaults)) {
       if (!Object.prototype.hasOwnProperty.call(parsed, name)) continue;
       const value = parsed[name];
       if (
@@ -67,6 +86,8 @@ export function readDailyTaskSettingsForExecution(
   const stableKey = roleKey(token);
   const stable = inspect(stableKey);
   const current = inspect(tokenKey(token));
+  if (stable && current && settingsConflict(stable, current))
+    throw new Error("每日任务设置存在冲突，请前往日常页核对设置");
   if (!stable && !current && stableKey) {
     const candidates = tokens
       .filter(
@@ -76,7 +97,7 @@ export function readDailyTaskSettingsForExecution(
       )
       .map((other) => inspect(tokenKey(other)))
       .filter(Boolean);
-    if (new Set(candidates.map((value) => JSON.stringify(value))).size > 1)
+    if (candidates.some((value) => settingsConflict(value, candidates[0])))
       throw new Error("每日任务设置存在冲突，请前往日常页核对设置");
   }
   return readDailyTaskSettings(token, tokens, storage);
@@ -103,14 +124,17 @@ export function readDailyTaskSettings(
       )
       .map((other) => parseSettings(storage.getItem(tokenKey(other))))
       .filter(Boolean);
-    const unique = new Set(candidates.map((value) => JSON.stringify(value)));
-    if (unique.size === 1) saved = candidates[0];
+    if (
+      candidates.length &&
+      candidates.every((value) => !settingsConflict(value, candidates[0]))
+    )
+      saved = candidates[0];
   }
 
   if (!saved) return null;
   const serialized = JSON.stringify(saved);
   if (stableKey && !stable) storage.setItem(stableKey, serialized);
-  if (!current || (stable && JSON.stringify(current) !== serialized)) {
+  if (!current) {
     storage.setItem(tokenKey(token), serialized);
   }
   return saved;
@@ -133,11 +157,38 @@ export function writeDailyTaskSettings(
   if (stableKey) storage.setItem(stableKey, serialized);
 }
 
+/** Explicit user action: replace damaged records with conservative defaults. */
+export function resetDailyTaskSettings(
+  token,
+  storage = globalThis.localStorage,
+) {
+  if (!token?.id) throw new Error("无法识别当前角色，设置未保存");
+  const serialized = JSON.stringify(SAFE_DAILY_TASK_DEFAULTS);
+  storage.setItem(tokenKey(token), serialized);
+  const stableKey = roleKey(token);
+  if (stableKey) storage.setItem(stableKey, serialized);
+}
+
 /** Bind the settings form to the currently selected role without cross-role writes. */
-export function useDailyTaskSettings(tokenStore, onError = () => {}) {
+export function useDailyTaskSettings(
+  tokenStore,
+  onError = () => {},
+  controls = {},
+) {
   const settings = reactive({ ...DAILY_TASK_DEFAULTS });
   let owner = null;
   let restoring = false;
+
+  controls.reset = () => {
+    if (!owner) throw new Error("请先选择角色");
+    restoring = true;
+    try {
+      resetDailyTaskSettings(owner);
+      Object.assign(settings, SAFE_DAILY_TASK_DEFAULTS);
+    } finally {
+      restoring = false;
+    }
+  };
 
   watch(
     settings,
@@ -162,13 +213,16 @@ export function useDailyTaskSettings(tokenStore, onError = () => {}) {
       owner = tokenId ? { id: tokenId, roleId } : null;
       try {
         const saved = owner
-          ? readDailyTaskSettings(owner, tokenStore.gameTokens || [])
+          ? readDailyTaskSettingsForExecution(
+              owner,
+              tokenStore.gameTokens || [],
+            )
           : null;
         for (const key of Object.keys(DAILY_TASK_DEFAULTS)) {
           settings[key] = saved?.[key] ?? DAILY_TASK_DEFAULTS[key];
         }
       } catch (error) {
-        Object.assign(settings, DAILY_TASK_DEFAULTS);
+        Object.assign(settings, SAFE_DAILY_TASK_DEFAULTS);
         onError(error);
       } finally {
         restoring = false;

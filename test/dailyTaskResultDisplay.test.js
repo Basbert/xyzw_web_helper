@@ -41,6 +41,11 @@ function fixture(result, options = {}) {
     runSummary: ref(null),
     logList: ref([]),
     settings: { commandDelay: 0, taskDelay: 0 },
+    DAILY_TASK_DEFAULTS: { commandDelay: 0, taskDelay: 0 },
+    readDailyTaskSettingsForExecution: () => ({
+      commandDelay: 0,
+      taskDelay: 0,
+    }),
     runConnectionGeneration: 0,
     markDreamShopChecked: () => true,
     runDailyDreamPurchase: async (request) => {

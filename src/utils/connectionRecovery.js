@@ -30,7 +30,11 @@ export function createConnectionRecovery({
     states.delete(id);
     onState(id, "stopped");
   };
-  const schedule = (id, { reset = false, immediate = false } = {}) => {
+  /** @param {string} id @param {{reset?: boolean, immediate?: boolean, delayMs?: number | null}} [options] */
+  const schedule = (
+    id,
+    { reset = false, immediate = false, delayMs = null } = {},
+  ) => {
     if (disposed || !shouldKeepTrying(id)) return false;
     const state = getState(id);
     if (!state.recovering) {
@@ -46,11 +50,14 @@ export function createConnectionRecovery({
     }
     if (state.retry !== null) return false;
     const available = canRecover(id);
-    const delay = !available
-      ? slowRetryMs
-      : immediate
-        ? 0
-        : (delays[state.attempts] ?? slowRetryMs);
+    const delay =
+      Number.isFinite(delayMs) && delayMs >= 0
+        ? delayMs
+        : !available
+          ? slowRetryMs
+          : immediate
+            ? 0
+            : (delays[state.attempts] ?? slowRetryMs);
     state.retry = setTimer(async () => {
       if (disposed || states.get(id) !== state) return;
       state.retry = null;

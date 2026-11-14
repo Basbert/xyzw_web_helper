@@ -1,6 +1,6 @@
 import {
   DAILY_TASK_DEFAULTS,
-  readDailyTaskSettings,
+  readDailyTaskSettingsForExecution,
 } from "@/utils/dailyTaskSettings";
 import {
   fillHangUpTime,
@@ -210,7 +210,7 @@ export class DailyTaskRunner {
       const token = this.tokenStore.gameTokens?.find(
         (item) => item.id === roleId,
       ) || { id: roleId };
-      const saved = readDailyTaskSettings(
+      const saved = readDailyTaskSettingsForExecution(
         token,
         this.tokenStore.gameTokens || [],
       );

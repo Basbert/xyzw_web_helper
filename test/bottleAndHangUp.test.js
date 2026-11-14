@@ -105,14 +105,14 @@ test("a failed reward claim never proceeds to add time", async () => {
     if (args[1] === "system_claimhangupreward") throw new Error("请求失败");
     return send(...args);
   };
-  await assert.rejects(f.run(), /挂机奖励领取失败.*功法残卷领取请求已完成/);
+  await assert.rejects(f.run(), /挂机奖励领取失败/);
   assert.equal(
     f.calls.some((call) => call.command === "system_mysharecallback"),
     false,
   );
   assert.equal(
     f.calls.filter((call) => call.command === "legacy_claimhangup").length,
-    1,
+    0,
   );
 });
 
@@ -230,6 +230,38 @@ test("failure to start the bottle is reported before the reward is claimed", asy
     f.calls.some((call) => call.command === "system_claimhangupreward"),
     false,
   );
+  assert.equal(
+    f.calls.filter((call) => call.command === "legacy_claimhangup").length,
+    0,
+  );
+});
+
+test("a timed-out reward claim stops before any later consuming operation", async () => {
+  const f = fixture({ running: false });
+  const send = f.tokenStore.sendMessageWithPromise;
+  f.tokenStore.sendMessageWithPromise = async (...args) => {
+    if (args[1] === "system_claimhangupreward") {
+      f.calls.push({ command: args[1] });
+      throw new Error("请求超时");
+    }
+    return send(...args);
+  };
+  await assert.rejects(f.run(), /挂机奖励领取失败/);
+  assert.deepEqual(
+    f.calls.map((call) => call.command),
+    ["role_getroleinfo", "bottlehelper_start", "system_claimhangupreward"],
+  );
+});
+
+test("an explicit server rejection may still perform the independent fragment claim", async () => {
+  const f = fixture({ running: false });
+  const send = f.tokenStore.sendMessageWithPromise;
+  f.tokenStore.sendMessageWithPromise = async (...args) => {
+    if (args[1] === "system_claimhangupreward")
+      throw new Error("服务器错误: 700010 - 未达成条件");
+    return send(...args);
+  };
+  await assert.rejects(f.run(), /挂机奖励领取失败.*功法残卷领取请求已完成/);
   assert.equal(
     f.calls.filter((call) => call.command === "legacy_claimhangup").length,
     1,

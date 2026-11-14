@@ -35,6 +35,48 @@ const declaration = source.statements.find(
     ),
 );
 assert.ok(declaration);
+const claimHelpers = source.statements
+  .filter(
+    (node) =>
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some((item) =>
+        ["releaseScheduledClaim", "abortWaitingScheduledClaims"].includes(
+          item.name.getText(source),
+        ),
+      ),
+  )
+  .map((node) => node.getText(source))
+  .join("\n");
+
+test("等待领取锁时页面仍允许点击停止", () => {
+  const busy = source.statements.find(
+    (node) =>
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some(
+        (item) => item.name.getText(source) === "uiBusy",
+      ),
+  );
+  assert.ok(busy);
+  const pending = new Set();
+  const context = {
+    isRunning: { value: false },
+    scheduledQueueSize: { value: 0 },
+    pendingScheduledTasks: pending,
+    computed: (read) => ({
+      get value() {
+        return read();
+      },
+    }),
+  };
+  vm.createContext(context);
+  vm.runInContext(
+    `${busy.getText(source)}\nglobalThis.busy = uiBusy;`,
+    context,
+  );
+  assert.equal(context.busy.value, false);
+  pending.add("task");
+  assert.equal(context.busy.value, true);
+});
 
 test("批量页轮询漏过分钟后通过锁与持久去重排队，运行账号保留快照", async () => {
   const when = (minute, second = 0) =>
@@ -75,11 +117,15 @@ test("批量页轮询漏过分钟后通过锁与持久去重排队，运行账�
       matchesCron: () => false,
     }),
     schedulerPageActive: true,
+    scheduledClaimGeneration: 0,
     noSchedulerLockWarning: false,
-    pendingScheduledTasks: new Set(),
+    pendingScheduledTasks: new Map(),
+    AbortController,
     requireCurrentScheduledConfig: () => true,
     navigator: {
-      locks: { request: (name, callback) => callback({ name }) },
+      locks: {
+        request: (name, options, callback) => (callback || options)({ name }),
+      },
     },
     localStorage: storage,
     claimScheduledOccurrence: (args) =>
@@ -99,7 +145,7 @@ test("批量页轮询漏过分钟后通过锁与持久去重排队，运行账�
   };
   vm.createContext(context);
   vm.runInContext(
-    `${declaration.getText(source)}\nglobalThis.start = startScheduler;`,
+    `${claimHelpers}\n${declaration.getText(source)}\nglobalThis.start = startScheduler;`,
     context,
   );
   context.start();
@@ -140,6 +186,7 @@ test("其他标签修改定时任务时暂停旧调度并保留未保存表单",
     scheduledTasks: { value: [] },
     scheduledTasksStale: stale,
     scheduledQueue: { cancelPending: () => cancelled++ },
+    abortWaitingScheduledClaims() {},
     activeScheduledRun: { value: { scheduledTime: 123 } },
     shouldStop: { value: false },
     message: { warning: (value) => messages.push(value) },
@@ -201,15 +248,19 @@ test("频繁 Cron 等待跨标签锁期间不会堆积多次调度请求", async
       matchesCron: () => true,
     }),
     schedulerPageActive: true,
+    scheduledClaimGeneration: 0,
     noSchedulerLockWarning: false,
-    pendingScheduledTasks: new Set(),
+    pendingScheduledTasks: new Map(),
+    AbortController,
     requireCurrentScheduledConfig: () => true,
     navigator: {
       locks: {
-        request: (name, callback) => {
+        request: (name, options, callback) => {
+          const fn = callback || options;
+          if (name.startsWith("xyzw-scheduled-active:")) return fn({ name });
           lockRequests++;
           return new Promise((resolve) => {
-            release = () => resolve(callback({ name }));
+            release = () => resolve(fn({ name }));
           });
         },
       },
@@ -232,7 +283,7 @@ test("频繁 Cron 等待跨标签锁期间不会堆积多次调度请求", async
   };
   vm.createContext(context);
   vm.runInContext(
-    `${declaration.getText(source)}\nglobalThis.start = startScheduler;`,
+    `${claimHelpers}\n${declaration.getText(source)}\nglobalThis.start = startScheduler;`,
     context,
   );
   context.start();
@@ -244,6 +295,116 @@ test("频繁 Cron 等待跨标签锁期间不会堆积多次调度请求", async
   release();
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(executions, 1);
+});
+
+test("停止等待领取锁的计划后不得入队，新的周期仍可正常执行", async () => {
+  let current = new Date(2026, 10, 12, 9, 59, 50).getTime();
+  const task = {
+    id: "cron",
+    name: "cron",
+    enabled: true,
+    runType: "cron",
+    cronExpression: "* * * * *",
+    selectedTokens: ["one"],
+    selectedTasks: ["task"],
+  };
+  const data = new Map([["scheduledTasks", JSON.stringify([task])]]);
+  const storage = {
+    getItem: (key) => data.get(key) ?? null,
+    setItem: (key, value) => data.set(key, value),
+    removeItem: (key) => data.delete(key),
+  };
+  let tick;
+  let release;
+  let releaseNew;
+  const newRun = new Promise((resolve) => {
+    releaseNew = resolve;
+  });
+  let firstClaim = true;
+  let calls = 0;
+  class FakeDate extends Date {
+    constructor(...args) {
+      super(...(args.length ? args : [current]));
+    }
+    static now() {
+      return current;
+    }
+  }
+  const context = {
+    Date: FakeDate,
+    intervalId: { value: null },
+    scheduledTasks: { value: [task] },
+    scheduledClock: createScheduledTaskClock({
+      tasks: [task],
+      now: current,
+      matchesCron: () => true,
+    }),
+    schedulerPageActive: true,
+    scheduledClaimGeneration: 0,
+    noSchedulerLockWarning: false,
+    pendingScheduledTasks: new Map(),
+    AbortController,
+    requireCurrentScheduledConfig: () => true,
+    navigator: {
+      locks: {
+        request: (name, options, callback) => {
+          const fn = callback || options;
+          if (name.startsWith("xyzw-scheduled-task:") && firstClaim) {
+            firstClaim = false;
+            return new Promise((resolve) => {
+              release = () => resolve(fn({ name }));
+            });
+          }
+          return Promise.resolve(fn({ name }));
+        },
+      },
+    },
+    localStorage: storage,
+    claimScheduledOccurrence: (args) =>
+      claimScheduledOccurrence({ ...args, now: () => current }),
+    enqueueScheduledTask: () => {
+      calls++;
+      return newRun;
+    },
+    shouldStop: { value: false },
+    scheduledQueue: { cancelPending() {} },
+    addLog() {},
+    message: { warning() {} },
+    setInterval: (callback) => {
+      tick = callback;
+      return 1;
+    },
+    clearInterval() {},
+    console,
+  };
+  const stop = source.statements.find(
+    (node) =>
+      ts.isVariableStatement(node) &&
+      node.declarationList.declarations.some(
+        (item) => item.name.getText(source) === "stopBatch",
+      ),
+  );
+  assert.ok(stop);
+  vm.createContext(context);
+  vm.runInContext(
+    `${claimHelpers}\n${declaration.getText(source)}\n${stop.getText(source)}\nglobalThis.api = { startScheduler, stopBatch };`,
+    context,
+  );
+  context.api.startScheduler();
+  current = new Date(2026, 10, 12, 10, 0).getTime();
+  tick();
+  context.api.stopBatch();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 0);
+  assert.equal(storage.getItem("lastTaskExecution_cron"), null);
+  current = new Date(2026, 10, 12, 10, 1).getTime();
+  tick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(context.pendingScheduledTasks.has("cron"), true);
+  releaseNew({ status: "completed" });
 });
 
 test("切换定时任务时先核对已保存配置，再更新开关", () => {

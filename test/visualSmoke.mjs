@@ -109,7 +109,7 @@ async function main() {
           mobile: false,
         });
         for (const [name, route, selector] of pages) {
-          const setup = `localStorage.setItem('theme', ${JSON.stringify(theme)}); localStorage.setItem('gameTokens', JSON.stringify([{id:'visual-only',name:'测试账号名称很长'.repeat(8),server:'测试服务器',token:'visual-invalid-token',wsUrl:'ws://127.0.0.1:9'}])); localStorage.setItem('selectedTokenId','visual-only'); window.WebSocket = class { static OPEN = 1; constructor(){ throw new Error('visual fixture: no game connection'); } };`;
+          const setup = `localStorage.setItem('theme', ${JSON.stringify(theme)}); localStorage.setItem('gameTokens', JSON.stringify([{id:'visual-only',name:'测试账号名称很长'.repeat(8),server:'测试服务器',token:'visual-invalid-token',importMethod:'bin',wsUrl:'ws://127.0.0.1:9'}])); localStorage.setItem('selectedTokenId','visual-only'); window.WebSocket = class { static OPEN = 1; constructor(){ throw new Error('visual fixture: no game connection'); } };`;
           const added = await client.send(
             "Page.addScriptToEvaluateOnNewDocument",
             { source: setup },
@@ -130,13 +130,17 @@ async function main() {
           await wait(300);
           const metrics = await client.send("Runtime.evaluate", {
             expression:
-              "({width:innerWidth, scrollWidth:document.documentElement.scrollWidth, height:Math.max(document.documentElement.scrollHeight,innerHeight), path:location.pathname})",
+              "({width:innerWidth, scrollWidth:document.documentElement.scrollWidth, height:Math.max(document.documentElement.scrollHeight,innerHeight), path:location.pathname, fixturePresent:document.body.textContent.includes('测试账号名称很长')})",
             returnByValue: true,
           });
           const size = metrics.result.value;
           if (!ready || size.scrollWidth > size.width + 1)
             problems.push(
               `${theme} ${width} ${name}: ${!ready ? `未找到 ${selector} (${size.path})` : `横向溢出 ${size.scrollWidth - size.width}px`}`,
+            );
+          if (!size.fixturePresent)
+            problems.push(
+              `${theme} ${width} ${name}: 未显示长账号名，无法完成对应验收`,
             );
           const shot = await client.send("Page.captureScreenshot", {
             format: "png",

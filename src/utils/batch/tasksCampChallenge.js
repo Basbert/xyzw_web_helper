@@ -223,6 +223,8 @@ export function createTasksCampChallenge(deps) {
 
           // 解析阵容数据，优先使用竞技场阵容
           const tokenSettings = loadSettings ? loadSettings(tokenId) : {};
+          if (!tokenSettings)
+            throw new Error("账号设置损坏或冲突，请核对后重试");
           const formationId = String(tokenSettings?.arenaFormation || 1);
           const root =
             presetTeamResult?.presetTeamInfo?.presetTeamInfo ||

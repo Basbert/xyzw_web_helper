@@ -130,11 +130,14 @@ export async function runScheduledOccurrence({
   execute,
   isActive = () => true,
   now = Date.now,
+  signal,
 }) {
   if (!locks || typeof locks.request !== "function")
-    return { status: "stopped", reason: "unsupported" };
-  return locks.request("xyzw-scheduled-batch-run", async () => {
-    if (!isActive()) return { status: "stopped", reason: "closed" };
+    return { status: "stopped", reason: "unsupported", started: false };
+  let started = false;
+  const run = async () => {
+    if (!isActive())
+      return { status: "stopped", reason: "closed", started: false };
     const validation = validateScheduledOccurrence({
       storage,
       task,
@@ -142,9 +145,19 @@ export async function runScheduledOccurrence({
       now: now(),
     });
     if (validation.status !== "valid")
-      return { status: "stopped", reason: validation.status };
+      return { status: "stopped", reason: validation.status, started: false };
+    started = true;
     return execute();
-  });
+  };
+  try {
+    return await (signal
+      ? locks.request("xyzw-scheduled-batch-run", { signal }, run)
+      : locks.request("xyzw-scheduled-batch-run", run));
+  } catch (error) {
+    if (signal?.aborted && !started)
+      return { status: "stopped", reason: "closed", started: false };
+    throw error;
+  }
 }
 
 /** A cross-tab lock and shared storage marker must both succeed before enqueue. */
@@ -158,13 +171,14 @@ export async function claimScheduledOccurrence({
   now = Date.now,
   isActive = () => true,
   canEnqueue = () => true,
+  signal,
 }) {
   if (!locks || typeof locks.request !== "function")
     return { status: "unsupported" };
   try {
-    return await locks.request(`xyzw-scheduled-task:${task.id}`, (lock) => {
+    const claim = async (lock) => {
       if (!lock) return { status: "busy" };
-      if (!isActive()) return { status: "closed" };
+      if (signal?.aborted || !isActive()) return { status: "closed" };
       const validation = validateScheduledOccurrence({
         storage,
         task,
@@ -173,42 +187,72 @@ export async function claimScheduledOccurrence({
       });
       if (validation.status !== "valid") return validation;
       if (!canEnqueue()) return { status: "already-pending" };
-      const key = `lastTaskExecution_${task.id}`;
-      const value = executionKey(task, time);
-      const previousRaw = storage.getItem(key);
-      const previous = lastExecutionTime(task, previousRaw);
-      if (Number.isNaN(previous)) return { status: "unknown-marker" };
-      if (previous !== null && previous >= time) return { status: "duplicate" };
-      storage.setItem(key, value);
-      const rollbackMarker = () => {
-        if (storage.getItem(key) !== value) return;
-        if (previousRaw === null) {
-          if (typeof storage.removeItem === "function") storage.removeItem(key);
-        } else {
-          storage.setItem(key, previousRaw);
-        }
-      };
-      try {
-        Promise.resolve(enqueue(JSON.parse(fingerprint(task))))
-          .then((result) => {
-            if (
-              result?.status === "stopped" &&
-              (!result.reason || result.reason === "closed")
-            ) {
-              rollbackMarker();
+      // Hold a second, nonblocking lock for this task until its queued run
+      // settles. Other tabs must not accumulate later cron occurrences.
+      // The claim lock above remains short-lived so a stale tab cannot block
+      // a current tab from claiming the same occurrence.
+      return await new Promise((resolve) => {
+        let announced = false;
+        const finishClaim = (result) => {
+          if (!announced) {
+            announced = true;
+            resolve(result);
+          }
+        };
+        const active = locks.request(
+          `xyzw-scheduled-active:${task.id}`,
+          { ifAvailable: true },
+          async (activeLock) => {
+            if (!activeLock) return finishClaim({ status: "already-pending" });
+            if (signal?.aborted || !isActive())
+              return finishClaim({ status: "closed" });
+            const current = validateScheduledOccurrence({
+              storage,
+              task,
+              time,
+              now: now(),
+            });
+            if (current.status !== "valid") return finishClaim(current);
+            if (!canEnqueue())
+              return finishClaim({ status: "already-pending" });
+            const key = `lastTaskExecution_${task.id}`;
+            const value = executionKey(task, time);
+            const previousRaw = storage.getItem(key);
+            const previous = lastExecutionTime(task, previousRaw);
+            if (Number.isNaN(previous))
+              return finishClaim({ status: "unknown-marker" });
+            if (previous !== null && previous >= time)
+              return finishClaim({ status: "duplicate" });
+            storage.setItem(key, value);
+            const rollbackMarker = () => {
+              if (storage.getItem(key) !== value) return;
+              if (previousRaw === null) storage.removeItem(key);
+              else storage.setItem(key, previousRaw);
+            };
+            try {
+              const queued = enqueue(JSON.parse(fingerprint(task)));
+              finishClaim({ status: "queued" });
+              const result = await queued;
+              // Only an explicit pre-execution cancellation proves no game
+              // command was sent. A stopped/failed run may have consumed items.
+              if (result?.started === false) rollbackMarker();
+            } catch (error) {
+              finishClaim({ status: "error", error });
+              onError(error);
             }
-          })
-          .catch((error) => {
-            rollbackMarker();
-            onError(error);
-          });
-      } catch (error) {
-        rollbackMarker();
-        onError(error);
-      }
-      return { status: "queued" };
-    });
+          },
+        );
+        Promise.resolve(active).catch((error) => {
+          finishClaim({ status: "error", error });
+          if (announced) onError(error);
+        });
+      });
+    };
+    return await (signal
+      ? locks.request(`xyzw-scheduled-task:${task.id}`, { signal }, claim)
+      : locks.request(`xyzw-scheduled-task:${task.id}`, claim));
   } catch (error) {
+    if (signal?.aborted) return { status: "closed" };
     return { status: "error", error };
   }
 }

@@ -963,6 +963,7 @@ import {
   onMounted,
   reactive,
   ref,
+  shallowReactive,
   toRaw,
   watch,
 } from "vue";
@@ -1046,7 +1047,9 @@ import { runDailyDreamPurchase } from "@/utils/dailyDreamPurchase";
 import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
 import {
   DAILY_TASK_DEFAULTS,
-  readDailyTaskSettings,
+  readDailyTaskSettingsForExecution,
+  resetDailyTaskSettings,
+  SAFE_DAILY_TASK_DEFAULTS,
   writeDailyTaskSettings,
 } from "@/utils/dailyTaskSettings";
 import {
@@ -1100,7 +1103,13 @@ const scheduledQueueSize = ref(0);
 const executionTokens = computed(
   () => activeScheduledRun.value?.accounts ?? selectedTokens.value,
 );
-const uiBusy = computed(() => isRunning.value || scheduledQueueSize.value > 0);
+const pendingScheduledTasks = shallowReactive(new Map());
+const uiBusy = computed(
+  () =>
+    isRunning.value ||
+    scheduledQueueSize.value > 0 ||
+    pendingScheduledTasks.size > 0,
+);
 const showBatchLogs = ref(false);
 watch(uiBusy, (running) => {
   if (running) showBatchLogs.value = true;
@@ -1178,6 +1187,7 @@ const {
 const showSettingsModal = ref(false);
 const currentSettingsTokenId = ref(null);
 const currentSettingsTokenName = ref("");
+const settingsNeedRepair = ref(false);
 const currentSettings = reactive({
   arenaFormation: 1,
   towerFormation: 1,
@@ -2039,12 +2049,25 @@ let healthCheckInterval = null;
 const pageLoadTime = Date.now();
 let lastTimeoutWarning = null;
 let schedulerPageActive = true;
+let scheduledClaimGeneration = 0;
 let noSchedulerLockWarning = false;
-const pendingScheduledTasks = new Set();
+
+const releaseScheduledClaim = (id, claim) => {
+  if (pendingScheduledTasks.get(id) === claim) pendingScheduledTasks.delete(id);
+};
+const abortWaitingScheduledClaims = () => {
+  for (const [id, claim] of pendingScheduledTasks) {
+    if (!claim.queued) {
+      releaseScheduledClaim(id, claim);
+      claim.controller.abort();
+    }
+  }
+};
 
 const pauseStaleScheduler = () => {
   if (scheduledTasksStale.value) return;
   scheduledTasksStale.value = true;
+  abortWaitingScheduledClaims();
   scheduledQueue.cancelPending();
   if (activeScheduledRun.value?.scheduledTime != null) shouldStop.value = true;
   const warning =
@@ -2180,17 +2203,23 @@ const startScheduler = () => {
         // A frequent cron must not stack claims while this task is waiting,
         // queued or running, including while another tab owns the claim lock.
         if (pendingScheduledTasks.has(item.task.id)) continue;
-        pendingScheduledTasks.add(item.task.id);
+        const claim = { controller: new AbortController(), queued: false };
+        pendingScheduledTasks.set(item.task.id, claim);
+        const claimGeneration = scheduledClaimGeneration;
         claimScheduledOccurrence({
           locks: navigator.locks,
           storage: localStorage,
           task: item.task,
           time: item.time,
+          signal: claim.controller.signal,
           isActive: () =>
-            schedulerPageActive && requireCurrentScheduledConfig(),
+            schedulerPageActive &&
+            claimGeneration === scheduledClaimGeneration &&
+            requireCurrentScheduledConfig(),
           enqueue: (task) => {
+            claim.queued = true;
             return enqueueScheduledTask(task, item.time).finally(() =>
-              pendingScheduledTasks.delete(task.id),
+              releaseScheduledClaim(task.id, claim),
             );
           },
           onError: (error) =>
@@ -2201,7 +2230,7 @@ const startScheduler = () => {
             }),
         }).then((result) => {
           if (result.status !== "queued")
-            pendingScheduledTasks.delete(item.task.id);
+            releaseScheduledClaim(item.task.id, claim);
           if (result.status === "stale") pauseStaleScheduler();
           if (
             ["error", "unknown-marker", "expired", "unsupported"].includes(
@@ -2260,6 +2289,7 @@ onMounted(() => {
 // Cleanup countdown interval on unmount
 onBeforeUnmount(() => {
   schedulerPageActive = false;
+  abortWaitingScheduledClaims();
   window.removeEventListener("storage", handleScheduledStorageChange);
   scheduledQueue.close();
   if (activeScheduledRun.value || isRunning.value) shouldStop.value = true;
@@ -2660,8 +2690,9 @@ const scheduledQueue = createScheduledRunQueue({
   onPendingChange: (count) => {
     scheduledQueueSize.value = count;
   },
-  execute: async (context) => {
+  execute: async (context, { isCancelled, signal }) => {
     const execute = async () => {
+      if (isCancelled()) return { status: "stopped", started: false };
       shouldStop.value = false;
       context.startedAt = Date.now();
       activeScheduledRun.value = context;
@@ -2672,7 +2703,8 @@ const scheduledQueue = createScheduledRunQueue({
       }
     };
     if (context.scheduledTime == null) {
-      if (!requireCurrentScheduledConfig()) return { status: "stopped" };
+      if (isCancelled() || !requireCurrentScheduledConfig())
+        return { status: "stopped", started: false };
       return execute();
     }
     const result = await runScheduledOccurrence({
@@ -2680,7 +2712,11 @@ const scheduledQueue = createScheduledRunQueue({
       storage: localStorage,
       task: context.task,
       time: context.scheduledTime,
-      isActive: () => schedulerPageActive && requireCurrentScheduledConfig(),
+      signal,
+      isActive: () =>
+        !isCancelled() &&
+        schedulerPageActive &&
+        requireCurrentScheduledConfig(),
       execute,
     });
     if (
@@ -3139,7 +3175,7 @@ const loadSettings = (tokenId) => {
     const token = tokens.value.find((entry) => entry.id === tokenId) || {
       id: tokenId,
     };
-    const saved = readDailyTaskSettings(token, tokens.value);
+    const saved = readDailyTaskSettingsForExecution(token, tokens.value);
     const defaultSettings = { ...DAILY_TASK_DEFAULTS, towerFormation: 1 };
     return saved ? { ...defaultSettings, ...saved } : defaultSettings;
   } catch (error) {
@@ -3152,7 +3188,16 @@ const openSettings = (token) => {
   currentSettingsTokenId.value = token.id;
   currentSettingsTokenName.value = token.name;
   const saved = loadSettings(token.id);
-  Object.assign(currentSettings, saved);
+  settingsNeedRepair.value = !saved;
+  if (!saved) {
+    Object.assign(currentSettings, {
+      ...SAFE_DAILY_TASK_DEFAULTS,
+      towerFormation: 1,
+    });
+    message.warning(
+      "账号设置损坏或冲突，保存后将重置异常设置；付费选项已先关闭",
+    );
+  } else Object.assign(currentSettings, saved);
   showSettingsModal.value = true;
 };
 
@@ -3161,9 +3206,15 @@ const saveSettings = () => {
     const token = tokens.value.find(
       (entry) => entry.id === currentSettingsTokenId.value,
     ) || { id: currentSettingsTokenId.value };
-    writeDailyTaskSettings(token, currentSettings);
-    message.success(`已保存 ${currentSettingsTokenName.value} 的设置`);
-    showSettingsModal.value = false;
+    try {
+      if (settingsNeedRepair.value) resetDailyTaskSettings(token);
+      writeDailyTaskSettings(token, currentSettings);
+      settingsNeedRepair.value = false;
+      message.success(`已保存 ${currentSettingsTokenName.value} 的设置`);
+      showSettingsModal.value = false;
+    } catch (error) {
+      message.error(error.message || "设置保存失败，请检查浏览器存储权限");
+    }
   }
 };
 
@@ -4174,6 +4225,8 @@ const startBatch = async () => {
 
 const stopBatch = () => {
   shouldStop.value = true;
+  scheduledClaimGeneration++;
+  abortWaitingScheduledClaims();
   scheduledQueue.cancelPending();
   addLog({
     time: new Date().toLocaleTimeString(),

@@ -54,7 +54,9 @@ test("已经入队但等待超过半小时的计划不会开始执行", async ()
   f.context.runScheduledOccurrence = runScheduledOccurrence;
   f.context.schedulerPageActive = true;
   f.context.navigator = {
-    locks: { request: (name, callback) => callback({ name }) },
+    locks: {
+      request: (name, options, callback) => (callback || options)({ name }),
+    },
   };
   f.context.localStorage.getItem = (key) =>
     key === "scheduledTasks" ? JSON.stringify([task]) : null;
@@ -70,6 +72,53 @@ test("已经入队但等待超过半小时的计划不会开始执行", async ()
   assert.ok(
     f.logs.some((entry) => entry.message.includes("排队已超过 30 分钟")),
   );
+});
+
+test("真实批量页定时任务等待跨标签锁期间点击停止，解锁后不会执行", async () => {
+  const f = fixture();
+  const task = {
+    id: "locked",
+    name: "locked",
+    enabled: true,
+    selectedTokens: ["A"],
+    selectedTasks: ["any"],
+  };
+  let release;
+  let waiting;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const entered = new Promise((resolve) => {
+    waiting = resolve;
+  });
+  f.context.runScheduledOccurrence = runScheduledOccurrence;
+  f.context.schedulerPageActive = true;
+  f.context.navigator = {
+    locks: {
+      request: async (name, options, callback) => {
+        waiting();
+        await gate;
+        return (callback || options)({ name });
+      },
+    },
+  };
+  f.context.localStorage.getItem = (key) =>
+    key === "scheduledTasks" ? JSON.stringify([task]) : null;
+  f.context.message.warning = () => {};
+  let called = false;
+  f.handlers.any = () => {
+    called = true;
+  };
+  const run = f.enqueueScheduledTask(task, Date.now());
+  await entered;
+  f.context.shouldStop.value = true;
+  f.scheduledQueue.cancelPending();
+  release();
+  const result = await run;
+  assert.equal(result.status, "stopped");
+  assert.equal(result.started, false);
+  assert.equal(called, false);
+  assert.equal(f.context.shouldStop.value, true);
 });
 
 function fixture() {

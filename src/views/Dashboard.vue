@@ -541,6 +541,11 @@ onMounted(async () => {
   font-size: 14px;
 }
 
+.account-link {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
 .account-strip {
   display: flex;
   align-items: center;

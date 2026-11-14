@@ -52,6 +52,33 @@ const settings = {
   bossTimes: 0,
   freeGachaEnable: false,
 };
+
+test("每日执行读取损坏设置时拒绝执行而不使用默认付费选项", async () => {
+  const previous = globalThis.localStorage;
+  const store = {
+    getItem: (key) => (key === "daily-settings:account-a" ? "{" : null),
+    setItem() {},
+  };
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: store,
+  });
+  try {
+    const f = fixture();
+    await assert.rejects(
+      f.runner().run("account-a"),
+      /设置.*损坏|设置.*无法读取/,
+    );
+    assert.equal(f.calls.length, 0);
+  } finally {
+    if (previous === undefined) delete globalThis.localStorage;
+    else
+      Object.defineProperty(globalThis, "localStorage", {
+        configurable: true,
+        value: previous,
+      });
+  }
+});
 function fixture(progress = {}) {
   const calls = [];
   let connected = true;

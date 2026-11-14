@@ -58,10 +58,19 @@ export function createTasksArena(deps) {
         });
         return;
       }
-      // 加载该Token的独立配置，如果未找到则回退到currentSettings(虽然可能不准确，但作为最后的兜底)
+      // 配置无法读取时停止，避免使用其他账号的设置。
       const tokenSettings = loadSettings
-        ? loadSettings(tokenId) || currentSettings
+        ? loadSettings(tokenId)
         : currentSettings;
+      if (!tokenSettings) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: "账号设置损坏或冲突，请核对后重试",
+          type: "error",
+        });
+        return;
+      }
       let ownsSlot = false;
       let originalFormation;
       let formationChanged = false;
@@ -605,10 +614,19 @@ export function createTasksArena(deps) {
       if (shouldStop.value) return;
       tokenStatus.value[tokenId] = "running";
 
-      // 加载该Token的独立配置，如果未找到则回退到currentSettings
+      // 配置无法读取时停止，避免使用其他账号的设置。
       const tokenSettings = loadSettings
-        ? loadSettings(tokenId) || currentSettings
+        ? loadSettings(tokenId)
         : currentSettings;
+      if (!tokenSettings) {
+        tokenStatus.value[tokenId] = "failed";
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: "账号设置损坏或冲突，请核对后重试",
+          type: "error",
+        });
+        return;
+      }
       let ownsSlot = false;
       const token = tokens.value.find((t) => t.id === tokenId);
 

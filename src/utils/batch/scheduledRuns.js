@@ -9,32 +9,44 @@ export function createScheduledRunQueue({
   let generation = 0;
   let pending = 0;
   let closed = false;
+  const controllers = new Set();
 
   const enqueue = (run) => {
     const ticket = generation;
+    const controller = new AbortController();
+    controllers.add(controller);
+    const isCancelled = () =>
+      closed || ticket !== generation || controller.signal.aborted;
     pending++;
     onPendingChange(pending);
     const result = tail.then(async () => {
       while (isBusy()) {
-        if (closed || ticket !== generation) return { status: "stopped" };
+        if (isCancelled()) return { status: "stopped", started: false };
         await wait();
       }
-      if (closed || ticket !== generation) return { status: "stopped" };
-      return execute(run);
+      if (isCancelled()) return { status: "stopped", started: false };
+      return execute(run, { isCancelled, signal: controller.signal });
     });
     tail = result.then(
       () => undefined,
       () => undefined,
     );
     result.then(
-      () => onPendingChange(--pending),
-      () => onPendingChange(--pending),
+      () => {
+        controllers.delete(controller);
+        onPendingChange(--pending);
+      },
+      () => {
+        controllers.delete(controller);
+        onPendingChange(--pending);
+      },
     );
     return result;
   };
 
   const cancelPending = () => {
     generation++;
+    for (const controller of controllers) controller.abort();
   };
   const close = () => {
     closed = true;

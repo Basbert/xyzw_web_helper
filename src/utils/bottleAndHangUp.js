@@ -26,6 +26,14 @@ export async function runBottleAndHangUp({
         throw new Error("账号或连接已变化，请重新检查两项状态");
     };
     let lastRole;
+    const operationError = (prefix, cause) => {
+      const text = cause?.message || "未知错误";
+      const error = new Error(`${prefix}：${text}`);
+      // Only an explicit game-server error confirms rejection. A timeout,
+      // disconnect or malformed result might still have taken effect.
+      error.resultUnconfirmed = !/^服务器错误:\s*\d+/.test(text);
+      return error;
+    };
     const readRole = async () => {
       check();
       const response = await tokenStore.sendMessageWithPromise(
@@ -45,7 +53,7 @@ export async function runBottleAndHangUp({
       try {
         await tokenStore.sendMessageWithPromise(tokenId, cmd, {}, 8000);
       } catch (error) {
-        throw new Error(`${failure}：${error.message || "未知错误"}`);
+        throw operationError(failure, error);
       }
       check();
       await sleep(500);
@@ -77,9 +85,7 @@ export async function runBottleAndHangUp({
             8000,
           );
         } catch (error) {
-          throw new Error(
-            `盐罐停止请求未确认，请检查运行状态：${error.message || "未知错误"}`,
-          );
+          throw operationError("盐罐停止请求未确认，请检查运行状态", error);
         }
         await sleep(500);
       } else {
@@ -96,9 +102,7 @@ export async function runBottleAndHangUp({
             8000,
           );
         } catch (error) {
-          throw new Error(
-            `盐罐启动失败，请检查运行状态：${error.message || "未知错误"}`,
-          );
+          throw operationError("盐罐启动失败，请检查运行状态", error);
         }
         check();
         await sleep(500);
@@ -119,19 +123,23 @@ export async function runBottleAndHangUp({
           sleep,
         });
       } catch (error) {
-        throw new Error(
-          `盐罐已启动，挂机奖励已领取，但加钟未完成：${error.message || "未知错误"}`,
-        );
+        throw operationError("盐罐已启动，挂机奖励已领取，但加钟未完成", error);
       }
       if (
         !Number.isFinite(lastRole.bottleHelpers?.helperStopTime) ||
         lastRole.bottleHelpers.helperStopTime <= client.serverTime / 1000
       ) {
-        throw new Error("挂机已处理，但服务器未确认盐罐运行，请检查盐罐状态");
+        const error = new Error(
+          "挂机已处理，但服务器未确认盐罐运行，请检查盐罐状态",
+        );
+        error.resultUnconfirmed = true;
+        throw error;
       }
     } catch (error) {
       maintenanceError = error;
     }
+
+    if (maintenanceError?.resultUnconfirmed) throw maintenanceError;
 
     // A failure in one operation need not block the independent fragment claim,
     // but never send it after the account or the connection has changed.

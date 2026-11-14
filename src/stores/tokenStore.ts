@@ -420,6 +420,7 @@ export const useTokenStore = defineStore("tokens", () => {
   const attemptTokenRefresh = async (
     tokenId: string,
     forceReconnect = false,
+    deferReconnect = false,
   ) => {
     // 检查冷却时间 (10秒)
     const lastAttempt = tokenRefreshAttempts.value[tokenId] || 0;
@@ -519,6 +520,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
       if (
         shouldReconnect &&
+        !deferReconnect &&
         selectedTokenId.value === tokenId &&
         desiredConnections.has(tokenId)
       ) {
@@ -562,8 +564,19 @@ export const useTokenStore = defineStore("tokens", () => {
 
           const gameToken = gameTokens.value.find((t) => t.id === tokenId);
           if (gameToken) {
-            // 调用统一的Token刷新逻辑
-            const refreshed = await attemptTokenRefresh(tokenId);
+            // Treat token refresh as recovery, including when the network
+            // response hangs; never replay the interrupted game command.
+            connectionRecovery.schedule(tokenId, { delayMs: 15000 });
+            const refreshed = await attemptTokenRefresh(tokenId, true, true);
+            if (
+              wsConnections.value[tokenId] === conn &&
+              shouldKeepRecovering(tokenId)
+            ) {
+              connectionRecovery.schedule(tokenId, {
+                reset: true,
+                immediate: true,
+              });
+            }
             if (!refreshed) {
               wsLogger.error(
                 `Token 已过期且无法自动刷新，请重新导入 [${tokenId}]`,
@@ -820,6 +833,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
   // Only the currently selected account is restored after an unexpected close.
   const desiredConnections = new Set<string>();
+  const connectionGeneration = new Map<string, number>();
   const connectionRecoveryStatus = ref<Record<string, string>>({});
   const shouldKeepRecovering = (tokenId: string) => {
     const status = wsConnections.value[tokenId]?.status;
@@ -857,7 +871,13 @@ export const useTokenStore = defineStore("tokens", () => {
   watch(
     selectedTokenId,
     (current, previous) => {
-      if (previous && current !== previous) connectionRecovery.cancel(previous);
+      if (previous && current !== previous) {
+        connectionGeneration.set(
+          previous,
+          (connectionGeneration.get(previous) || 0) + 1,
+        );
+        connectionRecovery.cancel(previous);
+      }
     },
     { flush: "sync" },
   );
@@ -909,6 +929,7 @@ export const useTokenStore = defineStore("tokens", () => {
     fromRecovery = false,
   ) => {
     wsLogger.info(`开始创建连接: ${tokenId}`);
+    const generation = connectionGeneration.get(tokenId) || 0;
     if (!fromRecovery && selectedTokenId.value === tokenId) {
       desiredConnections.add(tokenId);
     }
@@ -928,26 +949,46 @@ export const useTokenStore = defineStore("tokens", () => {
         releaseConnectionLock(tokenId, "connect");
         return null;
       }
-      // 2. 检查跨标签页连接状态
-      const crossTabState = checkCrossTabConnection(tokenId);
-      if (crossTabState) {
-        wsLogger.debug(`跳过创建，其他标签页已有连接: ${tokenId}`);
-        releaseConnectionLock(tokenId, "connect");
-        return null;
-      }
-
-      // 3. 更新跨标签页状态为连接中
-      updateCrossTabConnectionState(tokenId, "connecting");
-
-      // 4. 如果存在现有连接，先优雅关闭
-      if (wsConnections.value[tokenId]) {
-        wsLogger.debug(`优雅关闭现有连接: ${tokenId}`);
-        await closeWebSocketConnectionAsync(tokenId, true);
-      }
+      // Atomically claim the per-account lease across upgraded tabs. Keep the
+      // existing fallback for browsers without Web Locks; those cannot offer
+      // the same cross-tab guarantee.
+      const claimConnection = async () => {
+        if ((connectionGeneration.get(tokenId) || 0) !== generation)
+          return false;
+        if (checkCrossTabConnection(tokenId)) return false;
+        if (wsConnections.value[tokenId]) {
+          wsLogger.debug(`优雅关闭现有连接: ${tokenId}`);
+          await closeWebSocketConnectionAsync(tokenId, true);
+        }
+        if (
+          (connectionGeneration.get(tokenId) || 0) !== generation ||
+          (fromRecovery &&
+            (!desiredConnections.has(tokenId) ||
+              selectedTokenId.value !== tokenId))
+        )
+          return false;
+        if (checkCrossTabConnection(tokenId)) return false;
+        updateCrossTabConnectionState(tokenId, "connecting");
+        return true;
+      };
+      const claimed =
+        typeof navigator !== "undefined" && navigator.locks?.request
+          ? await navigator.locks.request(
+              `xyzw-websocket:${tokenId}`,
+              claimConnection,
+            )
+          : await claimConnection();
       if (
-        fromRecovery &&
-        (!desiredConnections.has(tokenId) || selectedTokenId.value !== tokenId)
+        !claimed ||
+        (connectionGeneration.get(tokenId) || 0) !== generation ||
+        (fromRecovery &&
+          (!desiredConnections.has(tokenId) ||
+            selectedTokenId.value !== tokenId))
       ) {
+        if (claimed) updateCrossTabConnectionState(tokenId, "disconnected");
+        wsLogger.debug(
+          `跳过创建，其他标签页已有连接或本次恢复已取消: ${tokenId}`,
+        );
         releaseConnectionLock(tokenId, "connect");
         return null;
       }
@@ -998,28 +1039,83 @@ export const useTokenStore = defineStore("tokens", () => {
       const connection = wsConnections.value[tokenId];
       const isCurrentConnection = () =>
         Boolean(connection && wsConnections.value[tokenId] === connection);
+      let established = false;
+      let discardingStale = false;
+      const isStaleAttempt = () =>
+        !established &&
+        ((connectionGeneration.get(tokenId) || 0) !== generation ||
+          (fromRecovery &&
+            (!desiredConnections.has(tokenId) ||
+              selectedTokenId.value !== tokenId)));
+      const discardStaleConnection = () => {
+        if (discardingStale) return;
+        discardingStale = true;
+        releaseConnectionLock(tokenId, "connect");
+        closeWebSocketConnectionAsync(tokenId, true, connection).then(() => {
+          if (!wsConnections.value[tokenId] && shouldKeepRecovering(tokenId))
+            connectionRecovery.schedule(tokenId, {
+              reset: true,
+              immediate: true,
+            });
+        });
+      };
 
       // 9. 设置事件监听（增强版）
       wsClient.onConnect = () => {
-        if (!isCurrentConnection()) return;
-        wsLogger.wsConnect(tokenId);
-        if (wsConnections.value[tokenId]) {
-          wsConnections.value[tokenId].status = "connected";
-          wsConnections.value[tokenId].connectedAt = new Date().toISOString();
-          wsConnections.value[tokenId].reconnectAttempts = 0;
-          wsConnections.value[tokenId].randomSeedSynced = false;
-          wsConnections.value[tokenId].lastRandomSeedSource = null;
-          wsConnections.value[tokenId].lastRandomSeed = null;
-        }
-        updateCrossTabConnectionState(tokenId, "connected");
-        if (desiredConnections.has(tokenId))
-          connectionRecovery.markConnected(tokenId);
-        releaseConnectionLock(tokenId, "connect");
-        localStorage.removeItem("xyzw_chat_msg_list");
-        try {
-          wsClient.send("role_getroleinfo");
-        } catch (error) {
-          wsLogger.warn(`初始化角色信息请求失败 [${tokenId}]`, error);
+        const finishHandshake = () => {
+          if (!isCurrentConnection() || connection?.status !== "connecting")
+            return;
+          if (isStaleAttempt() || discardingStale) {
+            discardStaleConnection();
+            return;
+          }
+          // A different tab may have taken over while this handshake was
+          // frozen. Do not overwrite its lease or send initialization commands.
+          let ownsLease = false;
+          try {
+            const owner = JSON.parse(
+              localStorage.getItem(`ws_connection_${tokenId}`) || "null",
+            );
+            ownsLease =
+              owner?.sessionId === currentSessionId &&
+              owner.action === "connecting";
+          } catch (error) {
+            wsLogger.warn("无法核验跨标签页连接归属", error);
+          }
+          if (!ownsLease) {
+            discardStaleConnection();
+            return;
+          }
+          established = true;
+          wsLogger.wsConnect(tokenId);
+          if (wsConnections.value[tokenId]) {
+            wsConnections.value[tokenId].status = "connected";
+            wsConnections.value[tokenId].connectedAt = new Date().toISOString();
+            wsConnections.value[tokenId].reconnectAttempts = 0;
+            wsConnections.value[tokenId].randomSeedSynced = false;
+            wsConnections.value[tokenId].lastRandomSeedSource = null;
+            wsConnections.value[tokenId].lastRandomSeed = null;
+          }
+          updateCrossTabConnectionState(tokenId, "connected");
+          if (desiredConnections.has(tokenId))
+            connectionRecovery.markConnected(tokenId);
+          releaseConnectionLock(tokenId, "connect");
+          localStorage.removeItem("xyzw_chat_msg_list");
+          try {
+            wsClient.send("role_getroleinfo");
+          } catch (error) {
+            wsLogger.warn(`初始化角色信息请求失败 [${tokenId}]`, error);
+          }
+        };
+        // Serialize the final lease check/write with claims from other new tabs.
+        if (typeof navigator !== "undefined" && navigator.locks?.request) {
+          navigator.locks
+            .request(`xyzw-websocket:${tokenId}`, finishHandshake)
+            .catch(() => {
+              if (isCurrentConnection()) discardStaleConnection();
+            });
+        } else {
+          finishHandshake();
         }
       };
 
@@ -1029,6 +1125,17 @@ export const useTokenStore = defineStore("tokens", () => {
         try {
           const key = `ws_connection_${tokenId}`;
           const owner = JSON.parse(localStorage.getItem(key) || "null");
+          if (
+            owner?.sessionId &&
+            owner.sessionId !== currentSessionId &&
+            owner.action === "connected" &&
+            Date.now() - owner.timestamp < 120000
+          ) {
+            // A suspended page can miss a storage event while another tab
+            // takes over. Relinquish the stale client without rewriting its lease.
+            closeWebSocketConnection(tokenId);
+            return;
+          }
           if (
             owner?.sessionId === currentSessionId &&
             owner.action === "connected" &&
@@ -1045,6 +1152,10 @@ export const useTokenStore = defineStore("tokens", () => {
         reason?: string;
       }) => {
         if (!isCurrentConnection()) return;
+        if (isStaleAttempt() || discardingStale) {
+          discardStaleConnection();
+          return;
+        }
         const reason = event.code === 1006 ? "异常断开" : event.reason || "";
         wsLogger.wsDisconnect(tokenId, reason);
         releaseConnectionLock(tokenId, "connect");
@@ -1065,9 +1176,17 @@ export const useTokenStore = defineStore("tokens", () => {
             selectedTokenId.value === tokenId
           ) {
             wsLogger.warn(`检测到握手失败(1006)，尝试刷新Token [${tokenId}]`);
-            // 强制刷新并重连
-            const refreshed = await attemptTokenRefresh(tokenId, true);
-            if (refreshed) return;
+            // Mark this as recovery before refreshing. If refresh hangs, the
+            // watchdog resumes ordinary retry without replaying game actions.
+            connectionRecovery.schedule(tokenId, { delayMs: 15000 });
+            await attemptTokenRefresh(tokenId, true, true);
+            if (isCurrentConnection() && shouldKeepRecovering(tokenId)) {
+              connectionRecovery.schedule(tokenId, {
+                reset: true,
+                immediate: true,
+              });
+            }
+            return;
           }
           if (!wasDisconnecting && isCurrentConnection()) {
             connectionRecovery.schedule(tokenId);
@@ -1077,6 +1196,10 @@ export const useTokenStore = defineStore("tokens", () => {
 
       wsClient.onError = (error: unknown) => {
         if (!isCurrentConnection()) return;
+        if (isStaleAttempt() || discardingStale) {
+          discardStaleConnection();
+          return;
+        }
         wsLogger.wsError(tokenId, error);
         if (wsConnections.value[tokenId]) {
           wsConnections.value[tokenId].status = "error";
@@ -1092,6 +1215,10 @@ export const useTokenStore = defineStore("tokens", () => {
       // 10. 设置消息监听
       wsClient.setMessageListener((message: ProtoMsg) => {
         if (!isCurrentConnection()) return;
+        if (isStaleAttempt() || discardingStale) {
+          discardStaleConnection();
+          return;
+        }
         const cmd = message?.cmd || "unknown";
         wsLogger.wsMessage(tokenId, cmd, true);
 
@@ -1126,8 +1253,13 @@ export const useTokenStore = defineStore("tokens", () => {
   const closeWebSocketConnectionAsync = async (
     tokenId: string,
     preserveRecovery = false,
+    expectedConnection?: Partial<WebSocketConnection>,
   ) => {
     if (!preserveRecovery) {
+      connectionGeneration.set(
+        tokenId,
+        (connectionGeneration.get(tokenId) || 0) + 1,
+      );
       desiredConnections.delete(tokenId);
       connectionRecovery.cancel(tokenId);
     }
@@ -1139,6 +1271,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
     try {
       const connection = wsConnections.value[tokenId];
+      if (expectedConnection && connection !== expectedConnection) return;
       if (connection && connection.client) {
         wsLogger.debug(`开始优雅关闭连接: ${tokenId}`);
 

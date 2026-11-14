@@ -184,9 +184,18 @@ onMounted(() => {
   }
 });
 
-watch(connectionStatus, (status, previous) => {
-  if (status === "connected" && previous !== "connected") initializeGameData();
-});
+watch(
+  [() => tokenStore.selectedToken?.id, connectionStatus],
+  ([id, status], [previousId, previousStatus]) => {
+    if (
+      id &&
+      status === "connected" &&
+      (id !== previousId || previousStatus !== "connected")
+    ) {
+      initializeGameData({ readOnly: id !== previousId });
+    }
+  },
+);
 
 // 监听当前选中 Token 的连接错误（如 token 过期）并给出明确提示
 watch(
@@ -221,7 +230,7 @@ watch(
 );
 
 // 初始化游戏数据
-const initializeGameData = async () => {
+const initializeGameData = async ({ readOnly = false } = {}) => {
   if (!tokenStore.selectedToken) return;
 
   try {
@@ -233,7 +242,11 @@ const initializeGameData = async () => {
     tokenStore.sendMessage(tokenId, "presetteam_getinfo");
     // This command's side effects are not confirmed. On automatic recovery,
     // retain the previously known battle version and do not send it again.
-    if (tokenStore.connectionRecoveryStatus?.[tokenId] === "restored") return;
+    if (
+      readOnly ||
+      tokenStore.connectionRecoveryStatus?.[tokenId] === "restored"
+    )
+      return;
     const res = await tokenStore.sendMessageWithPromise(
       tokenId,
       "fight_startlevel",

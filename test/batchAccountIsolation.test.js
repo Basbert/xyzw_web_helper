@@ -108,6 +108,23 @@ function fixture() {
   return { calls, closed, statuses, deps, roles, getReleases: () => releases };
 }
 
+test("批量竞技场和爬塔遇到不可读取的角色设置时不会回退其他账号配置", async () => {
+  for (const execute of [
+    (deps) => createTasksArena(deps).batcharenafight(),
+    (deps) => createTasksArena(deps).batchTopUpArena(),
+    (deps) => createTasksTower(deps).climbTower(),
+    (deps) => createTasksTower(deps).climbWeirdTower(),
+  ]) {
+    const f = fixture();
+    f.deps.selectedTokens.value = ["alpha"];
+    f.deps.loadSettings = () => null;
+    await execute(f.deps);
+    assert.deepEqual(f.calls, []);
+    assert.equal(f.statuses.value.alpha, "failed");
+    assert.equal(f.deps.isRunning.value, false);
+  }
+});
+
 test("batch legacy claim keeps existing connections and accepts acknowledgements without optional rewards", async () => {
   const f = fixture();
   await createTasksLegacy(f.deps).batchLegacyClaim();

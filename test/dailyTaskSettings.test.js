@@ -4,6 +4,7 @@ import { effectScope, reactive } from "vue";
 import {
   readDailyTaskSettings,
   readDailyTaskSettingsForExecution,
+  resetDailyTaskSettings,
   useDailyTaskSettings,
   writeDailyTaskSettings,
 } from "../src/utils/dailyTaskSettings.js";
@@ -17,13 +18,15 @@ function memoryStorage() {
   };
 }
 
-function bind(store, storage, onError = () => {}) {
+function bind(store, storage, onError = () => {}, controls = {}) {
   Object.defineProperty(globalThis, "localStorage", {
     configurable: true,
     value: storage,
   });
   const scope = effectScope();
-  const settings = scope.run(() => useDailyTaskSettings(store, onError));
+  const settings = scope.run(() =>
+    useDailyTaskSettings(store, onError, controls),
+  );
   return { settings, stop: () => scope.stop() };
 }
 
@@ -50,6 +53,59 @@ test("settings survive a page reload and preserve batch-only fields", () => {
     3,
   );
   second.stop();
+});
+
+test("用户明确重置后清除损坏的隐藏字段，消费开关保持关闭", () => {
+  const storage = memoryStorage();
+  const token = { id: "a", roleId: "r" };
+  const invalid = JSON.stringify({
+    payRecruit: false,
+    freeGachaEnable: "false",
+    towerFormation: "wrong",
+  });
+  storage.setItem("daily-role-settings:r", invalid);
+  storage.setItem("daily-settings:a", invalid);
+  assert.throws(
+    () => readDailyTaskSettingsForExecution(token, [token], storage),
+    /设置.*无效/,
+  );
+  assert.equal(storage.getItem("daily-settings:a"), invalid);
+  resetDailyTaskSettings(token, storage);
+  const saved = readDailyTaskSettingsForExecution(token, [token], storage);
+  assert.equal(saved.payRecruit, false);
+  assert.equal(saved.blackMarketPurchase, false);
+  assert.equal(saved.dreamShopPurchase, false);
+  assert.equal(Object.hasOwn(saved, "freeGachaEnable"), false);
+  assert.equal(Object.hasOwn(saved, "towerFormation"), false);
+  assert.equal(
+    storage.getItem("daily-settings:a"),
+    storage.getItem("daily-role-settings:r"),
+  );
+});
+
+test("用户点击修复后表单与两份记录一致，不因逐项同步写入旧付费值", () => {
+  const storage = memoryStorage();
+  const token = { id: "a", roleId: "r" };
+  storage.setItem(
+    "daily-settings:a",
+    JSON.stringify({ freeGachaEnable: "false" }),
+  );
+  const controls = {};
+  const binding = bind(
+    reactive({ selectedToken: token, gameTokens: [token] }),
+    storage,
+    () => {},
+    controls,
+  );
+  controls.reset();
+  assert.equal(binding.settings.payRecruit, false);
+  assert.equal(binding.settings.blackMarketPurchase, false);
+  assert.equal(binding.settings.dreamShopPurchase, false);
+  assert.equal(
+    readDailyTaskSettingsForExecution(token, [token], storage).payRecruit,
+    false,
+  );
+  binding.stop();
 });
 
 test("a reimported token for the same role restores the role's settings", () => {
@@ -212,4 +268,47 @@ test("首页不会将不同旧账号的冲突设置当作首次设置", () => {
       readDailyTaskSettingsForExecution(token, [token, oldA, oldB], storage),
     /设置.*冲突/,
   );
+});
+
+test("执行前不覆盖互相冲突的角色和当前 Token 设置", () => {
+  const storage = memoryStorage();
+  const token = { id: "a", roleId: "r" };
+  const stable = JSON.stringify({ payRecruit: true });
+  const current = JSON.stringify({ payRecruit: false });
+  storage.setItem("daily-role-settings:r", stable);
+  storage.setItem("daily-settings:a", current);
+  assert.throws(
+    () => readDailyTaskSettingsForExecution(token, [token], storage),
+    /设置.*冲突/,
+  );
+  assert.equal(storage.getItem("daily-role-settings:r"), stable);
+  assert.equal(storage.getItem("daily-settings:a"), current);
+});
+
+test("打开日常设置遇到损坏或冲突时不覆盖原记录，也不默认开启消费选项", () => {
+  for (const [stable, current] of [
+    [null, "{"],
+    [
+      JSON.stringify({ payRecruit: true }),
+      JSON.stringify({ payRecruit: false }),
+    ],
+  ]) {
+    const storage = memoryStorage();
+    if (stable) storage.setItem("daily-role-settings:r", stable);
+    storage.setItem("daily-settings:a", current);
+    const token = { id: "a", roleId: "r" };
+    const errors = [];
+    const binding = bind(
+      reactive({ selectedToken: token, gameTokens: [token] }),
+      storage,
+      (error) => errors.push(error.message),
+    );
+    assert.equal(binding.settings.payRecruit, false);
+    assert.equal(binding.settings.blackMarketPurchase, false);
+    assert.equal(binding.settings.dreamShopPurchase, false);
+    assert.equal(storage.getItem("daily-role-settings:r"), stable);
+    assert.equal(storage.getItem("daily-settings:a"), current);
+    assert.equal(errors.length, 1);
+    binding.stop();
+  }
 });
