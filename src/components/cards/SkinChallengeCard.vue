@@ -69,7 +69,7 @@
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { getTowerActId } from "@/utils/towerActId.js";
 import MyCard from "../Common/MyCard.vue";
@@ -79,6 +79,11 @@ const message = useMessage();
 
 const isFighting = ref(false);
 const actId = ref(null);
+let isUnmounted = false;
+
+onUnmounted(() => {
+  isUnmounted = true;
+});
 const isActivityValid = computed(() => {
   if (!actId.value) return false;
 
@@ -164,9 +169,12 @@ const canChallenge = (type) => {
   return isActivityValid.value && isTowerOpen(type) && !isTowerCleared(type);
 };
 
-const getInfo = async () => {
-  if (!tokenStore.selectedToken) return;
-  const tokenId = tokenStore.selectedToken.id;
+const getInfo = async (targetTokenId = tokenStore.selectedToken?.id) => {
+  const tokenId =
+    typeof targetTokenId === "string" || typeof targetTokenId === "number"
+      ? targetTokenId
+      : tokenStore.selectedToken?.id;
+  if (!tokenId || !tokenStore.selectedToken) return;
   if (tokenStore.getWebSocketStatus(tokenId) !== "connected") return;
 
   try {
@@ -176,6 +184,7 @@ const getInfo = async () => {
       { actId: getTowerActId() },
       5000,
     );
+    if (isUnmounted || tokenStore.selectedToken?.id !== tokenId) return;
     if (res) {
       // Handle nested data structure if necessary
       const data = res.actId
@@ -206,17 +215,29 @@ const getInfo = async () => {
 };
 
 const refreshInfo = async () => {
+  const tokenId = tokenStore.selectedToken?.id;
   isFighting.value = true;
-  await getInfo();
-  message.success("进度已刷新");
+  await getInfo(tokenId);
+  if (!isUnmounted && tokenStore.selectedToken?.id === tokenId) {
+    message.success("进度已刷新");
+  }
   isFighting.value = false;
 };
 
 const challengeSingle = async (type) => {
   if (isFighting.value) return;
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId || tokenStore.getWebSocketStatus(tokenId) !== "connected") {
+    message.warning("请先连接账号");
+    return;
+  }
+
+  const isSessionActive = () =>
+    !isUnmounted &&
+    tokenStore.selectedToken?.id === tokenId &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected";
 
   isFighting.value = true;
-  const tokenId = tokenStore.selectedToken.id;
 
   try {
     message.info(`开始挑战 BOSS ${type}`);
@@ -225,7 +246,7 @@ const challengeSingle = async (type) => {
     let loop = true;
     let failCount = 0;
 
-    while (loop) {
+    while (loop && isSessionActive()) {
       if (needStart) {
         await tokenStore.sendMessageWithPromise(
           tokenId,
@@ -233,6 +254,7 @@ const challengeSingle = async (type) => {
           { actId: getTowerActId(), towerType: type },
           5000,
         );
+        if (!isSessionActive()) break;
       }
 
       const fightRes = await tokenStore.sendMessageWithPromise(
@@ -241,6 +263,7 @@ const challengeSingle = async (type) => {
         { actId: getTowerActId(), towerType: type },
         5000,
       );
+      if (!isSessionActive()) break;
       const battleData = fightRes?.battleData;
       const curHP = battleData?.result?.accept?.ext?.curHP;
 
@@ -254,13 +277,15 @@ const challengeSingle = async (type) => {
         failCount = 0;
 
         // 检查是否通关（需要更新 levelRewardMap）
-        await getInfo();
+        await getInfo(tokenId);
+        if (!isSessionActive()) break;
         if (isTowerCleared(type)) {
           loop = false;
           message.success(`BOSS ${type} 已全部通关`);
         } else {
           // 等待一下避免过快请求
           await new Promise((r) => setTimeout(r, 1000));
+          if (!isSessionActive()) break;
         }
       } else {
         const currentLevel = getTowerLevel(type);
@@ -276,22 +301,33 @@ const challengeSingle = async (type) => {
           loop = false;
         } else {
           await new Promise((r) => setTimeout(r, 1000));
+          if (!isSessionActive()) break;
         }
       }
     }
   } catch (e) {
-    message.error(`挑战出错: ${e.message}`);
+    if (isSessionActive()) {
+      message.error(`挑战出错: ${e.message}`);
+    }
   } finally {
     isFighting.value = false;
-    await getInfo();
+    if (isSessionActive()) {
+      await getInfo(tokenId);
+    }
   }
 };
 
 watch(
   () => tokenStore.selectedToken,
-  (newVal) => {
+  (newVal, oldVal) => {
+    if (newVal?.id !== oldVal?.id) {
+      actId.value = null;
+      levelRewardMap.value = {};
+      dailyFightNum.value = 0;
+    }
     if (newVal) {
-      setTimeout(getInfo, 1000);
+      const targetId = newVal.id;
+      setTimeout(() => getInfo(targetId), 1000);
     }
   },
   { immediate: true },

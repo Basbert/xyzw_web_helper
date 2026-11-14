@@ -13,6 +13,16 @@ const unwrapRaw = (value) => {
   return current;
 };
 
+/** Request closure only for the client and socket owned by this task. */
+export function closeOwnedConnection(tokenStore, tokenId, client, socket) {
+  if (!client) return;
+  if (typeof tokenStore.closeWebSocketConnectionIfCurrent === "function") {
+    tokenStore.closeWebSocketConnectionIfCurrent(tokenId, client, socket);
+  } else {
+    tokenStore.closeWebSocketConnection(tokenId);
+  }
+}
+
 /**
  * Acquire or reuse an account WebSocket connection and guarantee slot/socket
  * cleanup matches ownership even when tasks stop, fail, or get replaced.
@@ -52,25 +62,29 @@ export async function withManagedConnection(
   let ownsSlot = false;
   let ownedClient = null;
   let ownedSocket = null;
+  let clientTrackingProvided = false;
   let connectionInvalidated = false;
 
   const matchesOwnedConnection = () => {
-    const status = tokenStore.getWebSocketStatus(tokenId);
-    if (status !== "connected") return false;
-    if (!ownedClient) return true;
-    const current = unwrapRaw(tokenStore.wsConnections?.[tokenId]?.client);
+    if (typeof tokenStore?.getWebSocketStatus === "function") {
+      const status = tokenStore.getWebSocketStatus(tokenId);
+      if (status !== "connected") return false;
+    }
+    if (!ownedClient) {
+      return !(ownsSlot && clientTrackingProvided);
+    }
+    const current = unwrapRaw(tokenStore?.wsConnections?.[tokenId]?.client);
     const currentSocket = unwrapRaw(current?.socket);
     return (
       current === ownedClient && (!ownedSocket || currentSocket === ownedSocket)
     );
   };
 
+  const isConnectionIntact = () =>
+    !connectionInvalidated && matchesOwnedConnection();
+
   const check = () => {
-    if (
-      connectionInvalidated ||
-      shouldStop?.value ||
-      !matchesOwnedConnection()
-    ) {
+    if (shouldStop?.value || !isConnectionIntact()) {
       const error = new Error("任务已停止或连接已断开");
       error.interrupted = true;
       throw error;
@@ -85,6 +99,7 @@ export async function withManagedConnection(
         ownsSlot = owned;
       },
       (client, socket) => {
+        clientTrackingProvided = true;
         ownedClient = client ? unwrapRaw(client) : null;
         ownedSocket = socket
           ? unwrapRaw(socket)
@@ -93,25 +108,50 @@ export async function withManagedConnection(
             : null;
       },
       () => {
+        if (!ownedClient) {
+          if (ownsSlot || clientTrackingProvided) {
+            connectionInvalidated = true;
+            check();
+          }
+          const readyClient = unwrapRaw(
+            tokenStore?.wsConnections?.[tokenId]?.client,
+          );
+          if (readyClient) {
+            ownedClient = readyClient;
+            ownedSocket = unwrapRaw(readyClient?.socket) || null;
+          }
+        }
         if (!matchesOwnedConnection()) {
           connectionInvalidated = true;
         }
+        check();
       },
       connectionOptions,
     );
+    if (!ownedClient && !ownsSlot && !clientTrackingProvided) {
+      const readyClient = unwrapRaw(
+        tokenStore?.wsConnections?.[tokenId]?.client,
+      );
+      if (readyClient) {
+        ownedClient = readyClient;
+        ownedSocket = unwrapRaw(readyClient?.socket) || null;
+      }
+    }
     check();
-    return await handler({ check, ownsSlot });
+    return await handler({ check, ownsSlot, isConnectionIntact });
   } finally {
     if (ownsSlot) {
+      let closeRequested = false;
       try {
         const current = unwrapRaw(tokenStore.wsConnections?.[tokenId]?.client);
         const currentSocket = unwrapRaw(current?.socket);
-        const canClose =
-          !ownedClient ||
-          (current === ownedClient &&
-            (!ownedSocket || currentSocket === ownedSocket));
-        if (canClose) {
-          tokenStore.closeWebSocketConnection(tokenId);
+        const canClose = ownedClient
+          ? current === ownedClient &&
+            (!ownedSocket || currentSocket === ownedSocket)
+          : !clientTrackingProvided && !current;
+        if (canClose && ownedClient) {
+          closeOwnedConnection(tokenStore, tokenId, ownedClient, ownedSocket);
+          closeRequested = true;
         }
       } finally {
         releaseConnectionSlot?.();
@@ -119,11 +159,118 @@ export async function withManagedConnection(
       if (logOnClose && addLog) {
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `${tokenName} 连接已关闭  (队列: ${queue?.active ?? 0}/${batchSettings?.maxActive ?? 0})`,
+          message: `${tokenName} ${closeRequested ? "已请求关闭本次连接" : "连接已变化或不可确认，保留当前连接"}  (队列: ${queue?.active ?? 0}/${batchSettings?.maxActive ?? 0})`,
           type: "info",
         });
       }
     }
+  }
+}
+
+/**
+ * Validate and switch preset team formation, recording original team id for restoration.
+ * The caller's check must run after reading the current team and before writing.
+ */
+export async function switchPresetFormation({
+  tokenStore,
+  tokenId,
+  targetFormation,
+  check,
+  addLog,
+  errorMessage = "服务器未提供有效阵容，停止当前任务",
+  state,
+}) {
+  check();
+  const teamInfo = await tokenStore.sendMessageWithPromise(
+    tokenId,
+    "presetteam_getinfo",
+    {},
+    5000,
+  );
+  check();
+  if (!teamInfo || !teamInfo.presetTeamInfo) {
+    addLog?.({
+      time: new Date().toLocaleTimeString(),
+      message: `阵容信息异常: ${JSON.stringify(teamInfo)}`,
+      type: "warning",
+    });
+  }
+
+  const currentFormation = teamInfo?.presetTeamInfo?.useTeamId;
+  const hasValidFormation = Number.isInteger(currentFormation);
+  if (!hasValidFormation) {
+    throw new Error(errorMessage);
+  }
+  state.originalFormation = currentFormation;
+
+  if (currentFormation === targetFormation) {
+    addLog?.({
+      time: new Date().toLocaleTimeString(),
+      message: `当前已是阵容${targetFormation}，无需切换`,
+      type: "info",
+    });
+    return state;
+  }
+
+  // An acknowledgement can be lost after the server changes teams.
+  state.changed = true;
+  await tokenStore.sendMessageWithPromise(
+    tokenId,
+    "presetteam_saveteam",
+    { teamId: targetFormation },
+    5000,
+  );
+  addLog?.({
+    time: new Date().toLocaleTimeString(),
+    message: `成功切换到阵容${targetFormation}`,
+    type: "info",
+  });
+  return state;
+}
+
+/**
+ * Restore the original preset team only on the connection that switched it,
+ * downgrading completed status to pending if restoration cannot be verified.
+ */
+export async function restorePresetFormation({
+  tokenStore,
+  tokenId,
+  tokenName,
+  tokenStatus,
+  addLog,
+  state,
+  isConnectionIntact = () => true,
+}) {
+  if (!state?.changed || !Number.isInteger(state.originalFormation)) return;
+
+  if (!isConnectionIntact()) {
+    if (tokenStatus?.value?.[tokenId] === "completed") {
+      tokenStatus.value[tokenId] = "pending";
+    }
+    addLog?.({
+      time: new Date().toLocaleTimeString(),
+      message: `${tokenName} 连接已断开或被替换，跳过原阵容恢复，请手动检查`,
+      type: "warning",
+    });
+    return;
+  }
+
+  try {
+    await tokenStore.sendMessageWithPromise(
+      tokenId,
+      "presetteam_saveteam",
+      { teamId: state.originalFormation },
+      5000,
+    );
+  } catch (error) {
+    if (tokenStatus?.value?.[tokenId] === "completed") {
+      tokenStatus.value[tokenId] = "pending";
+    }
+    addLog?.({
+      time: new Date().toLocaleTimeString(),
+      message: `${tokenName} 原阵容恢复失败，请手动检查: ${error.message}`,
+      type: "warning",
+    });
   }
 }
 
@@ -216,71 +363,105 @@ export function createConnectionManager({
     if (!connected) {
       await waitForConnectionSlot();
       onSlotChange?.(true);
+      onClientCreated?.(null, null);
 
-      addLog({
-        time: new Date().toLocaleTimeString(),
-        message: `正在连接... (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-        type: "info",
-      });
+      let slotReleased = false;
+      const releaseOwnedSlot = () => {
+        if (slotReleased) return;
+        slotReleased = true;
+        releaseConnectionSlot();
+        onSlotChange?.(false);
+      };
 
-      let createdClient = await tokenStore.createWebSocketConnection(
-        tokenId,
-        latestToken.token,
-        latestToken.wsUrl,
-      );
-      let createdSocket = unwrapRaw(createdClient?.socket);
-      onClientCreated?.(createdClient, createdSocket);
-      connected = await waitForConnection(tokenId);
-
-      if (!connected && maxRetries > 0 && !shouldStop?.value) {
+      let createdClient = null;
+      let createdSocket = null;
+      try {
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `连接超时，尝试重连...`,
-          type: "warning",
-        });
-
-        const current = unwrapRaw(tokenStore.wsConnections?.[tokenId]?.client);
-        if (
-          onClientCreated &&
-          current &&
-          (!createdClient ||
-            current !== unwrapRaw(createdClient) ||
-            (createdSocket && unwrapRaw(current.socket) !== createdSocket))
-        ) {
-          const error = new Error("连接已被替换，停止批量任务");
-          error.interrupted = true;
-          throw error;
-        }
-        if (
-          !onClientCreated ||
-          (createdClient &&
-            current &&
-            (!createdSocket || unwrapRaw(current.socket) === createdSocket))
-        ) {
-          tokenStore.closeWebSocketConnection(tokenId);
-        }
-        await new Promise((r) => setTimeout(r, batchSettings.reconnectDelay));
-
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `正在重连...`,
+          message: `正在连接... (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
           type: "info",
         });
 
-        const refreshedToken = tokens.find((t) => t.id === tokenId);
         createdClient = await tokenStore.createWebSocketConnection(
           tokenId,
-          refreshedToken.token,
-          refreshedToken.wsUrl,
+          latestToken.token,
+          latestToken.wsUrl,
         );
         createdSocket = unwrapRaw(createdClient?.socket);
         onClientCreated?.(createdClient, createdSocket);
+        connected =
+          createdClient || !onClientCreated
+            ? await waitForConnection(tokenId)
+            : false;
 
-        connected = await waitForConnection(tokenId);
-      }
+        if (!connected && maxRetries > 0 && !shouldStop?.value) {
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `连接超时，尝试重连...`,
+            type: "warning",
+          });
 
-      if (!connected) {
-        try {
+          const current = unwrapRaw(
+            tokenStore.wsConnections?.[tokenId]?.client,
+          );
+          if (
+            onClientCreated &&
+            current &&
+            (!createdClient ||
+              current !== unwrapRaw(createdClient) ||
+              (createdSocket && unwrapRaw(current.socket) !== createdSocket))
+          ) {
+            const error = new Error("连接已被替换，停止批量任务");
+            error.interrupted = true;
+            throw error;
+          }
+          if (
+            !onClientCreated ||
+            (createdClient &&
+              current &&
+              unwrapRaw(createdClient) === current &&
+              (!createdSocket || unwrapRaw(current.socket) === createdSocket))
+          ) {
+            if (onClientCreated) {
+              closeOwnedConnection(
+                tokenStore,
+                tokenId,
+                createdClient,
+                createdSocket ?? null,
+              );
+            } else {
+              tokenStore.closeWebSocketConnection(tokenId);
+            }
+          }
+          await new Promise((r) => setTimeout(r, batchSettings.reconnectDelay));
+
+          if (!shouldStop?.value) {
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `正在重连...`,
+              type: "info",
+            });
+
+            const refreshedToken = tokens.find((t) => t.id === tokenId);
+            if (!refreshedToken) {
+              throw new Error(`Token not found: ${tokenId}`);
+            }
+            createdClient = await tokenStore.createWebSocketConnection(
+              tokenId,
+              refreshedToken.token,
+              refreshedToken.wsUrl,
+            );
+            createdSocket = unwrapRaw(createdClient?.socket);
+            onClientCreated?.(createdClient, createdSocket);
+
+            connected =
+              createdClient || !onClientCreated
+                ? await waitForConnection(tokenId)
+                : false;
+          }
+        }
+
+        if (!connected) {
           const current = unwrapRaw(
             tokenStore.wsConnections?.[tokenId]?.client,
           );
@@ -291,15 +472,28 @@ export function createConnectionManager({
               unwrapRaw(createdClient) === current &&
               (!createdSocket || unwrapRaw(current.socket) === createdSocket))
           ) {
-            tokenStore.closeWebSocketConnection(tokenId);
+            if (onClientCreated) {
+              closeOwnedConnection(
+                tokenStore,
+                tokenId,
+                createdClient,
+                createdSocket ?? null,
+              );
+            } else {
+              tokenStore.closeWebSocketConnection(tokenId);
+            }
           }
-        } finally {
-          releaseConnectionSlot();
-          onSlotChange?.(false);
+          const error = new Error(
+            shouldStop?.value ? "任务已停止" : "连接失败 (重试后仍超时)",
+          );
+          if (shouldStop?.value) {
+            error.interrupted = true;
+          }
+          throw error;
         }
-        throw new Error(
-          shouldStop?.value ? "任务已停止" : "连接失败 (重试后仍超时)",
-        );
+      } catch (err) {
+        releaseOwnedSlot();
+        throw err;
       }
     }
 

@@ -165,6 +165,14 @@ export function sanitizeTaskPayload(body, options = {}) {
     if (!partial && tokens.length === 0) {
       throw new Error("selected_tokens 不能为空");
     }
+    if (tokens.length > 200) {
+      throw new Error("selected_tokens 数量超出上限");
+    }
+    for (const item of tokens) {
+      if (typeof item !== "string" || !item.trim() || item.length > 128) {
+        throw new Error("selected_tokens 包含无效的角色标识");
+      }
+    }
     payload.selected_tokens = Array.isArray(body.selected_tokens)
       ? tokens
       : JSON.stringify(tokens);
@@ -173,6 +181,14 @@ export function sanitizeTaskPayload(body, options = {}) {
     const tokens = parseArrayOrJson(body.token_ids, "token_ids");
     if (!partial && tokens.length === 0) {
       throw new Error("token_ids 不能为空");
+    }
+    if (tokens.length > 200) {
+      throw new Error("token_ids 数量超出上限");
+    }
+    for (const item of tokens) {
+      if (typeof item !== "string" || !item.trim() || item.length > 128) {
+        throw new Error("token_ids 包含无效的角色标识");
+      }
     }
     payload.token_ids = Array.isArray(body.token_ids)
       ? tokens

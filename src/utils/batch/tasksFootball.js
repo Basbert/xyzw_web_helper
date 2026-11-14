@@ -1,4 +1,6 @@
 /** 批量盐杯竞猜。 */
+import { withManagedConnection } from "./connectionManager.js";
+
 export function createTasksFootball(deps) {
   const {
     selectedTokens,
@@ -8,6 +10,8 @@ export function createTasksFootball(deps) {
     shouldStop,
     ensureConnection,
     releaseConnectionSlot,
+    connectionQueue,
+    batchSettings,
     tokenStore,
     addLog,
     message,
@@ -42,97 +46,97 @@ export function createTasksFootball(deps) {
             log("账号已不存在，跳过盐杯竞猜", "error");
             return;
           }
-          let ownsSlot = false;
           tokenStatus.value[tokenId] = "running";
-          const checkInterrupted = () => {
-            if (
-              shouldStop.value ||
-              (tokenStore.getWebSocketStatus &&
-                tokenStore.getWebSocketStatus(tokenId) !== "connected")
-            ) {
-              const error = new Error(
-                shouldStop.value ? "批量任务已停止" : "账号连接已断开",
-              );
-              error.interrupted = true;
-              throw error;
-            }
-          };
           try {
-            await ensureConnection(tokenId, 2, (owned) => {
-              ownsSlot = owned;
-            });
-            checkInterrupted();
-            const response = await tokenStore.sendMessageWithPromise(
-              tokenId,
-              "saltcup26_getbetinfo",
-              {},
-              8000,
-            );
-            checkInterrupted();
-            const roleData = response?.roleData;
-            if (
-              !roleData ||
-              typeof roleData !== "object" ||
-              Array.isArray(roleData)
-            )
-              throw new Error("未获取到竞猜记录，请刷新后重试");
-            const betRecord = roleData.betRecord ?? {};
-            if (
-              !betRecord ||
-              typeof betRecord !== "object" ||
-              Array.isArray(betRecord)
-            )
-              throw new Error("竞猜记录格式异常，请刷新后重试");
-            const scheduleIds = Object.keys(betRecord);
-            if (!scheduleIds.length) {
-              tokenStatus.value[tokenId] = "completed";
-              log(`${token.name} 当前没有可竞猜的比赛`, "info");
-              return;
-            }
-            const bets = betRecord[scheduleIds[scheduleIds.length - 1]];
-            if (!bets || typeof bets !== "object" || Array.isArray(bets))
-              throw new Error("比赛记录不完整，请刷新后重试");
-            if (
-              Object.values(bets).some(
-                (item) => !item || ![0, 1, 2, 3].includes(item.pick),
-              )
-            )
-              throw new Error("比赛竞猜状态不完整，请刷新后重试");
-            const matchIds = Object.keys(bets).filter(
-              (id) => bets[id]?.pick === 0,
-            );
-            if (!matchIds.length) {
-              tokenStatus.value[tokenId] = "completed";
-              log(`${token.name} 当前比赛没有待竞猜项目`, "info");
-              return;
-            }
-            const label = { 1: "主胜", 2: "平局", 3: "客胜" }[pick];
-            let sent = 0;
-            for (const [index, matchId] of matchIds.entries()) {
-              checkInterrupted();
-              try {
-                await tokenStore.sendMessageWithPromise(
+            await withManagedConnection(
+              {
+                tokenId,
+                tokenName: token.name,
+                ensureConnection,
+                releaseConnectionSlot,
+                connectionQueue,
+                batchSettings,
+                tokenStore,
+                shouldStop,
+                addLog,
+                logOnClose: false,
+                retries: 2,
+              },
+              async ({ check }) => {
+                check();
+                const response = await tokenStore.sendMessageWithPromise(
                   tokenId,
-                  "saltcup26_placebet",
-                  { matchId, pick },
+                  "saltcup26_getbetinfo",
+                  {},
                   8000,
                 );
-              } catch {
-                log(
-                  `${token.name} ${matchId} 竞猜结果未确认，请刷新比赛记录后再决定是否重试`,
-                  "warning",
+                check();
+                const roleData = response?.roleData;
+                if (
+                  !roleData ||
+                  typeof roleData !== "object" ||
+                  Array.isArray(roleData)
+                )
+                  throw new Error("未获取到竞猜记录，请刷新后重试");
+                const betRecord = roleData.betRecord ?? {};
+                if (
+                  !betRecord ||
+                  typeof betRecord !== "object" ||
+                  Array.isArray(betRecord)
+                )
+                  throw new Error("竞猜记录格式异常，请刷新后重试");
+                const scheduleIds = Object.keys(betRecord);
+                if (!scheduleIds.length) {
+                  tokenStatus.value[tokenId] = "completed";
+                  log(`${token.name} 当前没有可竞猜的比赛`, "info");
+                  return;
+                }
+                const bets = betRecord[scheduleIds[scheduleIds.length - 1]];
+                if (!bets || typeof bets !== "object" || Array.isArray(bets))
+                  throw new Error("比赛记录不完整，请刷新后重试");
+                if (
+                  Object.values(bets).some(
+                    (item) => !item || ![0, 1, 2, 3].includes(item.pick),
+                  )
+                )
+                  throw new Error("比赛竞猜状态不完整，请刷新后重试");
+                const matchIds = Object.keys(bets).filter(
+                  (id) => bets[id]?.pick === 0,
                 );
-                tokenStatus.value[tokenId] = "pending";
-                return;
-              }
-              sent++;
-              log(`${token.name} ${matchId} → ${label} 已提交`, "success");
-              checkInterrupted();
-              if (index < matchIds.length - 1)
-                await new Promise((resolve) => setTimeout(resolve, 500));
-            }
-            tokenStatus.value[tokenId] = "completed";
-            log(`${token.name} 已提交 ${sent} 场竞猜`, "success");
+                if (!matchIds.length) {
+                  tokenStatus.value[tokenId] = "completed";
+                  log(`${token.name} 当前比赛没有待竞猜项目`, "info");
+                  return;
+                }
+                const label = { 1: "主胜", 2: "平局", 3: "客胜" }[pick];
+                let sent = 0;
+                for (const [index, matchId] of matchIds.entries()) {
+                  check();
+                  try {
+                    await tokenStore.sendMessageWithPromise(
+                      tokenId,
+                      "saltcup26_placebet",
+                      { matchId, pick },
+                      8000,
+                    );
+                  } catch {
+                    log(
+                      `${token.name} ${matchId} 竞猜结果未确认，请刷新比赛记录后再决定是否重试`,
+                      "warning",
+                    );
+                    tokenStatus.value[tokenId] = "pending";
+                    return;
+                  }
+                  sent++;
+                  log(`${token.name} ${matchId} → ${label} 已提交`, "success");
+                  check();
+                  if (index < matchIds.length - 1)
+                    await new Promise((resolve) => setTimeout(resolve, 500));
+                }
+                tokenStatus.value[tokenId] = "completed";
+                log(`${token.name} 已提交 ${sent} 场竞猜`, "success");
+              },
+            );
           } catch (error) {
             tokenStatus.value[tokenId] = error?.interrupted
               ? "stopped"
@@ -141,14 +145,6 @@ export function createTasksFootball(deps) {
               `${token.name} 盐杯竞猜未完成：${error.message || "未知错误"}`,
               error?.interrupted ? "warning" : "error",
             );
-          } finally {
-            if (ownsSlot) {
-              try {
-                tokenStore.closeWebSocketConnection(tokenId);
-              } finally {
-                releaseConnectionSlot();
-              }
-            }
           }
         }),
       );

@@ -52,7 +52,9 @@ function fixture({
       },
     },
   });
+  const client = { socket: {} };
   const tokenStore = {
+    wsConnections: { a: { client } },
     async sendMessageWithPromise(id, command, params) {
       requests.push({ id, command, params });
       if (command === "role_getroleinfo") return { role };
@@ -87,8 +89,10 @@ function fixture({
     tokenStatus: { value: {} },
     isRunning: { value: false },
     shouldStop: { value: false },
-    async ensureConnection(_id, _retries, notify) {
+    async ensureConnection(_id, _retries, notify, onCreated, onReady) {
       notify(owns);
+      if (owns) onCreated?.(client, client.socket);
+      onReady?.();
     },
     releaseConnectionSlot() {
       released++;

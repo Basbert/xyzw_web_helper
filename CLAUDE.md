@@ -27,9 +27,9 @@ npm run lint
 # Format code (Prettier)
 npm run format
 
-# Test individual modules
-npm run testr  # Test role token
-npm run testd  # Test token
+# Run automated tests and typechecking
+npm test
+npm run typecheck
 ```
 
 ### Installation
@@ -134,7 +134,7 @@ Token Import → Base64 Decode → Local Storage → Token Selection → Connect
 **Vite Plugins** (with safe optional loading):
 - `unplugin-vue-router`: File-based routing from `src/views/`
 - `unplugin-auto-import`: Auto-import Vue APIs, router, i18n
-- `unplugin-vue-components`: Auto-register components with ArcoResolver
+- `unplugin-vue-components`: Auto-register components with `NaiveUiResolver`
 - `@intlify/unplugin-vue-i18n`: Vue I18n pre-compilation
 - `unocss/vite`: Utility-first CSS framework
 - `vite-plugin-vue-devtools`: Enhanced Vue debugging
@@ -263,28 +263,22 @@ src/
 ├── utils/
 │   ├── bonProtocol.js            # BON protocol implementation (DataReader/Writer, encoding)
 │   ├── xyzwWebSocket.js          # WebSocket client with CommandRegistry
-│   ├── gameCommands.js           # Game-specific command helpers
+│   ├── xyzwRuntime.ts            # Login BIN encoding via bonProtocol ("lx")
 │   ├── dailyTaskRunner.js        # Task automation orchestration
-│   ├── wsAgent.js                # WebSocket connection management
-│   ├── tokenDb.js                # IndexedDB operations for tokens
 │   ├── logger.js                 # Logging utilities (wsLogger, gameLogger, tokenLogger)
-│   ├── readable-xyzw-ws.js       # Reference WebSocket implementation
-│   ├── connectionPoolManager.js  # Connection pool coordination
-│   ├── taskQueueManager.js       # Task queue management
-│   └── connectionHealthMonitor.js # Connection health checks
+│   └── batch/                    # Modular batch task runners (tasksArena, tasksItem, tasksTower, etc.)
 │
 ├── views/
 │   ├── Home.vue                  # Landing page
 │   ├── TokenImport/              # Token import and management pages
-│   │   └── index.vue             # Main token import interface
+│   │   └── TokenImport.vue       # Main token import interface
 │   ├── Dashboard.vue             # Main game control interface
-│   ├── DailyTasks.vue            # Task management interface
 │   ├── BatchDailyTasks.vue       # Batch task execution for multiple tokens
-│   ├── GameFeatures.vue          # Game feature showcase
-│   ├── GameRoles.vue             # Role information display
+│   ├── GameFeatures.vue          # Game feature workspace
+│   ├── PushingLevels.vue         # Mainline level pushing automation
+│   ├── LegionWar.vue             # Saturday real-time legion war view
 │   ├── Profile.vue               # User preferences and settings
-│   ├── Changelog.vue             # Application version history
-│   └── Login.vue / Register.vue  # Legacy authentication pages
+│   └── Changelog.vue             # Application version history
 │
 ├── composables/
 │   └── useTheme.js               # Theme management composable
@@ -718,7 +712,7 @@ This project uses **both TypeScript and JavaScript**:
 2. **Auto-imported APIs**: Vue, Vue Router, Vue I18n available without imports
 3. **Component auto-registration**: Components in `src/components/` don't need manual import
 4. **Theme awareness**: Use `useTheme()` composable, respect `isDark` state
-5. **Arco Design + Naive UI**: Both UI libraries available (Arco via resolver, Naive via manual import)
+5. **Naive UI**: Auto-resolved via `NaiveUiResolver` in `unplugin-vue-components`
 6. **i18n ready**: Use `$t()` for translatable strings even if not fully implemented yet
 
 ### Performance Considerations

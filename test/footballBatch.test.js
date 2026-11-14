@@ -13,20 +13,24 @@ function fixture({
   const notices = [];
   const logs = [];
   let released = 0;
+  const client = { socket: {} };
   const deps = {
     selectedTokens: { value: ["a"] },
     tokens: { value: [{ id: "a", name: "测试角色" }] },
     tokenStatus: { value: {} },
     isRunning: { value: false },
     shouldStop: { value: false },
-    async ensureConnection(_id, _retries, notify) {
+    async ensureConnection(_id, _retries, notify, onCreated, onReady) {
       notify(owns);
+      if (owns) onCreated?.(client, client.socket);
       if (stopDuringConnect) deps.shouldStop.value = true;
+      onReady?.();
     },
     releaseConnectionSlot() {
       released++;
     },
     tokenStore: {
+      wsConnections: { a: { client } },
       getWebSocketStatus() {
         return "connected";
       },

@@ -45,6 +45,10 @@ export default defineConfig(async () => {
     "unplugin-vue-components/vite",
     "component auto-registration",
   );
+  const componentsResolvers = await safeImport(
+    "unplugin-vue-components/resolvers",
+    "component resolvers",
+  );
   const unoCssModule = await safeImport("unocss/vite", "UnoCSS");
   const vueDevToolsModule = await safeImport(
     "vite-plugin-vue-devtools",
@@ -77,6 +81,9 @@ export default defineConfig(async () => {
   const componentsPlugin = componentsModule?.default?.({
     dirs: ["src/components"],
     globsExclude: ["**/Private/**"],
+    resolvers: componentsResolvers?.NaiveUiResolver
+      ? [componentsResolvers.NaiveUiResolver()]
+      : [],
   });
 
   const unoCssPlugin = unoCssModule?.default?.();
@@ -118,6 +125,67 @@ export default defineConfig(async () => {
     },
   ].filter(Boolean);
 
+  const proxy = {
+    // 手机号验证码接口需要以 ucenter-app-server Host 路由。
+    "/api/hortor-ucenter": {
+      target: "https://comb-platform.hortorgames.com",
+      changeOrigin: true,
+      rewrite: (path) => path.replace(/^\/api\/hortor-ucenter/, ""),
+      secure: true,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Linux; Android 12; ALN-AL80 Build/HUAWEIALN-AL80; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/114.0.5735.196 Mobile Safari/537.36",
+        Accept: "application/json",
+        Host: "ucenter-app-server.hortorgames.com",
+        "Content-Type": "application/json; charset=utf-8",
+      },
+    },
+    // 微信扫码状态轮询代理
+    "/api/weixin-long": {
+      target: "https://long.open.weixin.qq.com",
+      changeOrigin: true,
+      rewrite: (path) => path.replace(/^\/api\/weixin-long/, ""),
+      secure: true,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Linux; Android 7.0; Mi-4c Build/NRD90M; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/53.0.2785.49 Mobile MQQBrowser/6.2 TBS/043632 Safari/537.36 MicroMessenger/6.6.1.1220(0x26060135) NetType/WIFI Language/zh_CN",
+        Accept: "*/*",
+        Referer: "https://open.weixin.qq.com/",
+      },
+    },
+    // 微信登录接口代理；较长的 weixin-long 路径必须先匹配。
+    "/api/weixin": {
+      target: "https://open.weixin.qq.com",
+      changeOrigin: true,
+      rewrite: (path) => path.replace(/^\/api\/weixin/, ""),
+      secure: true,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Linux; Android 7.0; Mi-4c Build/NRD90M; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/53.0.2785.49 Mobile MQQBrowser/6.2 TBS/043632 Safari/537.36 MicroMessenger/6.6.1.1220(0x26060135) NetType/WIFI Language/zh_CN",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        Referer: "https://open.weixin.qq.com/",
+      },
+    },
+    // Hortor登录接口代理
+    "/api/hortor": {
+      target: "https://comb-platform.hortorgames.com",
+      changeOrigin: true,
+      rewrite: (path) => path.replace(/^\/api\/hortor/, ""),
+      secure: true,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Linux; Android 12; 23117RK66C Build/V417IR; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/95.0.4638.74 Mobile Safari/537.36",
+        Accept: "*/*",
+        Host: "comb-platform.hortorgames.com",
+        Connection: "keep-alive",
+        "Content-Type": "text/plain; charset=utf-8",
+        Origin: "https://open.weixin.qq.com",
+        Referer: "https://open.weixin.qq.com/",
+      },
+    },
+  };
+
   return {
     plugins,
     resolve: {
@@ -127,77 +195,18 @@ export default defineConfig(async () => {
     },
     preview: {
       open: false,
+      proxy,
     },
     server: {
       port: 3000,
       open: true,
       host: true,
-      proxy: {
-        // 手机号验证码接口需要以 ucenter-app-server Host 路由。
-        "/api/hortor-ucenter": {
-          target: "https://comb-platform.hortorgames.com",
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api\/hortor-ucenter/, ""),
-          secure: true,
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Linux; Android 12; ALN-AL80 Build/HUAWEIALN-AL80; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/114.0.5735.196 Mobile Safari/537.36",
-            Accept: "application/json",
-            Host: "ucenter-app-server.hortorgames.com",
-            "Content-Type": "application/json; charset=utf-8",
-          },
-        },
-        // 微信扫码状态轮询代理
-        "/api/weixin-long": {
-          target: "https://long.open.weixin.qq.com",
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api\/weixin-long/, ""),
-          secure: true,
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Linux; Android 7.0; Mi-4c Build/NRD90M; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/53.0.2785.49 Mobile MQQBrowser/6.2 TBS/043632 Safari/537.36 MicroMessenger/6.6.1.1220(0x26060135) NetType/WIFI Language/zh_CN",
-            Accept: "*/*",
-            Referer: "https://open.weixin.qq.com/",
-          },
-        },
-        // 微信登录接口代理；较长的 weixin-long 路径必须先匹配。
-        "/api/weixin": {
-          target: "https://open.weixin.qq.com",
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api\/weixin/, ""),
-          secure: true,
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Linux; Android 7.0; Mi-4c Build/NRD90M; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/53.0.2785.49 Mobile MQQBrowser/6.2 TBS/043632 Safari/537.36 MicroMessenger/6.6.1.1220(0x26060135) NetType/WIFI Language/zh_CN",
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            Referer: "https://open.weixin.qq.com/",
-          },
-        },
-        // Hortor登录接口代理
-        "/api/hortor": {
-          target: "https://comb-platform.hortorgames.com",
-          changeOrigin: true,
-          rewrite: (path) => path.replace(/^\/api\/hortor/, ""),
-          secure: true,
-          headers: {
-            "User-Agent":
-              "Mozilla/5.0 (Linux; Android 12; 23117RK66C Build/V417IR; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/95.0.4638.74 Mobile Safari/537.36",
-            Accept: "*/*",
-            Host: "comb-platform.hortorgames.com",
-            Connection: "keep-alive",
-            "Content-Type": "text/plain; charset=utf-8",
-            Origin: "https://open.weixin.qq.com",
-            Referer: "https://open.weixin.qq.com/",
-          },
-        },
-      },
+      proxy,
     },
     css: {
       preprocessorOptions: {
         scss: {
           api: "modern",
-          additionalData: '@use "@/assets/styles/variables.scss" as vars;',
         },
       },
     },

@@ -531,7 +531,7 @@ import { Copy, Refresh, Trophy } from "@vicons/ionicons5";
 
 import html2canvas from "html2canvas";
 import { useMessage } from "naive-ui";
-import { onMounted, ref, watch } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { isSameGameValue } from "@/utils/gameValue.js";
 import { gettoday } from "@/utils/goldWarrankUtils";
@@ -636,6 +636,11 @@ const formatPower = (power) => {
 // 处理图片加载错误
 
 // 切磋
+let isUnmounted = false;
+onUnmounted(() => {
+  isUnmounted = true;
+});
+
 const fetchfightPVP = async () => {
   if (!tokenStore.selectedToken) {
     message.warning("请先选择游戏角色");
@@ -643,10 +648,13 @@ const fetchfightPVP = async () => {
   }
 
   const tokenId = tokenStore.selectedToken.id;
+  const isSessionActive = () =>
+    !isUnmounted &&
+    tokenStore.selectedToken?.id === tokenId &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected";
 
   // 检查WebSocket连接
-  const wsStatus = tokenStore.getWebSocketStatus(tokenId);
-  if (wsStatus !== "connected") {
+  if (!isSessionActive()) {
     message.error("WebSocket未连接，无法查询战绩");
     return;
   }
@@ -661,6 +669,7 @@ const fetchfightPVP = async () => {
     let enemyTotalDieHeroCount = 0; // 敌方总掉落将领数
     const resultCount = [];
     for (let i = 0; i < fightNum.value; i++) {
+      if (!isSessionActive()) return;
       const result = await tokenStore.sendMessageWithPromise(
         tokenId,
         "fight_startpvp",
@@ -669,6 +678,7 @@ const fetchfightPVP = async () => {
         },
         5000,
       );
+      if (!isSessionActive()) return;
       if (!result.battleData) {
         fightResult.value = null;
         message.warning("切磋错误");
@@ -708,6 +718,7 @@ const fetchfightPVP = async () => {
       }
       resultCount.push(tempObj);
     }
+    if (!isSessionActive()) return;
     const teamData = {
       winCount,
       ourTotalDieHeroCount,
@@ -718,8 +729,10 @@ const fetchfightPVP = async () => {
     message.success("切磋完成");
     return teamData;
   } catch (error) {
-    message.error(`查询失败: ${error.message}`);
-    topranklist.value = null;
+    if (!isUnmounted && tokenStore.selectedToken?.id === tokenId) {
+      message.error(`查询失败: ${error.message}`);
+      topranklist.value = null;
+    }
   } finally {
     loading1.value = false;
     loadingText.value = "正在查询对手信息...";
@@ -761,6 +774,7 @@ const fetchTargetInfo = async () => {
       },
       5000,
     );
+    if (isUnmounted || tokenStore.selectedToken?.id !== tokenId) return;
 
     if (!result.roleInfo && !result.legionInfo) {
       memberData.value = null;

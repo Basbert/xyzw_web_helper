@@ -3,6 +3,7 @@
  * 包含: batchLegacyClaim, batchLegacyGiftSendEnhanced
  */
 import { runWithDailyTaskLock } from "@/utils/dailyTaskState";
+import { withManagedConnection } from "./connectionManager.js";
 
 /**
  * 创建功法类任务执行器
@@ -18,6 +19,7 @@ export function createTasksLegacy(deps) {
     shouldStop,
     ensureConnection,
     releaseConnectionSlot,
+    connectionQueue,
     batchSettings,
     tokenStore,
     addLog,
@@ -53,44 +55,43 @@ export function createTasksLegacy(deps) {
       }
       try {
         await runWithDailyTaskLock(tokenId, async () => {
-          let ownsSlot = false;
-          try {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `=== 开始领取功法残卷: ${token.name} ===`,
-              type: "info",
-            });
-            await ensureConnection(tokenId, 2, (owned) => {
-              ownsSlot = owned;
-            });
-            if (shouldStop.value) {
-              const error = new Error("任务已停止");
-              error.interrupted = true;
-              throw error;
-            }
-            const response = await tokenStore.sendMessageWithPromise(
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `=== 开始领取功法残卷: ${token.name} ===`,
+            type: "info",
+          });
+          await withManagedConnection(
+            {
               tokenId,
-              "legacy_claimhangup",
-              {},
-              5000,
-            );
-            const received = response?.reward?.[0]?.value;
-            const total = response?.role?.items?.[37007]?.quantity;
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `=== ${token.name} 已领取功法残卷${received == null ? "" : ` ${received}`} ${total == null ? "" : `，共有 ${total} 个`} ===`,
-              type: "success",
-            });
-            tokenStatus.value[tokenId] = "completed";
-          } finally {
-            if (ownsSlot) {
-              try {
-                tokenStore.closeWebSocketConnection(tokenId);
-              } finally {
-                releaseConnectionSlot();
-              }
-            }
-          }
+              tokenName: token.name,
+              ensureConnection,
+              releaseConnectionSlot,
+              connectionQueue,
+              batchSettings,
+              tokenStore,
+              shouldStop,
+              addLog,
+              logOnClose: false,
+              retries: 2,
+            },
+            async ({ check }) => {
+              check();
+              const response = await tokenStore.sendMessageWithPromise(
+                tokenId,
+                "legacy_claimhangup",
+                {},
+                5000,
+              );
+              const received = response?.reward?.[0]?.value;
+              const total = response?.role?.items?.[37007]?.quantity;
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `=== ${token.name} 已领取功法残卷${received == null ? "" : ` ${received}`} ${total == null ? "" : `，共有 ${total} 个`} ===`,
+                type: "success",
+              });
+              tokenStatus.value[tokenId] = "completed";
+            },
+          );
         });
       } catch (error) {
         tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
@@ -121,6 +122,7 @@ export function createTasksLegacy(deps) {
    * 增强版批量赠送功法残卷（含完善的验证和错误处理）
    */
   const batchLegacyGiftSendEnhanced = async (isScheduledTask = false) => {
+    if (isRunning.value) return;
     if (selectedTokens.value.length === 0) {
       message.warning("请先选择要操作的角色");
       return;
@@ -158,7 +160,6 @@ export function createTasksLegacy(deps) {
       return;
     }
 
-    if (isRunning.value) return;
     const tokenIds = [...selectedTokens.value];
     isRunning.value = true;
     shouldStop.value = false;
@@ -183,13 +184,6 @@ export function createTasksLegacy(deps) {
       const accountGift = { ...giftConfig };
       let giftAttempted = false;
       let giftConfirmed = false;
-      const checkStop = () => {
-        if (shouldStop.value) {
-          const error = new Error("任务已停止");
-          error.interrupted = true;
-          throw error;
-        }
-      };
 
       try {
         await runWithDailyTaskLock(tokenId, async () => {
@@ -199,148 +193,154 @@ export function createTasksLegacy(deps) {
             type: "info",
           });
 
-          let ownsSlot = false;
-          try {
-            await ensureConnection(tokenId, 2, (owned) => {
-              ownsSlot = owned;
-            });
-            checkStop();
-            const roleInfo = await tokenStore.sendGetRoleInfo(tokenId);
-            checkStop();
-            if (!roleInfo?.role?.items) {
-              throw new Error("无法读取当前账号的残卷数量");
-            }
-            const rawCount =
-              roleInfo.role.items[accountGift.itemId]?.quantity ?? 0;
-            if (!Number.isInteger(rawCount) || rawCount < 0) {
-              throw new Error("服务器返回的残卷数量无效");
-            }
-            const legacyFragmentCount = Math.min(rawCount, 9999);
-            if (isScheduledTask) {
-              if (legacyFragmentCount === 0) {
+          await withManagedConnection(
+            {
+              tokenId,
+              tokenName: token.name,
+              ensureConnection,
+              releaseConnectionSlot,
+              connectionQueue,
+              batchSettings,
+              tokenStore,
+              shouldStop,
+              addLog,
+              logOnClose: false,
+              retries: 2,
+            },
+            async ({ check }) => {
+              check();
+              const roleInfo = await tokenStore.sendGetRoleInfo(tokenId);
+              check();
+              if (!roleInfo?.role?.items) {
+                throw new Error("无法读取当前账号的残卷数量");
+              }
+              const rawCount =
+                roleInfo.role.items[accountGift.itemId]?.quantity ?? 0;
+              if (!Number.isInteger(rawCount) || rawCount < 0) {
+                throw new Error("服务器返回的残卷数量无效");
+              }
+              const legacyFragmentCount = Math.min(rawCount, 9999);
+              if (isScheduledTask) {
+                if (legacyFragmentCount === 0) {
+                  addLog({
+                    time: new Date().toLocaleTimeString(),
+                    message: `=== ${token.name} 功法残卷不足，当前拥有: 0 ===`,
+                    type: "error",
+                  });
+                  tokenStatus.value[tokenId] = "failed";
+                  totalFailed++;
+                  return;
+                }
+                const rankroleinfo = await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "rank_getroleinfo",
+                  {
+                    bottleType: 0,
+                    includeBottleTeam: false,
+                    isSearch: false,
+                    roleId: accountGift.recipientId,
+                  },
+                  5000,
+                );
+                accountGift.serverName =
+                  rankroleinfo?.roleInfo?.serverName || "";
+                accountGift.name = rankroleinfo?.roleInfo?.name || "";
+                if (!rankroleinfo?.roleInfo?.roleId) {
+                  addLog({
+                    time: new Date().toLocaleTimeString(),
+                    message: `=== ${token.name} 赠送功法残卷失败: 接收者${accountGift.recipientId}不存在`,
+                    type: "error",
+                  });
+                  tokenStatus.value[tokenId] = "failed";
+                  totalFailed++;
+                  return;
+                }
+                accountGift.quantity = legacyFragmentCount;
+              }
+
+              if (legacyFragmentCount < accountGift.quantity) {
                 addLog({
                   time: new Date().toLocaleTimeString(),
-                  message: `=== ${token.name} 功法残卷不足，当前拥有: 0 ===`,
+                  message: `=== ${token.name} 功法残卷不足，当前拥有: ${legacyFragmentCount}，需要: ${accountGift.quantity} ===`,
                   type: "error",
                 });
                 tokenStatus.value[tokenId] = "failed";
                 totalFailed++;
                 return;
               }
-              const rankroleinfo = await tokenStore.sendMessageWithPromise(
-                tokenId,
-                "rank_getroleinfo",
-                {
-                  bottleType: 0,
-                  includeBottleTeam: false,
-                  isSearch: false,
-                  roleId: accountGift.recipientId,
-                },
-                5000,
-              );
-              accountGift.serverName = rankroleinfo?.roleInfo?.serverName || "";
-              accountGift.name = rankroleinfo?.roleInfo?.name || "";
-              if (!rankroleinfo?.roleInfo?.roleId) {
+
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `=== 开始解除安全密码验证 ===`,
+                type: "info",
+              });
+
+              check();
+              const commitPasswordResp =
+                await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "role_commitpassword",
+                  {
+                    password,
+                    passwordType: 1,
+                  },
+                  5000,
+                );
+
+              if (!commitPasswordResp) {
+                throw new Error("安全密码验证请求无响应");
+              }
+              if (!commitPasswordResp.role?.statistics?.["que:wh:tm"]) {
                 addLog({
                   time: new Date().toLocaleTimeString(),
-                  message: `=== ${token.name} 赠送功法残卷失败: 接收者${accountGift.recipientId}不存在`,
+                  message: `${token.name} === 密码解除失败,请检查密码是否配置正确 ===`,
                   type: "error",
                 });
                 tokenStatus.value[tokenId] = "failed";
                 totalFailed++;
                 return;
               }
-              accountGift.quantity = legacyFragmentCount;
-            }
-
-            if (legacyFragmentCount < accountGift.quantity) {
               addLog({
                 time: new Date().toLocaleTimeString(),
-                message: `=== ${token.name} 功法残卷不足，当前拥有: ${legacyFragmentCount}，需要: ${accountGift.quantity} ===`,
-                type: "error",
+                message: `=== 安全密码验证成功 ===`,
+                type: "success",
               });
-              tokenStatus.value[tokenId] = "failed";
-              totalFailed++;
-              return;
-            }
 
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `=== 开始解除安全密码验证 ===`,
-              type: "info",
-            });
-
-            checkStop();
-            const commitPasswordResp = await tokenStore.sendMessageWithPromise(
-              tokenId,
-              "role_commitpassword",
-              {
-                password,
-                passwordType: 1,
-              },
-              5000,
-            );
-
-            if (!commitPasswordResp) {
-              throw new Error("安全密码验证请求无响应");
-            }
-            if (!commitPasswordResp.role?.statistics?.["que:wh:tm"]) {
               addLog({
                 time: new Date().toLocaleTimeString(),
-                message: `${token.name} === 密码解除失败,请检查密码是否配置正确 ===`,
-                type: "error",
+                message: `${token.name} === 开始赠送功法残卷${accountGift.quantity}个,目标:[${accountGift.serverName}] ID:${accountGift.recipientId} ${accountGift.name} ===`,
+                type: "info",
               });
-              tokenStatus.value[tokenId] = "failed";
-              totalFailed++;
-              return;
-            }
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `=== 安全密码验证成功 ===`,
-              type: "success",
-            });
 
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} === 开始赠送功法残卷${accountGift.quantity}个,目标:[${accountGift.serverName}] ID:${accountGift.recipientId} ${accountGift.name} ===`,
-              type: "info",
-            });
+              check();
+              giftAttempted = true;
+              const legacySendGiftResp =
+                await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "legacy_sendgift",
+                  {
+                    itemCnt: accountGift.quantity,
+                    legacyUIds: [],
+                    targetId: accountGift.recipientId,
+                  },
+                  5000,
+                );
 
-            checkStop();
-            giftAttempted = true;
-            const legacySendGiftResp = await tokenStore.sendMessageWithPromise(
-              tokenId,
-              "legacy_sendgift",
-              {
-                itemCnt: accountGift.quantity,
-                legacyUIds: [],
-                targetId: accountGift.recipientId,
-              },
-              5000,
-            );
-
-            if (!legacySendGiftResp) {
-              throw new Error("赠送请求无响应");
-            }
-            giftConfirmed = true;
-
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `=== ${token.name} 成功赠送功法残卷${accountGift.quantity}个给[${accountGift.serverName}] ID:${accountGift.recipientId} ${accountGift.name} ===`,
-              type: "success",
-            });
-
-            tokenStatus.value[tokenId] = "completed";
-            totalSuccess++;
-          } finally {
-            if (ownsSlot) {
-              try {
-                tokenStore.closeWebSocketConnection(tokenId);
-              } finally {
-                releaseConnectionSlot();
+              if (!legacySendGiftResp) {
+                throw new Error("赠送请求无响应");
               }
-            }
-          }
+              giftConfirmed = true;
+
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `=== ${token.name} 成功赠送功法残卷${accountGift.quantity}个给[${accountGift.serverName}] ID:${accountGift.recipientId} ${accountGift.name} ===`,
+                type: "success",
+              });
+
+              tokenStatus.value[tokenId] = "completed";
+              totalSuccess++;
+            },
+          );
         });
       } catch (error) {
         let errorMsg = error.message || "未知错误";

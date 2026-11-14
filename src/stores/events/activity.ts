@@ -1,8 +1,8 @@
 import type { EVM, XyzwSession } from "./index";
 import { gameLogger } from "@/utils/logger";
 
-// 处理_ack事件，通常用于确认收到某些重要消息
-export const AckPlugin = ({ onSome }: EVM) => {
+// 处理活动信息事件
+export const ActivityPlugin = ({ onSome }: EVM) => {
   onSome(["activity_getresp", "activity_get"], (data: XyzwSession) => {
     gameLogger.verbose(`收到活动信息事件: ${data.tokenId}`, data);
     const { body } = data;
@@ -17,3 +17,5 @@ export const AckPlugin = ({ onSome }: EVM) => {
     data.gameData.value.lastUpdated = new Date().toISOString();
   });
 };
+
+export const AckPlugin = ActivityPlugin;

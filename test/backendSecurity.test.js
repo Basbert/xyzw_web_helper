@@ -119,6 +119,17 @@ test("render-backend token and task payload sanitizers enforce allow-lists", asy
     ),
   );
   assert.throws(() =>
+    sanitizeTaskPayload(
+      {
+        name: "每日",
+        cron_expr: "0 8 * * *",
+        selected_tokens: [123],
+        selected_tasks: ["signIn"],
+      },
+      { partial: false, validTaskKeys: ["signIn"] },
+    ),
+  );
+  assert.throws(() =>
     sanitizeTaskPayload({}, { partial: true, validTaskKeys: ["signIn"] }),
   );
 });

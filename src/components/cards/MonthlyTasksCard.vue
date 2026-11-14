@@ -84,7 +84,7 @@
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import MyCard from "../Common/MyCard.vue";
 
@@ -98,6 +98,9 @@ const monthLoading = ref(false);
 const fishToppingUp = ref(false);
 const arenaToppingUp = ref(false);
 const monthActivity = ref(null);
+let isUnmounted = false;
+let sessionGeneration = 0;
+let monthlyRequestId = 0;
 
 const now = new Date();
 const daysInMonth = new Date(
@@ -149,26 +152,80 @@ const isArenaActivityOpen = computed(() => {
   return hour >= 6 && hour < 22;
 });
 
-const fetchMonthlyActivity = async () => {
-  if (!tokenStore.selectedToken) return message.warning("请先选择Token");
-  if (!isConnected.value) return;
+const fetchMonthlyActivity = async (
+  targetTokenId = tokenStore.selectedToken?.id,
+) => {
+  const resolvedTokenId =
+    typeof targetTokenId === "string" || typeof targetTokenId === "number"
+      ? targetTokenId
+      : tokenStore.selectedToken?.id;
+  if (!resolvedTokenId || !tokenStore.selectedToken) {
+    return message.warning("请先选择Token");
+  }
+  if (
+    tokenStore.selectedToken.id !== resolvedTokenId ||
+    tokenStore.getWebSocketStatus(resolvedTokenId) !== "connected"
+  )
+    return false;
+  const requestId = ++monthlyRequestId;
+  const startGeneration =
+    typeof sessionGeneration === "number" ? sessionGeneration : null;
   monthLoading.value = true;
   try {
-    const tokenId = tokenStore.selectedToken.id;
     const result = await tokenStore.sendMessageWithPromise(
-      tokenId,
+      resolvedTokenId,
       "activity_get",
       {},
       10000,
     );
+    const generationChanged =
+      startGeneration !== null &&
+      typeof sessionGeneration === "number" &&
+      sessionGeneration !== startGeneration;
+    if (
+      isUnmounted ||
+      generationChanged ||
+      requestId !== monthlyRequestId ||
+      tokenStore.selectedToken?.id !== resolvedTokenId
+    )
+      return false;
     const act = result?.activity || result?.body?.activity || result;
     monthActivity.value = act || null;
     if (act) message.success("月度任务进度已更新");
+    return Boolean(act && typeof act === "object");
   } catch (e) {
-    message.error(`获取月度任务失败：${e.message}`);
+    const generationChanged =
+      startGeneration !== null &&
+      typeof sessionGeneration === "number" &&
+      sessionGeneration !== startGeneration;
+    if (
+      !isUnmounted &&
+      !generationChanged &&
+      requestId === monthlyRequestId &&
+      tokenStore.selectedToken?.id === resolvedTokenId
+    ) {
+      message.error(`获取月度任务失败：${e.message}`);
+    }
+    return false;
   } finally {
-    monthLoading.value = false;
+    if (requestId === monthlyRequestId) monthLoading.value = false;
   }
+};
+
+const readMonthlyProgress = (activity, type) => {
+  const raw =
+    type === "fish"
+      ? activity?.myMonthInfo?.["2"]?.num
+      : activity?.myArenaInfo?.num;
+  if (
+    raw === undefined ||
+    raw === null ||
+    (typeof raw !== "number" && typeof raw !== "string") ||
+    (typeof raw === "string" && !raw.trim())
+  )
+    return null;
+  const count = Number(raw);
+  return Number.isFinite(count) && count >= 0 ? count : null;
 };
 
 const getTodayStartSec = () => {
@@ -214,23 +271,50 @@ const onArenaMoreSelect = (key) => {
 const autoTopUpFish = async (need, shouldBe, target) => {
   if (!tokenStore.selectedToken) return message.warning("请先选择Token");
   if (!isConnected.value) return message.warning("请先建立WS连接");
+  if (readMonthlyProgress(monthActivity.value, "fish") === null)
+    return message.warning("请先刷新并确认月度钓鱼进度");
   fishToppingUp.value = true;
   try {
     const tokenId = tokenStore.selectedToken.id;
+    const initialClient = tokenStore.wsConnections?.[tokenId]?.client ?? null;
+    const initialSocket = initialClient?.socket;
+    const startGeneration =
+      typeof sessionGeneration === "number" ? sessionGeneration : null;
+    let sessionInvalidated = false;
+    const isSessionActive = () => {
+      if (sessionInvalidated) return false;
+      const generationChanged =
+        startGeneration !== null &&
+        typeof sessionGeneration === "number" &&
+        sessionGeneration !== startGeneration;
+      const active =
+        !isUnmounted &&
+        !generationChanged &&
+        tokenStore.selectedToken?.id === tokenId &&
+        tokenStore.getWebSocketStatus(tokenId) === "connected" &&
+        (!initialClient ||
+          (tokenStore.wsConnections?.[tokenId]?.client === initialClient &&
+            initialClient.socket === initialSocket));
+      if (!active) sessionInvalidated = true;
+      return active;
+    };
     let role = tokenStore.gameData?.roleInfo?.role;
     if (!role) {
       try {
         await tokenStore.sendGetRoleInfo(tokenId);
       } catch {}
+      if (!isSessionActive()) return;
       role = tokenStore.gameData?.roleInfo?.role;
     }
     let freeUsed = 0;
+    let freeUncertain = false;
     const lastFreeTime = Number(
       role?.statisticsTime?.["artifact:normal:lottery:time"] || 0,
     );
     if (isTodayAvailable(lastFreeTime)) {
       message.info("检测到今日免费钓鱼次数，开始消耗 3 次");
       for (let i = 0; i < 3; i++) {
+        if (!isSessionActive()) break;
         try {
           await tokenStore.sendMessageWithPromise(
             tokenId,
@@ -239,33 +323,55 @@ const autoTopUpFish = async (need, shouldBe, target) => {
             8000,
           );
           freeUsed++;
+          if (!isSessionActive()) break;
           await new Promise((r) => setTimeout(r, 500));
         } catch {
+          freeUncertain = true;
           break;
         }
       }
-      if (freeUsed > 0) await fetchMonthlyActivity();
+      if (!isSessionActive()) return;
+      let refreshed = true;
+      if (freeUsed > 0 || freeUncertain)
+        refreshed = await fetchMonthlyActivity(tokenId);
+      if (!isSessionActive()) return;
+      if (freeUncertain) {
+        message.warning("免费钓鱼响应异常，请核对月度进度后再继续付费钓鱼");
+        return;
+      }
+      if (!refreshed) {
+        message.warning("无法确认最新钓鱼进度，已停止付费钓鱼");
+        return;
+      }
     }
-    let remaining = Math.max(0, shouldBe - fishNum.value);
+    const currentProgress = readMonthlyProgress(monthActivity.value, "fish");
+    if (currentProgress === null)
+      return message.warning("无法确认最新钓鱼进度，已停止付费钓鱼");
+    let remaining = Math.max(0, shouldBe - currentProgress);
     if (remaining <= 0) return message.success("已通过免费次数完成当日目标");
     message.info(`开始付费钓鱼补齐：共需 ${remaining} 次（每次最多10）`);
-    while (remaining > 0) {
+    while (remaining > 0 && isSessionActive()) {
       const batch = Math.min(10, remaining);
       try {
         await tokenStore.sendMessageWithPromise(
           tokenId,
           "artifact_lottery",
-          { lotteryNumber: batch, newFree: true, type: 1 },
+          { lotteryNumber: batch, newFree: false, type: 1 },
           12000,
         );
       } catch (e) {
-        message.error(`钓鱼失败：${e.message}`);
+        if (isSessionActive()) {
+          message.error(`钓鱼失败：${e.message}`);
+        }
         break;
       }
       remaining -= batch;
+      if (!isSessionActive()) break;
       await new Promise((r) => setTimeout(r, 800));
     }
-    await fetchMonthlyActivity();
+    if (!isSessionActive()) return;
+    await fetchMonthlyActivity(tokenId);
+    if (!isSessionActive()) return;
     if (fishNum.value >= shouldBe || fishNum.value >= target)
       message.success("钓鱼补齐完成");
     else message.warning("钓鱼补齐已停止，未达到目标");
@@ -290,11 +396,35 @@ const pickArenaTargetId = (targets) => {
 const autoTopUpArena = async (need, shouldBe, target) => {
   if (!tokenStore.selectedToken) return message.warning("请先选择Token");
   if (!isConnected.value) return message.warning("请先建立WS连接");
+  if (readMonthlyProgress(monthActivity.value, "arena") === null)
+    return message.warning("请先刷新并确认月度竞技场进度");
   if (!isArenaActivityOpen.value)
     return message.warning("竞技场活动已关闭，请在 6:00-22:00 时间段内操作");
   arenaToppingUp.value = true;
   try {
     const tokenId = tokenStore.selectedToken.id;
+    const initialClient = tokenStore.wsConnections?.[tokenId]?.client ?? null;
+    const initialSocket = initialClient?.socket;
+    const startGeneration =
+      typeof sessionGeneration === "number" ? sessionGeneration : null;
+    let sessionInvalidated = false;
+    const isSessionActive = () => {
+      if (sessionInvalidated) return false;
+      const generationChanged =
+        startGeneration !== null &&
+        typeof sessionGeneration === "number" &&
+        sessionGeneration !== startGeneration;
+      const active =
+        !isUnmounted &&
+        !generationChanged &&
+        tokenStore.selectedToken?.id === tokenId &&
+        tokenStore.getWebSocketStatus(tokenId) === "connected" &&
+        (!initialClient ||
+          (tokenStore.wsConnections?.[tokenId]?.client === initialClient &&
+            initialClient.socket === initialSocket));
+      if (!active) sessionInvalidated = true;
+      return active;
+    };
     try {
       await tokenStore.sendMessageWithPromise(
         tokenId,
@@ -303,16 +433,26 @@ const autoTopUpArena = async (need, shouldBe, target) => {
         6000,
       );
     } catch {}
+    if (!isSessionActive()) return;
     let safetyCounter = 0;
     const safetyMaxFights = 100;
     let round = 1;
     let remaining = need;
-    while (remaining > 0 && safetyCounter < safetyMaxFights) {
+    while (
+      remaining > 0 &&
+      safetyCounter < safetyMaxFights &&
+      isSessionActive()
+    ) {
       const planFights = Math.ceil(remaining / 2);
       message.info(
         `竞技场补齐 第${round}轮：计划战斗 ${planFights} 场（估算每胜+2）`,
       );
-      for (let i = 0; i < planFights && safetyCounter < safetyMaxFights; i++) {
+      let roundBlocked = false;
+      for (
+        let i = 0;
+        i < planFights && safetyCounter < safetyMaxFights && isSessionActive();
+        i++
+      ) {
         let targets;
         try {
           targets = await tokenStore.sendMessageWithPromise(
@@ -322,14 +462,19 @@ const autoTopUpArena = async (need, shouldBe, target) => {
             8000,
           );
         } catch (err) {
-          message.error(`获取竞技场目标失败：${err.message}`);
+          if (isSessionActive()) {
+            message.error(`获取竞技场目标失败：${err.message}`);
+          }
+          roundBlocked = true;
           break;
         }
+        if (!isSessionActive()) break;
 
         console.info("[Arena] 获取竞技场目标响应", targets);
         const targetId = pickArenaTargetId(targets);
         if (!targetId) {
           message.warning("未找到可用的竞技场目标，已停止此轮");
+          roundBlocked = true;
           break;
         }
         try {
@@ -340,15 +485,28 @@ const autoTopUpArena = async (need, shouldBe, target) => {
             15000,
           );
         } catch (e) {
-          message.error(`竞技场对决失败：${e.message}`);
+          if (isSessionActive()) {
+            message.error(`竞技场对决失败：${e.message}`);
+          }
+          roundBlocked = true;
+          break;
         }
         safetyCounter++;
+        if (!isSessionActive()) break;
         await new Promise((r) => setTimeout(r, 1200));
       }
-      await fetchMonthlyActivity();
-      remaining = Math.max(0, shouldBe - arenaNum.value);
+      if (!isSessionActive()) return;
+      const refreshed = await fetchMonthlyActivity(tokenId);
+      if (!isSessionActive()) return;
+      const currentProgress = readMonthlyProgress(monthActivity.value, "arena");
+      if (roundBlocked || !refreshed || currentProgress === null) {
+        message.warning("竞技场补齐已停止，请核对最新进度和战斗结果");
+        return;
+      }
+      remaining = Math.max(0, shouldBe - currentProgress);
       round++;
     }
+    if (!isSessionActive()) return;
     if (arenaNum.value >= shouldBe || arenaNum.value >= target)
       message.success("竞技场补齐完成");
     else if (safetyCounter >= safetyMaxFights)
@@ -361,6 +519,36 @@ const autoTopUpArena = async (need, shouldBe, target) => {
 
 const hasFetchedOnce = ref(false);
 watch(
+  () => [
+    tokenStore.selectedToken?.id,
+    tokenStore.selectedToken
+      ? tokenStore.wsConnections?.[tokenStore.selectedToken.id]?.client
+      : null,
+    tokenStore.selectedToken
+      ? tokenStore.wsConnections?.[tokenStore.selectedToken.id]?.client?.socket
+      : null,
+    tokenStore.selectedToken
+      ? tokenStore.getWebSocketStatus(tokenStore.selectedToken.id)
+      : null,
+  ],
+  () => {
+    sessionGeneration++;
+  },
+  { flush: "sync" },
+);
+watch(
+  () => tokenStore.selectedToken?.id,
+  (newId, oldId) => {
+    if (newId === oldId) return;
+    hasFetchedOnce.value = false;
+    monthActivity.value = null;
+    if (newId && tokenStore.getWebSocketStatus(newId) === "connected") {
+      hasFetchedOnce.value = true;
+      fetchMonthlyActivity(newId);
+    }
+  },
+);
+watch(
   () =>
     tokenStore.selectedToken
       ? tokenStore.getWebSocketStatus(tokenStore.selectedToken.id)
@@ -368,14 +556,15 @@ watch(
   (status) => {
     if (status === "connected" && !hasFetchedOnce.value) {
       hasFetchedOnce.value = true;
-      fetchMonthlyActivity();
+      fetchMonthlyActivity(tokenStore.selectedToken?.id);
     }
   },
   { immediate: true },
 );
 
-onMounted(() => {
-  if (tokenStore.selectedToken && isConnected.value) fetchMonthlyActivity();
+onUnmounted(() => {
+  isUnmounted = true;
+  sessionGeneration++;
 });
 
 defineExpose({ fetchMonthlyActivity });

@@ -279,10 +279,24 @@ import {
   onMounted,
   reactive,
   ref,
+  shallowRef,
   watch,
 } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
-import { BOSS_NAMES } from "./boss_names.js";
+
+const bossNamesMap = shallowRef({});
+void import("./boss_names.js")
+  .then((mod) => {
+    bossNamesMap.value = mod.BOSS_NAMES || {};
+    if (typeof runningStates === "object" && runningStates !== null) {
+      Object.values(runningStates).forEach((state) => {
+        if (state && state.level > 0 && !state.bossName) {
+          applyLevel(state, state.level);
+        }
+      });
+    }
+  })
+  .catch(() => {});
 
 const MAX_LOGS = 2000;
 const KNOWLEDGE_COIN_ITEM_ID = 1024;
@@ -711,7 +725,7 @@ function formatTorchTime(seconds) {
 
 function getBossName(level) {
   if (!level || level <= 0) return "";
-  return BOSS_NAMES[level] || "";
+  return bossNamesMap.value[level] || "";
 }
 
 /**
@@ -1423,7 +1437,7 @@ onBeforeUnmount(() => {
   height: 100%;
   min-height: 0;
   padding: 16px;
-  background: #f6f8fb;
+  background: var(--bg-secondary);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1438,14 +1452,14 @@ onBeforeUnmount(() => {
 
 .pl-header h2 {
   margin: 0;
-  color: #1f2937;
+  color: var(--text-primary);
   font-size: 22px;
   font-weight: 700;
 }
 
 .pl-header p {
   margin: 2px 0 0;
-  color: #667085;
+  color: var(--text-secondary);
   font-size: 13px;
 }
 
@@ -1465,7 +1479,7 @@ onBeforeUnmount(() => {
 }
 
 .retry-label {
-  color: #667085;
+  color: var(--text-secondary);
   font-size: 13px;
 }
 
@@ -1497,7 +1511,7 @@ onBeforeUnmount(() => {
   border: 1px solid;
   border-radius: 999px;
   padding: 2px 8px;
-  background: #fff;
+  background: var(--bg-primary);
   font-size: 11px;
   cursor: pointer;
   line-height: 1.4;
@@ -1533,8 +1547,8 @@ onBeforeUnmount(() => {
   gap: 6px;
   padding: 5px 10px;
   border-radius: 6px;
-  border: 1px solid #e4e7ec;
-  background: #fff;
+  border: 1px solid var(--border-light);
+  background: var(--bg-primary);
   font-size: 12px;
   line-height: 1.4;
   transition:
@@ -1545,16 +1559,16 @@ onBeforeUnmount(() => {
 }
 
 .token-cell:hover {
-  border-color: #98a2b3;
+  border-color: var(--border-dark);
 }
 
 .token-cell.selected {
-  background: #eef2ff;
-  border-color: #c7d2fe;
+  background: var(--primary-color-light);
+  border-color: var(--primary-color);
 }
 
 .token-server {
-  color: #667085;
+  color: var(--text-secondary);
   font-weight: 500;
   max-width: 140px;
   overflow: hidden;
@@ -1563,11 +1577,11 @@ onBeforeUnmount(() => {
 }
 
 .token-sep {
-  color: #98a2b3;
+  color: var(--text-tertiary);
 }
 
 .token-name {
-  color: #101828;
+  color: var(--text-primary);
   font-weight: 600;
   flex: 1;
   min-width: 0;
@@ -1784,20 +1798,20 @@ onBeforeUnmount(() => {
   gap: 8px;
   padding: 3px 6px;
   border-radius: 4px;
-  color: #344054;
+  color: var(--text-primary);
 }
 
 .log-item.success {
-  color: #047857;
+  color: #10b981;
 }
 
 .log-item.warning {
-  color: #b54708;
+  color: #f59e0b;
 }
 
 .log-item.error {
-  background: #fff1f3;
-  color: #b42318;
+  background: rgba(240, 68, 56, 0.12);
+  color: #ef4444;
 }
 
 .log-name,

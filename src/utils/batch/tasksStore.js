@@ -169,7 +169,7 @@ export function createTasksStore(deps) {
    * 一键购买四圣碎片
    */
   const legion_storebuygoods = async () => {
-    if (selectedTokens.value.length === 0) return;
+    if (isRunning.value || selectedTokens.value.length === 0) return;
 
     isRunning.value = true;
     shouldStop.value = false;
@@ -250,14 +250,13 @@ export function createTasksStore(deps) {
 
     currentRunningTokenId.value = null;
     isRunning.value = false;
-    shouldStop.value = false;
   };
 
   /**
    * 一键购买俱乐部5皮肤币
    */
   const legionStoreBuySkinCoins = async () => {
-    if (selectedTokens.value.length === 0) return;
+    if (isRunning.value || selectedTokens.value.length === 0) return;
 
     isRunning.value = true;
     shouldStop.value = false;
@@ -339,14 +338,13 @@ export function createTasksStore(deps) {
 
     currentRunningTokenId.value = null;
     isRunning.value = false;
-    shouldStop.value = false;
   };
 
   /**
    * 免费领取珍宝阁每日奖励
    */
   const collection_claimfreereward = async () => {
-    if (selectedTokens.value.length === 0) return;
+    if (isRunning.value || selectedTokens.value.length === 0) return;
 
     isRunning.value = true;
     shouldStop.value = false;
@@ -434,14 +432,13 @@ export function createTasksStore(deps) {
 
     currentRunningTokenId.value = null;
     isRunning.value = false;
-    shouldStop.value = false;
   };
 
   /**
    * 一键配置黑市采购清单
    */
   const store_syncpurchaseconfig = async () => {
-    if (selectedTokens.value.length === 0) return;
+    if (isRunning.value || selectedTokens.value.length === 0) return;
 
     isRunning.value = true;
     shouldStop.value = false;
@@ -509,14 +506,13 @@ export function createTasksStore(deps) {
 
     currentRunningTokenId.value = null;
     isRunning.value = false;
-    shouldStop.value = false;
   };
 
   /**
    * 黑市一键采购
    */
   const store_purchase = async () => {
-    if (selectedTokens.value.length === 0) return;
+    if (isRunning.value || selectedTokens.value.length === 0) return;
 
     isRunning.value = true;
     shouldStop.value = false;
@@ -604,7 +600,6 @@ export function createTasksStore(deps) {
 
     currentRunningTokenId.value = null;
     isRunning.value = false;
-    shouldStop.value = false;
   };
 
   return {

@@ -1,4 +1,5 @@
 import { isDungeonOpen, merchantConfig } from "@/utils/dreamConstants";
+import { withManagedConnection } from "./connectionManager.js";
 
 /**
  * 宝库、梦境类任务
@@ -27,12 +28,6 @@ export function createTasksDungeon(deps) {
     currentRunningTokenId,
   } = deps;
 
-  const checkStop = () => {
-    if (!shouldStop.value) return;
-    const error = new Error("任务已停止");
-    error.interrupted = true;
-    throw error;
-  };
   const markMissing = (tokenId) => {
     tokenStatus.value[tokenId] = "failed";
     addLog({
@@ -40,28 +35,6 @@ export function createTasksDungeon(deps) {
       message: "选中的账号已不存在，本次跳过",
       type: "error",
     });
-  };
-  const releaseOwnedConnection = (tokenId, name, ownsSlot) => {
-    if (!ownsSlot) return;
-    let closeRequested = false;
-    try {
-      tokenStore.closeWebSocketConnection(tokenId);
-      closeRequested = true;
-    } catch (error) {
-      addLog({
-        time: new Date().toLocaleTimeString(),
-        message: `${name} 关闭本次连接失败: ${error.message}`,
-        type: "warning",
-      });
-    } finally {
-      releaseConnectionSlot();
-    }
-    if (closeRequested)
-      addLog({
-        time: new Date().toLocaleTimeString(),
-        message: `${name} 已请求关闭本次连接 (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-        type: "info",
-      });
   };
   const finishBatch = async (taskPromises, tokenIds, label) => {
     try {
@@ -101,59 +74,73 @@ export function createTasksDungeon(deps) {
         markMissing(tokenId);
         return;
       }
-      let ownsSlot = false;
       try {
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `=== 开始一键宝库: ${token.name} ===`,
           type: "info",
         });
-        await ensureConnection(tokenId, 2, (owned) => {
-          ownsSlot = owned;
-        });
-        checkStop();
-        const bosstowerinfo = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "bosstower_getinfo",
-          {},
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            check();
+            const bosstowerinfo = await tokenStore.sendMessageWithPromise(
+              tokenId,
+              "bosstower_getinfo",
+              {},
+            );
+            check();
+            const towerId = bosstowerinfo.bossTower.towerId;
+            if (towerId >= 1 && towerId <= 3) {
+              for (let i = 0; i < 2; i++) {
+                if (shouldStop.value) break;
+                check();
+                await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "bosstower_startboss",
+                  {},
+                );
+                await new Promise((r) => setTimeout(r, 500));
+              }
+              for (let i = 0; i < 9; i++) {
+                if (shouldStop.value) break;
+                check();
+                await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "bosstower_startbox",
+                  {},
+                );
+                await new Promise((r) => setTimeout(r, 500));
+              }
+            } else {
+              tokenStatus.value[tokenId] = "skipped";
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `${token.name} 当前不在宝库 1–3 层，未执行`,
+                type: "warning",
+              });
+              return;
+            }
+            check();
+            tokenStatus.value[tokenId] = "completed";
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `=== ${token.name} 宝库战斗已完成，请上线手动领取奖励 ===`,
+              type: "success",
+            });
+          },
         );
-        checkStop();
-        const towerId = bosstowerinfo.bossTower.towerId;
-        if (towerId >= 1 && towerId <= 3) {
-          for (let i = 0; i < 2; i++) {
-            if (shouldStop.value) break;
-            await tokenStore.sendMessageWithPromise(
-              tokenId,
-              "bosstower_startboss",
-              {},
-            );
-            await new Promise((r) => setTimeout(r, 500));
-          }
-          for (let i = 0; i < 9; i++) {
-            if (shouldStop.value) break;
-            await tokenStore.sendMessageWithPromise(
-              tokenId,
-              "bosstower_startbox",
-              {},
-            );
-            await new Promise((r) => setTimeout(r, 500));
-          }
-        } else {
-          tokenStatus.value[tokenId] = "skipped";
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `${token.name} 当前不在宝库 1–3 层，未执行`,
-            type: "warning",
-          });
-          return;
-        }
-        checkStop();
-        tokenStatus.value[tokenId] = "completed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== ${token.name} 宝库战斗已完成，请上线手动领取奖励 ===`,
-          type: "success",
-        });
       } catch (error) {
         console.error(error);
         tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
@@ -162,8 +149,6 @@ export function createTasksDungeon(deps) {
           message: `${token.name} 宝库战斗失败: ${error.message || "未知错误"}`,
           type: error.interrupted ? "warning" : "error",
         });
-      } finally {
-        releaseOwnedConnection(tokenId, token.name, ownsSlot);
       }
     });
 
@@ -194,50 +179,63 @@ export function createTasksDungeon(deps) {
         markMissing(tokenId);
         return;
       }
-      let ownsSlot = false;
       try {
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `=== 开始一键宝库: ${token.name} ===`,
           type: "info",
         });
-        await ensureConnection(tokenId, 2, (owned) => {
-          ownsSlot = owned;
-        });
-        checkStop();
-        const bosstowerinfo = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "bosstower_getinfo",
-          {},
-        );
-        checkStop();
-        const towerId = bosstowerinfo.bossTower.towerId;
-        if (towerId >= 4 && towerId <= 5) {
-          for (let i = 0; i < 2; i++) {
-            if (shouldStop.value) break;
-            await tokenStore.sendMessageWithPromise(
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            check();
+            const bosstowerinfo = await tokenStore.sendMessageWithPromise(
               tokenId,
-              "bosstower_startboss",
+              "bosstower_getinfo",
               {},
             );
-            await new Promise((r) => setTimeout(r, 500));
-          }
-        } else {
-          tokenStatus.value[tokenId] = "skipped";
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `${token.name} 当前不在宝库 4–5 层，未执行`,
-            type: "warning",
-          });
-          return;
-        }
-        checkStop();
-        tokenStatus.value[tokenId] = "completed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== ${token.name} 宝库战斗已完成 ===`,
-          type: "success",
-        });
+            check();
+            const towerId = bosstowerinfo.bossTower.towerId;
+            if (towerId >= 4 && towerId <= 5) {
+              for (let i = 0; i < 2; i++) {
+                if (shouldStop.value) break;
+                check();
+                await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "bosstower_startboss",
+                  {},
+                );
+                await new Promise((r) => setTimeout(r, 500));
+              }
+            } else {
+              tokenStatus.value[tokenId] = "skipped";
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `${token.name} 当前不在宝库 4–5 层，未执行`,
+                type: "warning",
+              });
+              return;
+            }
+            check();
+            tokenStatus.value[tokenId] = "completed";
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `=== ${token.name} 宝库战斗已完成 ===`,
+              type: "success",
+            });
+          },
+        );
       } catch (error) {
         console.error(error);
         tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
@@ -246,8 +244,6 @@ export function createTasksDungeon(deps) {
           message: `${token.name} 宝库战斗失败: ${error.message || "未知错误"}`,
           type: error.interrupted ? "warning" : "error",
         });
-      } finally {
-        releaseOwnedConnection(tokenId, token.name, ownsSlot);
       }
     });
 
@@ -278,41 +274,53 @@ export function createTasksDungeon(deps) {
         markMissing(tokenId);
         return;
       }
-      let ownsSlot = false;
       try {
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `=== 开始咸王梦境: ${token.name} ===`,
           type: "info",
         });
-        await ensureConnection(tokenId, 2, (owned) => {
-          ownsSlot = owned;
-        });
-        checkStop();
-        const mjbattleTeam = { 0: 107 };
-        if (isDungeonOpen()) {
-          await tokenStore.sendMessageWithPromise(
+        await withManagedConnection(
+          {
             tokenId,
-            "dungeon_selecthero",
-            { battleTeam: mjbattleTeam },
-            5000,
-          );
-          await new Promise((r) => setTimeout(r, 500));
-          checkStop();
-          tokenStatus.value[tokenId] = "completed";
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `=== ${token.name} 咸王梦境已完成 ===`,
-            type: "success",
-          });
-        } else {
-          tokenStatus.value[tokenId] = "skipped";
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `=== ${token.name} 当前未在开放时间 ===`,
-            type: "warning",
-          });
-        }
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            check();
+            const mjbattleTeam = { 0: 107 };
+            if (isDungeonOpen()) {
+              await tokenStore.sendMessageWithPromise(
+                tokenId,
+                "dungeon_selecthero",
+                { battleTeam: mjbattleTeam },
+                5000,
+              );
+              await new Promise((r) => setTimeout(r, 500));
+              check();
+              tokenStatus.value[tokenId] = "completed";
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `=== ${token.name} 咸王梦境已完成 ===`,
+                type: "success",
+              });
+            } else {
+              tokenStatus.value[tokenId] = "skipped";
+              addLog({
+                time: new Date().toLocaleTimeString(),
+                message: `=== ${token.name} 当前未在开放时间 ===`,
+                type: "warning",
+              });
+            }
+          },
+        );
       } catch (error) {
         console.error(error);
         tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
@@ -321,8 +329,6 @@ export function createTasksDungeon(deps) {
           message: `${token.name} 咸王梦境失败: ${error.message || "未知错误"}`,
           type: error.interrupted ? "warning" : "error",
         });
-      } finally {
-        releaseOwnedConnection(tokenId, token.name, ownsSlot);
       }
     });
 
@@ -367,144 +373,157 @@ export function createTasksDungeon(deps) {
         markMissing(tokenId);
         return;
       }
-      let ownsSlot = false;
       try {
         addLog({
           time: new Date().toLocaleTimeString(),
           message: `=== 开始梦境购买: ${token.name} ===`,
           type: "info",
         });
-        await ensureConnection(tokenId, 2, (owned) => {
-          ownsSlot = owned;
-        });
-        checkStop();
+        await withManagedConnection(
+          {
+            tokenId,
+            tokenName: token.name,
+            ensureConnection,
+            releaseConnectionSlot,
+            connectionQueue,
+            batchSettings,
+            tokenStore,
+            shouldStop,
+            addLog,
+            logOnClose: true,
+          },
+          async ({ check }) => {
+            check();
 
-        // 1. 获取角色信息以获得商店数据
-        const roleInfo = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "role_getroleinfo",
-          {},
-          15000,
-        );
-
-        if (
-          !roleInfo ||
-          !roleInfo.role ||
-          !roleInfo.role.dungeon ||
-          !roleInfo.role.dungeon.merchant
-        ) {
-          throw new Error("无法获取梦境商店数据");
-        }
-
-        const merchantData = roleInfo.role.dungeon.merchant;
-        const levelId = roleInfo.role.levelId || 0;
-        let successCount = 0;
-        let failCount = 0;
-
-        const operations = [];
-
-        for (const itemKey of purchaseList) {
-          const [targetMerchantId, targetItemIndex] = itemKey
-            .split("-")
-            .map(Number);
-
-          const merchantItems = merchantData[targetMerchantId];
-          if (merchantItems) {
-            for (let pos = 0; pos < merchantItems.length; pos++) {
-              if (merchantItems[pos] === targetItemIndex) {
-                operations.push({
-                  merchantId: targetMerchantId,
-                  index: targetItemIndex,
-                  pos,
-                });
-              }
-            }
-          }
-        }
-        operations.sort((a, b) => {
-          if (a.merchantId !== b.merchantId) return a.merchantId - b.merchantId;
-          return b.pos - a.pos;
-        });
-        checkStop();
-        if (!operations.length) {
-          tokenStatus.value[tokenId] = "skipped";
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `${token.name} 当前商店没有清单中的商品，本次未购买`,
-            type: "warning",
-          });
-          return;
-        }
-
-        for (const op of operations) {
-          checkStop();
-
-          if (levelId < 4000) {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 关卡数小于4000，无法购买`,
-              type: "warning",
-            });
-            tokenStatus.value[tokenId] = "skipped";
-            return;
-          }
-
-          try {
-            const response = await tokenStore.sendMessageWithPromise(
+            // 1. 获取角色信息以获得商店数据
+            const roleInfo = await tokenStore.sendMessageWithPromise(
               tokenId,
-              "dungeon_buymerchant",
-              {
-                id: op.merchantId,
-                index: op.index,
-                pos: op.pos,
-              },
-              5000,
+              "role_getroleinfo",
+              {},
+              15000,
             );
 
-            if (response && response.reward) {
-              successCount++;
-              const merchantName = merchantConfig[op.merchantId]
-                ? merchantConfig[op.merchantId].name
-                : `商人${op.merchantId}`;
-              const itemName =
-                merchantConfig[op.merchantId] &&
-                merchantConfig[op.merchantId].items[op.index]
-                  ? merchantConfig[op.merchantId].items[op.index]
-                  : `商品${op.index}`;
+            if (
+              !roleInfo ||
+              !roleInfo.role ||
+              !roleInfo.role.dungeon ||
+              !roleInfo.role.dungeon.merchant
+            ) {
+              throw new Error("无法获取梦境商店数据");
+            }
 
+            const merchantData = roleInfo.role.dungeon.merchant;
+            const levelId = roleInfo.role.levelId || 0;
+            let successCount = 0;
+            let failCount = 0;
+
+            const operations = [];
+
+            for (const itemKey of purchaseList) {
+              const [targetMerchantId, targetItemIndex] = itemKey
+                .split("-")
+                .map(Number);
+
+              const merchantItems = merchantData[targetMerchantId];
+              if (merchantItems) {
+                for (let pos = 0; pos < merchantItems.length; pos++) {
+                  if (merchantItems[pos] === targetItemIndex) {
+                    operations.push({
+                      merchantId: targetMerchantId,
+                      index: targetItemIndex,
+                      pos,
+                    });
+                  }
+                }
+              }
+            }
+            operations.sort((a, b) => {
+              if (a.merchantId !== b.merchantId)
+                return a.merchantId - b.merchantId;
+              return b.pos - a.pos;
+            });
+            check();
+            if (!operations.length) {
+              tokenStatus.value[tokenId] = "skipped";
               addLog({
                 time: new Date().toLocaleTimeString(),
-                message: `${token.name} 购买成功: ${merchantName} - ${itemName}`,
-                type: "success",
-              });
-            } else {
-              failCount++;
-              addLog({
-                time: new Date().toLocaleTimeString(),
-                message: `${token.name} 购买结果未确认，已停止后续购买`,
+                message: `${token.name} 当前商店没有清单中的商品，本次未购买`,
                 type: "warning",
               });
-              break;
+              return;
             }
-          } catch (err) {
-            failCount++;
+
+            for (const op of operations) {
+              check();
+
+              if (levelId < 4000) {
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `${token.name} 关卡数小于4000，无法购买`,
+                  type: "warning",
+                });
+                tokenStatus.value[tokenId] = "skipped";
+                return;
+              }
+
+              try {
+                const response = await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "dungeon_buymerchant",
+                  {
+                    id: op.merchantId,
+                    index: op.index,
+                    pos: op.pos,
+                  },
+                  5000,
+                );
+
+                if (response && response.reward) {
+                  successCount++;
+                  const merchantName = merchantConfig[op.merchantId]
+                    ? merchantConfig[op.merchantId].name
+                    : `商人${op.merchantId}`;
+                  const itemName =
+                    merchantConfig[op.merchantId] &&
+                    merchantConfig[op.merchantId].items[op.index]
+                      ? merchantConfig[op.merchantId].items[op.index]
+                      : `商品${op.index}`;
+
+                  addLog({
+                    time: new Date().toLocaleTimeString(),
+                    message: `${token.name} 购买成功: ${merchantName} - ${itemName}`,
+                    type: "success",
+                  });
+                } else {
+                  failCount++;
+                  addLog({
+                    time: new Date().toLocaleTimeString(),
+                    message: `${token.name} 购买结果未确认，已停止后续购买`,
+                    type: "warning",
+                  });
+                  break;
+                }
+              } catch (err) {
+                failCount++;
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `${token.name} 购买结果未确认，已停止后续购买: ${err.message || "未知错误"}`,
+                  type: "warning",
+                });
+                break;
+              }
+              await new Promise((r) => setTimeout(r, 500));
+            }
+
+            check();
+            tokenStatus.value[tokenId] = failCount ? "failed" : "completed";
             addLog({
               time: new Date().toLocaleTimeString(),
-              message: `${token.name} 购买结果未确认，已停止后续购买: ${err.message || "未知错误"}`,
-              type: "warning",
+              message: `=== ${token.name} 梦境购买结束: 成功${successCount}, 未确认${failCount} ===`,
+              type: failCount ? "warning" : "success",
             });
-            break;
-          }
-          await new Promise((r) => setTimeout(r, 500));
-        }
-
-        checkStop();
-        tokenStatus.value[tokenId] = failCount ? "failed" : "completed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== ${token.name} 梦境购买结束: 成功${successCount}, 未确认${failCount} ===`,
-          type: failCount ? "warning" : "success",
-        });
+          },
+        );
       } catch (error) {
         console.error(error);
         tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
@@ -513,8 +532,6 @@ export function createTasksDungeon(deps) {
           message: `${token.name} 梦境购买失败: ${error.message || "未知错误"}`,
           type: error.interrupted ? "warning" : "error",
         });
-      } finally {
-        releaseOwnedConnection(tokenId, token.name, ownsSlot);
       }
     });
 

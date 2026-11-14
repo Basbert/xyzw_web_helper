@@ -1,4 +1,5 @@
 import { runWithDailyTaskLock } from "@/utils/dailyTaskState";
+import { withManagedConnection } from "./connectionManager.js";
 
 /** Create the batch actions for resetting and claiming salt jars. */
 export function createTasksBottle(deps) {
@@ -47,39 +48,28 @@ export function createTasksBottle(deps) {
 
           try {
             await runWithDailyTaskLock(tokenId, async () => {
-              let ownsSlot = false;
-              const check = () => {
-                if (
-                  shouldStop.value ||
-                  tokenStore.getWebSocketStatus(tokenId) !== "connected"
-                ) {
-                  const error = new Error("任务已停止或连接已断开");
-                  error.interrupted = true;
-                  throw error;
-                }
-              };
-              try {
-                await ensureConnection(tokenId, 2, (owned) => {
-                  ownsSlot = owned;
-                });
-                check();
-                log(`=== 开始${label}: ${token.name} ===`);
-                await execute(tokenId, token.name, check);
-                check();
-                tokenStatus.value[tokenId] = "completed";
-                log(`=== ${token.name} ${label}完成 ===`, "success");
-              } finally {
-                if (ownsSlot) {
-                  try {
-                    tokenStore.closeWebSocketConnection(tokenId);
-                  } finally {
-                    releaseConnectionSlot();
-                  }
-                  log(
-                    `${token.name} 连接已关闭 (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-                  );
-                }
-              }
+              await withManagedConnection(
+                {
+                  tokenId,
+                  tokenName: token.name,
+                  ensureConnection,
+                  releaseConnectionSlot,
+                  connectionQueue,
+                  batchSettings,
+                  tokenStore,
+                  shouldStop,
+                  addLog,
+                  logOnClose: true,
+                },
+                async ({ check }) => {
+                  check();
+                  log(`=== 开始${label}: ${token.name} ===`);
+                  await execute(tokenId, token.name, check);
+                  check();
+                  tokenStatus.value[tokenId] = "completed";
+                  log(`=== ${token.name} ${label}完成 ===`, "success");
+                },
+              );
             });
           } catch (error) {
             tokenStatus.value[tokenId] = error.interrupted

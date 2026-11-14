@@ -3,6 +3,7 @@ import { EventEmitter } from "event-emitter3";
 import { gameLogger } from "@/utils/logger";
 
 import { AckPlugin } from "./ack.ts";
+import { ActivityPlugin } from "./activity.ts";
 import { ChatPlugin } from "./chat.ts";
 import { HangupPlugin } from "./hangup.ts";
 import { LegionPlugin } from "./legion.ts";
@@ -39,6 +40,7 @@ export const emitPlus = (
 export interface XyzwSession {
   id: string;
   tokenId: string;
+  isSelectedAccount?: boolean;
   cmd: string;
   token: any;
   body: any;
@@ -59,6 +61,8 @@ const evmInst: EVM = {
 };
 
 AckPlugin(evmInst);
+
+ActivityPlugin(evmInst);
 
 RolePlugin(evmInst);
 

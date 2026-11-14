@@ -398,14 +398,21 @@ async function logToDb(taskId, tokenName, taskType, status, message) {
 const cronJobs = new Map();
 
 async function registerAllCrons() {
-  for (const job of cronJobs.values()) job.stop();
-  cronJobs.clear();
-
-  const { data: tasks } = await supabase
+  const { data: tasks, error } = await supabase
     .from("cron_tasks")
     .select("*")
     .eq("enabled", true);
-  if (!tasks) return;
+  if (error || !tasks) {
+    if (error) {
+      addLog("ERROR", "cron", "加载定时任务失败，保留现有调度", {
+        error: error.message,
+      });
+    }
+    return;
+  }
+
+  for (const job of cronJobs.values()) job.stop();
+  cronJobs.clear();
 
   for (const task of tasks) {
     registerCron(task);

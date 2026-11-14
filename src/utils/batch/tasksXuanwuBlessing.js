@@ -266,6 +266,7 @@ export function createTasksXuanwuBlessing(deps) {
 
   /** 批量执行玄武赐福 */
   const batchXuanwuBlessing = async () => {
+    if (isRunning.value) return;
     if (selectedTokens.value.length === 0) return;
     isRunning.value = true;
     shouldStop.value = false;

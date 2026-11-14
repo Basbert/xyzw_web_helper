@@ -525,6 +525,7 @@ export class XyzwWebSocketClient {
     this.messageSubscribers = new Set();
     this.showMsg = false;
     this.connected = false;
+    this.manualDisconnect = false;
     this.isReconnecting = false; // 重连状态标志
 
     this.promises = Object.create(null);
@@ -551,6 +552,7 @@ export class XyzwWebSocketClient {
       this.isReconnecting = false;
     }
     if (this.socket) this.disconnect();
+    this.manualDisconnect = false;
     this.sendCache = $CacheManager.getCache(this.sendCacheKey, {
       timeout: 1000,
     });
@@ -903,6 +905,7 @@ export class XyzwWebSocketClient {
 
     // 先取消旧会话的等待请求与队列，再安排新的重连。
     this.disconnect();
+    this.manualDisconnect = false;
     this.isReconnecting = true;
 
     // 延迟重连，避免过于频繁
@@ -926,6 +929,7 @@ export class XyzwWebSocketClient {
 
   /** 断开连接 */
   disconnect() {
+    this.manualDisconnect = true;
     const socket = this.socket;
     this.socket = null;
     this.connected = false;
@@ -960,6 +964,9 @@ export class XyzwWebSocketClient {
   /** 发送消息 */
   send(cmd, params = {}, options = {}) {
     if (!this.connected) {
+      if (this.manualDisconnect) {
+        return false;
+      }
       wsLogger.warn(`WebSocket 未连接，消息已入队: ${cmd}`);
       // 防止频繁重连
       if (!this.dialogStatus && !this.isReconnecting) {

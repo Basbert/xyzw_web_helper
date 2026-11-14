@@ -23,6 +23,7 @@
   --bg-secondary: #f5f7fa;
   --bg-tertiary: #f0f2f5;
   --bg-overlay: rgba(0, 0, 0, 0.5);
+  --card-bg: #ffffff;
 
   // 边框色
   --border-light: #e5e7eb;
@@ -85,7 +86,10 @@
 }
 
 // 暗色主题
+html.dark,
 [data-theme="dark"] {
+  --primary-color-light: rgba(102, 126, 234, 0.2);
+
   --text-primary: #ffffff;
   --text-secondary: #d1d5db;
   --text-tertiary: #9ca3af;
@@ -95,6 +99,7 @@
   --bg-secondary: #374151;
   --bg-tertiary: #4b5563;
   --bg-overlay: rgba(0, 0, 0, 0.7);
+  --card-bg: #1f2937;
 
   --border-light: #4b5563;
   --border-medium: #6b7280;

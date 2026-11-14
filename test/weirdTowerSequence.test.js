@@ -173,7 +173,7 @@ test("missing server energy does not trigger a fight, but still attempts both fo
   );
 });
 
-test("stopping the climb avoids the next fight but still performs both follow-ups", async () => {
+test("stopping the climb avoids the next fight and still performs both follow-ups", async () => {
   let release;
   let entered;
   const gate = new Promise((resolve) => {

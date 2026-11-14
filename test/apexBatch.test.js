@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { reactive, toRaw } from "vue";
+import * as connectionManager from "../src/utils/batch/connectionManager.js";
 import { loadModule } from "./helpers/loadModule.js";
 
 test("batch guessing keeps existing connections and reports partial accounts", async () => {
   const closed = [];
   const messages = [];
   let released = 0;
+  const clients = { new: { socket: {} }, existing: { socket: {} } };
   const helper = {
     async runApexAutoGuess({ tokenId, checkInterrupted }) {
       checkInterrupted();
@@ -21,6 +23,7 @@ test("batch guessing keeps existing connections and reports partial accounts", a
     new URL("../src/utils/batch/tasksApex.js", import.meta.url),
     {
       "@/utils/apexGuessHelper.js": helper,
+      "./connectionManager.js": connectionManager,
     },
   );
   const deps = {
@@ -34,8 +37,18 @@ test("batch guessing keeps existing connections and reports partial accounts", a
     tokenStatus: { value: {} },
     isRunning: { value: false },
     shouldStop: { value: false },
-    ensureConnection: async (id, _retries, onSlotChange) => {
-      if (id === "new") onSlotChange(true);
+    ensureConnection: async (
+      id,
+      _retries,
+      onSlotChange,
+      onCreated,
+      onReady,
+    ) => {
+      if (id === "new") {
+        onSlotChange(true);
+        onCreated(clients[id], clients[id].socket);
+      }
+      onReady();
     },
     releaseConnectionSlot() {
       released++;
@@ -43,6 +56,9 @@ test("batch guessing keeps existing connections and reports partial accounts", a
     connectionQueue: { active: 1 },
     batchSettings: { maxActive: 2 },
     tokenStore: {
+      wsConnections: Object.fromEntries(
+        Object.entries(clients).map(([id, client]) => [id, { client }]),
+      ),
       getWebSocketStatus: () => "connected",
       closeWebSocketConnection(id) {
         closed.push(id);
@@ -68,6 +84,7 @@ test("stopping while a new batch connection opens releases only its own slot", a
   const closed = [];
   let released = 0;
   let ran = false;
+  const client = { socket: {} };
   const helper = {
     async runApexAutoGuess() {
       ran = true;
@@ -77,6 +94,7 @@ test("stopping while a new batch connection opens releases only its own slot", a
     new URL("../src/utils/batch/tasksApex.js", import.meta.url),
     {
       "@/utils/apexGuessHelper.js": helper,
+      "./connectionManager.js": connectionManager,
     },
   );
   const deps = {
@@ -85,9 +103,11 @@ test("stopping while a new batch connection opens releases only its own slot", a
     tokenStatus: { value: {} },
     isRunning: { value: false },
     shouldStop: { value: false },
-    async ensureConnection(_id, _retries, onSlotChange) {
+    async ensureConnection(_id, _retries, onSlotChange, onCreated, onReady) {
       onSlotChange(true);
+      onCreated(client, client.socket);
       deps.shouldStop.value = true;
+      onReady();
     },
     releaseConnectionSlot() {
       released++;
@@ -95,6 +115,7 @@ test("stopping while a new batch connection opens releases only its own slot", a
     connectionQueue: { active: 1 },
     batchSettings: { maxActive: 1 },
     tokenStore: {
+      wsConnections: { new: { client } },
       getWebSocketStatus: () => "connected",
       closeWebSocketConnection(id) {
         closed.push(id);
@@ -168,6 +189,7 @@ async function claimFixture({
     {
       "@/utils/apexGuessHelper.js": { runApexAutoGuess() {} },
       "@/utils/apexRewardHelper.js": { runApexRewardClaims: claim },
+      "./connectionManager.js": connectionManager,
       vue: { toRaw },
     },
   );

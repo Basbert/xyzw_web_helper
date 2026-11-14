@@ -22,6 +22,6 @@ export const onRequest = createEdgeProxyHandler({
     "User-Agent": UA,
     Accept: "application/json",
     "Content-Type": "application/json; charset=utf-8",
-    // 'Host': 'ucenter-app-server.hortorgames.com', // ← 确认函数支持改写上游 Host 后再打开这一行
+    Host: "ucenter-app-server.hortorgames.com",
   },
 });

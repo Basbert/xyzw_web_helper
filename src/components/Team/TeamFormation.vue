@@ -248,6 +248,7 @@ const getTeamInfoWithCache = async (force = false) => {
       {},
       "获取阵容信息",
     );
+    if (tokenStore.selectedToken?.id !== tokenId) return null;
     tokenStore.$patch((state: any) => {
       state.gameData = { ...(state.gameData ?? {}), presetTeam: result };
     });
@@ -277,20 +278,24 @@ const selectTeam = async (teamId: number) => {
     message.warning("请先选择Token");
     return;
   }
+  const tokenId = tokenStore.selectedToken.id;
   const prev = currentTeam.value;
   switching.value = true;
   try {
     await executeGameCommand(
-      tokenStore.selectedToken.id,
+      tokenId,
       "presetteam_saveteam",
       { teamId },
       `切换到阵容 ${teamId}`,
     );
+    if (tokenStore.selectedToken?.id !== tokenId) return;
     currentTeam.value = teamId;
     message.success(`已切换到阵容 ${teamId}`);
     await refreshTeamData(true);
   } catch (e) {
-    currentTeam.value = prev;
+    if (tokenStore.selectedToken?.id === tokenId) {
+      currentTeam.value = prev;
+    }
   } finally {
     switching.value = false;
   }

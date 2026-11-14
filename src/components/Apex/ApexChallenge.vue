@@ -1293,11 +1293,15 @@ const fetchPagedList = async ({
   const token = tokenStore.selectedToken;
   if (!token)
     return { rows: [], last: false, complete: false, interrupted: false };
+  const tokenId = token.id;
   const rows = [];
   let last = false;
   // 是否因被限流而提前退出：此时数据是「没拉完」，绝不能当成拉完
   let cutByLimit = false;
   for (let p = 0; p < maxPages && !last; p++) {
+    if (tokenStore.selectedToken?.id !== tokenId) {
+      return { rows: [], last: false, complete: false, interrupted: true };
+    }
     let res;
     try {
       // 走自适应限流器：页面轮询 / 首屏并发拉取都不会突发打爆服务器
@@ -1306,7 +1310,7 @@ const fetchPagedList = async ({
         // 排队耗时补偿进超时：否则队尾请求会带着被吃光的预算发出而误报超时
         (queuedMs) =>
           tokenStore.sendMessageWithPromise(
-            token.id,
+            tokenId,
             cmd,
             { ...params, idx: startIdx + rows.length },
             timeout + queuedMs,
@@ -1320,6 +1324,9 @@ const fetchPagedList = async ({
         break;
       }
       throw e;
+    }
+    if (tokenStore.selectedToken?.id !== tokenId) {
+      return { rows: [], last: false, complete: false, interrupted: true };
     }
     const list = res?.[listKey] || [];
     if (!list.length) {
@@ -1344,18 +1351,20 @@ const fetchPagedList = async ({
 const fetchRoleInfo = async () => {
   const token = tokenStore.selectedToken;
   if (!token) return null;
+  const tokenId = token.id;
   try {
     const res = await runApexAction(
       ApexAction.READ,
       (queuedMs) =>
         tokenStore.sendMessageWithPromise(
-          token.id,
+          tokenId,
           "apex_getroleinfo",
           {},
           TIMEOUT_READ + queuedMs,
         ),
       { maxRetry: 1 },
     );
+    if (tokenStore.selectedToken?.id !== tokenId) return null;
     const ri = res?.apexRoleInfo;
     if (ri) {
       roleInfo.value.apexRoleInfo = ri;
@@ -1439,6 +1448,8 @@ const toMatchRow = (pair) => {
  * @param {object} grp 竞猜分组对象
  */
 const fetchMatchesPage = async (grp) => {
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId) return;
   if (fetchingStages.has(grp.scheduleId)) return;
   fetchingStages.add(grp.scheduleId);
   grp.loading = true;
@@ -1451,6 +1462,7 @@ const fetchMatchesPage = async (grp) => {
       startIdx: grp.matches.length,
       maxPages: FIRST_PAGES,
     });
+    if (tokenStore.selectedToken?.id !== tokenId) return;
     grp.matches.push(...rows.map(toMatchRow));
     // 服务端「还有下一页」信号：为 false 即不再续拉（与 exhausted 互补）
     grp.hasMore = interrupted || !last;
@@ -1601,6 +1613,8 @@ const refreshCurrentBets = () => {
  * 仅保留本人押注过的场次，天然随赛季更新而变化。
  */
 const fetchGuessHistory = async () => {
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId) return;
   const scheduleIds = Object.keys(roleInfo.value.guessMap || {})
     .map(Number)
     .filter((id) => id > 0)
@@ -1612,6 +1626,7 @@ const fetchGuessHistory = async () => {
   const claimMap = roleInfo.value.guessClaimMap || {};
   const rows = [];
   await mapLimit(scheduleIds, REQUEST_LIMIT, async (sid) => {
+    if (tokenStore.selectedToken?.id !== tokenId) return;
     try {
       const { rows: pairs } = await fetchPagedList({
         cmd: "apex_getguesslist",
@@ -1619,6 +1634,7 @@ const fetchGuessHistory = async () => {
         listKey: "apexGuessList",
         timeout: TIMEOUT_QUERY,
       });
+      if (tokenStore.selectedToken?.id !== tokenId) return;
       const conf = getScheduleConf(sid);
       const myTeamIds = roleInfo.value.guessMap[sid] || [];
       pairs.forEach((pair, idx) => {
@@ -1653,6 +1669,7 @@ const fetchGuessHistory = async () => {
       // 该期未开放或参数错误：跳过
     }
   });
+  if (tokenStore.selectedToken?.id !== tokenId) return;
   betList.value = rows.sort(
     (a, b) => b.scheduleId - a.scheduleId || a.index - b.index,
   );
@@ -1663,6 +1680,8 @@ const fetchGuessHistory = async () => {
  * records 自带真实 scheduleId，可跨阶段 / 跨期，经配置映射为 期 -> 阶段 -> 场次 三级结构。
  */
 const fetchScheduleHistory = async () => {
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId) return;
   fetchingSchedule.value = true;
   try {
     // 优先取玩家参与过的 scheduleId；无记录时取可查看期内状态非 None 的淘汰赛阶段
@@ -1684,12 +1703,13 @@ const fetchScheduleHistory = async () => {
 
     const rawMatches = (
       await mapLimit(scheduleIds, REQUEST_LIMIT, async (sid) => {
+        if (tokenStore.selectedToken?.id !== tokenId) return [];
         try {
           const res = await runApexAction(
             ApexAction.READ,
             (queuedMs) =>
               tokenStore.sendMessageWithPromise(
-                tokenStore.selectedToken.id,
+                tokenId,
                 "apex_get64oppomap",
                 {
                   scheduleId: sid,
@@ -1699,6 +1719,7 @@ const fetchScheduleHistory = async () => {
               ),
             { maxRetry: 1 },
           );
+          if (tokenStore.selectedToken?.id !== tokenId) return [];
           return (res?.apexRecords || []).map((rec) => {
             const bi = rec.battleInfo || {};
             // 战报里队伍名在 members[0].role 上，队伍 id 在 team 上，故分两处摘取
@@ -1730,6 +1751,7 @@ const fetchScheduleHistory = async () => {
         }
       })
     ).flat();
+    if (tokenStore.selectedToken?.id !== tokenId) return;
 
     const roundMap = new Map();
     for (const m of rawMatches) {
@@ -1790,7 +1812,8 @@ const voteScheduleId = computed(() => {
  */
 const fetchVoteBoard = async () => {
   const round = selectedRound.value;
-  if (!round || season.value <= 0 || !tokenStore.selectedToken) return;
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!round || season.value <= 0 || !tokenId) return;
   const groupId = getSupportGroupId(roleInfo.value.group, voteScheduleId.value);
   try {
     const { rows, complete } = await fetchPagedList({
@@ -1800,6 +1823,7 @@ const fetchVoteBoard = async () => {
       timeout: TIMEOUT_READ,
       maxRows: VOTE_BOARD_MAX,
     });
+    if (tokenStore.selectedToken?.id !== tokenId) return;
     // last=true 表示列表确实拉完；未拉完（含被限流截断）时保留已有结果，
     // 下一次轮询会继续补齐，避免界面停在半截数据上。
     voteBoardComplete.value = complete;
@@ -1921,6 +1945,7 @@ const voteChangeNum = (delta) => {
 const doVote = async () => {
   const token = tokenStore.selectedToken;
   if (!token || !voteTargetTeamId.value) return;
+  const tokenId = token.id;
   if (!voteRound.value) {
     message.warning("助威期数无效，请重新选择队伍");
     return;
@@ -1942,9 +1967,15 @@ const doVote = async () => {
     // 手动助威同样走 immediate：立即发出，由服务器的冷却窗口裁决
     await runApexAction(
       ApexAction.VOTE,
-      (queuedMs) =>
-        tokenStore.sendMessageWithPromise(
-          token.id,
+      (queuedMs) => {
+        if (
+          tokenStore.selectedToken?.id !== tokenId ||
+          tokenStore.getWebSocketStatus(tokenId) !== "connected"
+        ) {
+          throw new Error("账号已切换或连接已断开，停止助威");
+        }
+        return tokenStore.sendMessageWithPromise(
+          tokenId,
           "apex_vote",
           {
             teamId: voteTargetTeamId.value,
@@ -1952,16 +1983,19 @@ const doVote = async () => {
             voteCnt: voteCnt.value,
           },
           TIMEOUT_ACTION + queuedMs,
-        ),
+        );
+      },
       {
         immediate: true,
         onWait: (ms) => startActionCooldown("vote", ms),
       },
     );
+    if (tokenStore.selectedToken?.id !== tokenId) return;
     message.success(`已为 ${voteTargetName.value} 助威 ${voteCnt.value} 次`);
     voteDialogVisible.value = false;
     actionCooldown.vote = 0;
     await fetchRoleInfo();
+    if (tokenStore.selectedToken?.id !== tokenId) return;
     fetchVoteBoard();
   } catch (e) {
     if (isApexRateLimited(e)) {
@@ -1984,6 +2018,7 @@ const fetchAllData = async () => {
     message.warning("请先选择 Token");
     return;
   }
+  const tokenId = token.id;
   if (!isConnected.value) {
     message.warning("WebSocket 未连接，请确保游戏已连接");
     return;
@@ -1991,6 +2026,7 @@ const fetchAllData = async () => {
   loading.value = true;
   try {
     const res = await fetchRoleInfo();
+    if (tokenStore.selectedToken?.id !== tokenId) return;
     if (!res?.apexRoleInfo) {
       message.error("逐鹿盐山数据为空，该角色可能未参加活动");
       return;
@@ -2014,11 +2050,13 @@ const fetchAllData = async () => {
  * 阶段在 lockTime / fightTime 的切换由 clockTick 驱动，不依赖轮询周期。
  */
 const refreshLiveData = async () => {
-  if (!tokenStore.selectedToken || !isConnected.value) return;
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId || !isConnected.value) return;
   if (pendingGuessTeamId.value || voteLoading.value) return;
   const mySeq = ++refreshSeq.value;
   await fetchRoleInfo();
-  if (refreshSeq.value !== mySeq) return;
+  if (refreshSeq.value !== mySeq || tokenStore.selectedToken?.id !== tokenId)
+    return;
   refreshCurrentBets();
   fetchVoteBoard();
 };
@@ -2174,6 +2212,7 @@ watch(
     stopPolling();
     if (isConnected.value) {
       await new Promise((r) => setTimeout(r, 500));
+      if (tokenStore.selectedToken?.id !== newId || !isConnected.value) return;
       fetchAllData();
       startPolling();
     }

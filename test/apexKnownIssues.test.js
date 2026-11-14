@@ -4,6 +4,7 @@ import test from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 import * as rewardState from "../src/utils/apexRewardState.js";
+import * as connectionManager from "../src/utils/batch/connectionManager.js";
 import { loadModule } from "./helpers/loadModule.js";
 
 const source = await readFile(
@@ -191,6 +192,7 @@ test("batch guessing processes every open round when schedule windows overlap", 
     new URL("../src/utils/batch/tasksApex.js", import.meta.url),
     {
       "@/utils/apexGuessHelper.js": helper,
+      "./connectionManager.js": connectionManager,
     },
   );
   const deps = {

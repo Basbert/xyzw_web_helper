@@ -68,8 +68,15 @@ export const TowerPlugin = ({ onSome }: EVM) => {
           client?.send("tower_claimreward", { rewardId: rewardFloor });
 
           // 领取后刷新数据
+          const eventSocket = client?.socket;
           setTimeout(() => {
-            client?.send("role_getroleinfo", {});
+            if (
+              !client?.connected ||
+              client.manualDisconnect ||
+              client.socket !== eventSocket
+            )
+              return;
+            client.send("role_getroleinfo", {});
           }, 1000);
         }
       }
@@ -113,7 +120,14 @@ export const TowerPlugin = ({ onSome }: EVM) => {
 
     // 如果是新层数的第一层(layer=0)，检查是否有奖励可领取
     if (layer === 0) {
+      const eventSocket = client?.socket;
       setTimeout(() => {
+        if (
+          !client?.connected ||
+          client.manualDisconnect ||
+          client.socket !== eventSocket
+        )
+          return;
         const roleInfo = gameData.value.roleInfo;
         const towerRewards = roleInfo?.role?.tower?.reward;
 
@@ -122,7 +136,7 @@ export const TowerPlugin = ({ onSome }: EVM) => {
           gameData.value.towerResult.autoReward = true;
           gameData.value.towerResult.rewardFloor = rewardFloor;
           try {
-            client?.send("tower_claimreward", { rewardId: rewardFloor });
+            client.send("tower_claimreward", { rewardId: rewardFloor });
           } catch (error) {
             gameLogger.error(`领取奖励失败: ${error}`);
           }
@@ -140,8 +154,15 @@ export const TowerPlugin = ({ onSome }: EVM) => {
         return;
       }
       // 奖励领取成功后更新角色信息
+      const eventSocket = client?.socket;
       setTimeout(() => {
-        client?.send("role_getroleinfo", {});
+        if (
+          !client?.connected ||
+          client.manualDisconnect ||
+          client.socket !== eventSocket
+        )
+          return;
+        client.send("role_getroleinfo", {});
       }, 500);
     },
   );

@@ -904,8 +904,9 @@ const fetchAllMembersLineup = async () => {
 
   const token = tokenStore.selectedToken;
   if (!token) return;
+  const tokenId = token.id;
 
-  const wsStatus = tokenStore.getWebSocketStatus(token.id);
+  const wsStatus = tokenStore.getWebSocketStatus(tokenId);
   if (wsStatus !== "connected") {
     message.error("WebSocket未连接，无法获取阵容信息");
     return;
@@ -922,11 +923,23 @@ const fetchAllMembersLineup = async () => {
 
   try {
     for (let i = 0; i < memberIds.length; i += chunkSize) {
+      if (
+        tokenStore.selectedToken?.id !== tokenId ||
+        tokenStore.getWebSocketStatus(tokenId) !== "connected"
+      ) {
+        return;
+      }
       const chunk = memberIds.slice(i, i + chunkSize);
       const promises = chunk.map(async (roleId) => {
         try {
+          if (
+            tokenStore.selectedToken?.id !== tokenId ||
+            tokenStore.getWebSocketStatus(tokenId) !== "connected"
+          ) {
+            return;
+          }
           const roleRes = await tokenStore.sendMessageWithPromise(
-            token.id,
+            tokenId,
             "rank_getroleinfo",
             {
               roleId: Number(roleId),
@@ -939,6 +952,7 @@ const fetchAllMembersLineup = async () => {
             },
             5000,
           );
+          if (tokenStore.selectedToken?.id !== tokenId) return;
 
           if (roleRes && roleRes.roleInfo) {
             let heroList = [];
@@ -950,6 +964,7 @@ const fetchAllMembersLineup = async () => {
             const lineupType = getLineupType(heroList);
 
             if (
+              tokenStore.selectedToken?.id === tokenId &&
               tokenStore.gameData?.legionInfo?.info?.members &&
               tokenStore.gameData.legionInfo.info.members[roleId]
             ) {
@@ -963,10 +978,15 @@ const fetchAllMembersLineup = async () => {
       });
 
       await Promise.all(promises);
+      if (tokenStore.selectedToken?.id !== tokenId) return;
     }
-    message.success("阵容信息获取完成");
+    if (tokenStore.selectedToken?.id === tokenId) {
+      message.success("阵容信息获取完成");
+    }
   } catch (error) {
-    message.error(`获取失败: ${error.message}`);
+    if (tokenStore.selectedToken?.id === tokenId) {
+      message.error(`获取失败: ${error.message}`);
+    }
   } finally {
     batchLoading.value = false;
   }
@@ -1098,6 +1118,7 @@ const fetchTargetInfo = async (roleId) => {
       },
       5000,
     );
+    if (tokenStore.selectedToken?.id !== tokenId) return;
 
     if (!result.roleInfo) {
       message.warning("未查询到玩家信息");
@@ -1481,6 +1502,7 @@ const kickMember = (roleId, name) => {
 const getApplyList = async () => {
   const token = tokenStore.selectedToken;
   if (!token) return;
+  const tokenId = token.id;
 
   // 显示申请列表界面
   showApplyList.value = true;
@@ -1492,11 +1514,12 @@ const getApplyList = async () => {
     message.info("正在获取申请列表");
     // 使用 Promise 方式直接获取响应
     const responseBody = await tokenStore.sendMessageWithPromise(
-      token.id,
+      tokenId,
       "legion_applylist",
       {},
       10000, // 10秒超时
     );
+    if (tokenStore.selectedToken?.id !== tokenId) return;
 
     // 直接处理响应数据
     handleApplyListResp({ body: responseBody });

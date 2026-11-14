@@ -4,6 +4,7 @@ import { test } from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
 import { computed, reactive, ref, toRaw, watch } from "vue";
+import { closeOwnedConnection } from "../src/utils/batch/connectionManager.js";
 import { isDungeonOpen } from "../src/utils/dreamConstants.js";
 
 const component = await readFile(
@@ -66,6 +67,7 @@ function fixture({
     shouldStop: { value: false },
     currentRunningTokenId: { value: null },
     connectionQueue: { active: 1 },
+    closeOwnedConnection,
     toRaw,
     watch,
     batchSettings: {

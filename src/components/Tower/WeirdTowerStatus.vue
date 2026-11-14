@@ -229,11 +229,15 @@ import {
 } from "@/utils/towerEnergyPurchase";
 
 let stopFlag = false;
+let stopReason = null;
 let stopItemFlag = false;
 let stopMergeFlag = false;
 
 const stopClimbing = () => {
   stopFlag = true;
+  stopReason = "manual";
+  stopItemFlag = true;
+  stopMergeFlag = true;
   if (climbTimeout.value) {
     clearTimeout(climbTimeout.value);
     climbTimeout.value = null;
@@ -813,6 +817,11 @@ const startTowerClimb = async () => {
   isClimbSequence.value = true;
   isClimbing.value = true;
   stopFlag = false;
+  stopReason = null;
+  const canContinueAfterClimb = () =>
+    !stopFlag ||
+    (typeof stopReason !== "undefined" &&
+      (stopReason === "timeout" || stopReason === "manual"));
   let climbCount = 0;
   const maxClimb = normalizeWeirdTowerMaxClimb(maxClimbInput.value);
   maxClimbInput.value = maxClimb;
@@ -820,6 +829,7 @@ const startTowerClimb = async () => {
   climbTimeout.value = setTimeout(() => {
     climbTimeout.value = null;
     stopFlag = true;
+    stopReason = "timeout";
     message.info("批量爬塔已超时自动停止");
   }, 60000);
 
@@ -916,32 +926,34 @@ const startTowerClimb = async () => {
 
       await new Promise((res) => setTimeout(res, 400)); // 每次间隔400毫秒
     }
-    // 获取免费道具数量
-    checkSession();
-    const freeEnergyResult = await tokenStore.sendMessageWithPromise(
-      tokenId,
-      "mergebox_getinfo",
-      {
-        actType: 1,
-      },
-      5000,
-    );
-    checkSession();
-    if (freeEnergyResult?.mergeBox?.freeEnergy > 0) {
-      // 领取免费道具
-      await tokenStore.sendMessageWithPromise(
+    if (canContinueAfterClimb()) {
+      // 获取免费道具数量
+      checkSession();
+      const freeEnergyResult = await tokenStore.sendMessageWithPromise(
         tokenId,
-        "mergebox_claimfreeenergy",
+        "mergebox_getinfo",
         {
           actType: 1,
         },
         5000,
       );
-      message.success(
-        `成功领取免费道具${freeEnergyResult.mergeBox.freeEnergy}个！`,
-      );
+      checkSession();
+      if (freeEnergyResult?.mergeBox?.freeEnergy > 0) {
+        // 领取免费道具
+        await tokenStore.sendMessageWithPromise(
+          tokenId,
+          "mergebox_claimfreeenergy",
+          {
+            actType: 1,
+          },
+          5000,
+        );
+        message.success(
+          `成功领取免费道具${freeEnergyResult.mergeBox.freeEnergy}个！`,
+        );
+      }
+      await new Promise((res) => setTimeout(res, 500));
     }
-    await new Promise((res) => setTimeout(res, 500));
     if (stopFlag) message.info(`爬塔已提前结束，本次爬塔 ${climbCount} 次`);
     else message.success(`已自动爬塔${climbCount}次，体力已耗尽或达到上限。`);
   } catch (error) {
@@ -953,10 +965,14 @@ const startTowerClimb = async () => {
     }
     isClimbing.value = false;
     try {
-      checkSession();
-      await startUseItems({ tokenId, checkSession });
-      checkSession();
-      await autoMergeItems({ tokenId, checkSession });
+      if (canContinueAfterClimb()) {
+        checkSession();
+        await startUseItems({ tokenId, checkSession });
+        if (canContinueAfterClimb()) {
+          checkSession();
+          await autoMergeItems({ tokenId, checkSession });
+        }
+      }
     } catch (error) {
       message.warning(`后续操作未完成：${error.message || "未知错误"}`);
     } finally {
@@ -1057,11 +1073,17 @@ watch(wsStatus, (newStatus, oldStatus) => {
 watch(
   () => tokenStore.selectedToken,
   (newToken, oldToken) => {
-    if (newToken && newToken.id !== oldToken?.id) {
-      // 检查WebSocket是否已连接
-      const status = tokenStore.getWebSocketStatus(newToken.id);
-      if (status === "connected") {
-        getTowerInfo();
+    if (newToken?.id !== oldToken?.id) {
+      stopFlag = true;
+      stopReason = "session-changed";
+      stopItemFlag = true;
+      stopMergeFlag = true;
+      if (newToken) {
+        // 检查WebSocket是否已连接
+        const status = tokenStore.getWebSocketStatus(newToken.id);
+        if (status === "connected") {
+          getTowerInfo();
+        }
       }
     }
   },
@@ -1083,6 +1105,7 @@ onMounted(() => {
 onUnmounted(() => {
   componentDisposed = true;
   stopFlag = true;
+  stopReason = "disposed";
   stopItemFlag = true;
   stopMergeFlag = true;
 });

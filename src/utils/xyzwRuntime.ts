@@ -1,46 +1,50 @@
-interface LegacyGameCrypto {
+import { encode, getEnc } from "@/utils/bonProtocol.js";
+
+export interface LegacyGameCrypto {
   encMsg: (
     payload: Record<string, unknown>,
-    codec: { decrypt: unknown; encrypt: unknown },
+    codec: {
+      decrypt?: unknown;
+      encrypt: (bytes: Uint8Array) => Uint8Array;
+    },
   ) => ArrayBuffer | ArrayBufferView;
-  lz4XorDecode: unknown;
-  lz4XorEncode: unknown;
+  lz4XorDecode: (bytes: Uint8Array) => Uint8Array;
+  lz4XorEncode: (bytes: Uint8Array) => Uint8Array;
 }
 
-let runtimePromise: Promise<void> | null = null;
+const lxCodec = getEnc("lx");
 
 /**
- * Lazily loads the XYZW Cocos runtime and game crypto registry on demand
- * so initial page startup does not parse legacy game scripts eagerly.
+ * Compatibility no-op kept for callers expecting the runtime initializer.
+ * Using `bonProtocol` directly avoids loading the legacy 4MB Cocos bundle.
  */
-export async function ensureXyzwRuntime(): Promise<void> {
-  if (typeof (globalThis as { __require?: unknown }).__require === "function") {
-    return;
-  }
-  if (!runtimePromise) {
-    runtimePromise = (async () => {
-      await import("../xyzw/cocos2d-js-min.js");
-      await import("../xyzw/game-defines.js");
-      await import("../xyzw/index.js");
-    })().catch((error) => {
-      runtimePromise = null;
-      throw error;
-    });
-  }
-  await runtimePromise;
-}
+export async function ensureXyzwRuntime(): Promise<void> {}
 
-/** Loads the legacy Cocos module `"13"` crypto helpers on demand. */
+/** Returns the BON + LZ4-XOR ("lx") crypto helpers for encoding login BIN payloads. */
 export async function getGameCrypto(): Promise<LegacyGameCrypto> {
-  await ensureXyzwRuntime();
   const requireFn = (
-    globalThis as { __require?: (id: string) => LegacyGameCrypto | undefined }
+    globalThis as {
+      __require?: (id: string) => Partial<LegacyGameCrypto> | undefined;
+    }
   ).__require;
-  const dm = requireFn?.("13");
-  if (!dm?.encMsg || !dm?.lz4XorEncode || !dm?.lz4XorDecode) {
-    throw new Error("游戏加密模块未加载，无法生成登录 BIN");
+  const legacyDm =
+    typeof requireFn === "function" ? requireFn("13") : undefined;
+  if (
+    typeof legacyDm?.encMsg === "function" &&
+    typeof legacyDm.lz4XorEncode === "function" &&
+    typeof legacyDm.lz4XorDecode === "function"
+  ) {
+    return legacyDm as LegacyGameCrypto;
   }
-  return dm;
+  return {
+    encMsg: (payload, codec) =>
+      encode(payload, {
+        encrypt: codec?.encrypt ?? lxCodec.encrypt,
+        decrypt: codec?.decrypt ?? lxCodec.decrypt,
+      }),
+    lz4XorDecode: lxCodec.decrypt,
+    lz4XorEncode: lxCodec.encrypt,
+  };
 }
 
 /** Encodes a Hortor `combUser` payload into an encrypted login BIN buffer. */
@@ -60,15 +64,17 @@ export async function encodeCombUserBin(
     },
     { decrypt: dm.lz4XorDecode, encrypt: dm.lz4XorEncode },
   );
-  if (encrypted instanceof ArrayBuffer) {
-    return encrypted.slice(0);
+  if (ArrayBuffer.isView(encrypted)) {
+    const bytes = new Uint8Array(
+      encrypted.buffer,
+      encrypted.byteOffset,
+      encrypted.byteLength,
+    );
+    const copy = new Uint8Array(bytes.byteLength);
+    copy.set(bytes);
+    return copy.buffer;
   }
-  const bytes = new Uint8Array(
-    encrypted.buffer,
-    encrypted.byteOffset,
-    encrypted.byteLength,
-  );
-  const copy = new Uint8Array(bytes.byteLength);
-  copy.set(bytes);
+  const copy = new Uint8Array(encrypted.byteLength);
+  copy.set(new Uint8Array(encrypted));
   return copy.buffer;
 }

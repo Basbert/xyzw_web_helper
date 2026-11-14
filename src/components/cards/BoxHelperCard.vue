@@ -72,7 +72,7 @@
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, ref } from "vue";
+import { computed, onUnmounted, ref } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import {
   getClaimableBoxPoints,
@@ -80,11 +80,17 @@ import {
   HELPER_BATCH_DELAY_MS,
   HELPER_COMMAND_TIMEOUT_MS,
   runInventoryVerifiedGameCommand,
+  sleep,
 } from "@/utils/helperTaskRunner";
 import MyCard from "../Common/MyCard.vue";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
+let isUnmounted = false;
+
+onUnmounted(() => {
+  isUnmounted = true;
+});
 
 const iconPath = computed(() => `${import.meta.env.BASE_URL}box/zsbx.png`);
 
@@ -167,8 +173,17 @@ const batchclaimboxpointreward = async () => {
     return;
   }
   const tokenId = tokenStore.selectedToken.id;
+  const isSessionActive = () =>
+    !isUnmounted &&
+    tokenStore.selectedToken?.id === tokenId &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected";
+  if (!isSessionActive()) {
+    message.warning("请先连接当前角色");
+    return;
+  }
   await tokenStore.sendMessage(tokenId, "item_batchclaimboxpointreward");
   await new Promise((r) => setTimeout(r, 500));
+  if (!isSessionActive()) return;
   await tokenStore.sendMessage(tokenId, "role_getroleinfo");
   message.success("宝箱积分领取完毕");
 };
@@ -184,6 +199,19 @@ const handleBoxHelper = async () => {
   }
 
   const tokenId = tokenStore.selectedToken.id;
+  const isSessionActive = () =>
+    !isUnmounted &&
+    tokenStore.selectedToken?.id === tokenId &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected";
+  if (!isSessionActive()) {
+    message.warning("请先连接当前角色");
+    return;
+  }
+  const ensureActiveSession = () => {
+    if (!isSessionActive()) {
+      throw new Error("账号或连接已变化，已停止开启宝箱");
+    }
+  };
   const selectedType = type.value;
   const selectedNumber = number.value;
 
@@ -192,7 +220,19 @@ const handleBoxHelper = async () => {
 
   try {
     await runInventoryVerifiedGameCommand({
-      tokenStore,
+      tokenStore: {
+        sendMessageWithPromise: async (id, cmd, params, timeoutMs) => {
+          ensureActiveSession();
+          const res = await tokenStore.sendMessageWithPromise(
+            id,
+            cmd,
+            params,
+            timeoutMs,
+          );
+          ensureActiveSession();
+          return res;
+        },
+      },
       tokenId,
       cmd: "item_openbox",
       itemId: selectedType,
@@ -200,15 +240,31 @@ const handleBoxHelper = async () => {
       timeout: HELPER_COMMAND_TIMEOUT_MS,
       delayMs: HELPER_BATCH_DELAY_MS,
       createParams: (amount) => ({ itemId: selectedType, number: amount }),
-      queryInventory: () => tokenStore.sendGetRoleInfo(tokenId),
+      queryInventory: async () => {
+        ensureActiveSession();
+        const res = await tokenStore.sendGetRoleInfo(tokenId);
+        ensureActiveSession();
+        return res;
+      },
+      sleepFn: async (ms) => {
+        ensureActiveSession();
+        await sleep(ms);
+        ensureActiveSession();
+      },
+      onProgress: () => {
+        ensureActiveSession();
+      },
     });
 
+    if (!isSessionActive()) return;
     await tokenStore.sendMessage(tokenId, "role_getroleinfo");
     // 更新活动进度
     tokenStore.sendMessage(tokenId, "activity_get");
     message.success("宝箱开启完毕");
   } catch (error) {
-    message.error(`宝箱开启失败：${getErrorMessage(error)}`);
+    if (!isUnmounted) {
+      message.error(`宝箱开启失败：${getErrorMessage(error)}`);
+    }
   } finally {
     state.value.isRunning = false;
   }

@@ -2,7 +2,7 @@ import type { ProtoMsg } from "@/utils/bonProtocol";
 import { useLocalStorage } from "@vueuse/core";
 import { defineStore } from "pinia";
 
-import { computed, onScopeDispose, ref, watch } from "vue";
+import { computed, onScopeDispose, ref, toRaw, watch } from "vue";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import router from "@/router";
 import { createAccountGameData } from "@/utils/accountGameData";
@@ -353,6 +353,13 @@ export const useTokenStore = defineStore("tokens", () => {
     return true;
   };
 
+  const clearChatCache = () => {
+    $emit.emit?.("chat:clear");
+    if (typeof localStorage !== "undefined") {
+      localStorage.removeItem?.("xyzw_chat_msg_list");
+    }
+  };
+
   const selectToken = (tokenId: string, forceReconnect = false) => {
     const token = gameTokens.value.find((t) => t.id === tokenId);
     if (!token) {
@@ -374,6 +381,9 @@ export const useTokenStore = defineStore("tokens", () => {
 
     // 更新选中状态
     selectedTokenId.value = tokenId;
+    if (!isAlreadySelected) {
+      clearChatCache();
+    }
 
     // 更新最后使用时间
     updateToken(tokenId, { lastUsed: new Date().toISOString() });
@@ -607,6 +617,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
       emitPlus(cmd, {
         tokenId,
+        isSelectedAccount: tokenId === selectedTokenId.value,
         body,
         message,
         client,
@@ -1100,7 +1111,12 @@ export const useTokenStore = defineStore("tokens", () => {
           if (desiredConnections.has(tokenId))
             connectionRecovery.markConnected(tokenId);
           releaseConnectionLock(tokenId, "connect");
-          localStorage.removeItem("xyzw_chat_msg_list");
+          if (
+            tokenId === selectedToken.value?.id ||
+            tokenId === selectedTokenId.value
+          ) {
+            clearChatCache();
+          }
           try {
             wsClient.send("role_getroleinfo");
           } catch (error) {
@@ -1254,15 +1270,17 @@ export const useTokenStore = defineStore("tokens", () => {
     tokenId: string,
     preserveRecovery = false,
     expectedConnection?: Partial<WebSocketConnection>,
+    expectedSocket?: unknown,
   ) => {
-    if (!preserveRecovery) {
+    const cancelRecovery = () => {
       connectionGeneration.set(
         tokenId,
         (connectionGeneration.get(tokenId) || 0) + 1,
       );
       desiredConnections.delete(tokenId);
       connectionRecovery.cancel(tokenId);
-    }
+    };
+    if (!preserveRecovery && !expectedConnection) cancelRecovery();
     const lockAcquired = await acquireConnectionLock(tokenId, "disconnect");
     if (!lockAcquired) {
       wsLogger.warn(`无法获取断开连接锁: ${tokenId}`);
@@ -1271,7 +1289,15 @@ export const useTokenStore = defineStore("tokens", () => {
 
     try {
       const connection = wsConnections.value[tokenId];
-      if (expectedConnection && connection !== expectedConnection) return;
+      if (
+        expectedConnection &&
+        (toRaw(connection) !== toRaw(expectedConnection) ||
+          (expectedSocket !== undefined &&
+            toRaw(connection?.client?.socket ?? null) !==
+              toRaw(expectedSocket)))
+      )
+        return;
+      if (!preserveRecovery && expectedConnection) cancelRecovery();
       if (connection && connection.client) {
         wsLogger.debug(`开始优雅关闭连接: ${tokenId}`);
 
@@ -1317,6 +1343,30 @@ export const useTokenStore = defineStore("tokens", () => {
   // 同步版本的关闭连接（保持向后兼容）
   const closeWebSocketConnection = (tokenId: string) => {
     closeWebSocketConnectionAsync(tokenId).catch((error) => {
+      wsLogger.error(`关闭连接异步操作失败 [${tokenId}]:`, error);
+    });
+  };
+
+  // A batch task may close only the transport it created, even after waiting
+  // for another disconnect to finish.
+  const closeWebSocketConnectionIfCurrent = (
+    tokenId: string,
+    expectedClient: XyzwWebSocketClient,
+    expectedSocket: unknown,
+  ) => {
+    const connection = wsConnections.value[tokenId];
+    if (
+      !connection ||
+      toRaw(connection.client) !== toRaw(expectedClient) ||
+      toRaw(connection.client?.socket ?? null) !== toRaw(expectedSocket)
+    )
+      return;
+    closeWebSocketConnectionAsync(
+      tokenId,
+      false,
+      connection,
+      expectedSocket,
+    ).catch((error) => {
       wsLogger.error(`关闭连接异步操作失败 [${tokenId}]:`, error);
     });
   };
@@ -2082,6 +2132,7 @@ export const useTokenStore = defineStore("tokens", () => {
     // WebSocket方法
     createWebSocketConnection,
     closeWebSocketConnection,
+    closeWebSocketConnectionIfCurrent,
     getWebSocketStatus,
     getWebSocketClient,
     sendMessage,

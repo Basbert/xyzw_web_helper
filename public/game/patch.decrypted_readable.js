@@ -6,18 +6,7 @@
 (function() {
   "use strict";
 
-  // ========== 反调试机制 ==========
-  var antiDebug = function() {
-    var startTime = new Date();
-    if (new Date() - startTime > 100) {
-      while (true) {} // 检测到调试器，进入死循环
-    }
-  };
-
-  // 每秒检测一次
-  if (typeof setInterval !== "undefined") {
-    setInterval(antiDebug, 1000);
-  }
+  // ========== 反调试机制（已移除阻塞死循环，避免打开 DevTools 或主线程波动时卡死页面） ==========
 
   // ========== 工具函数 ==========
   var strings = [

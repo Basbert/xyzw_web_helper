@@ -73,7 +73,7 @@
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, ref } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { HERO_DICT } from "@/utils/HeroList";
 import MyCard from "../Common/MyCard.vue";
@@ -90,6 +90,27 @@ const state = ref({
   stopRequested: false,
   total: 0,
   done: 0,
+});
+let isUnmounted = false;
+
+watch(
+  () => [
+    tokenStore.selectedToken?.id,
+    tokenStore.selectedToken?.id
+      ? tokenStore.getWebSocketStatus(tokenStore.selectedToken.id)
+      : null,
+  ],
+  () => {
+    if (state.value.isRunning) {
+      state.value.stopRequested = true;
+    }
+  },
+  { flush: "sync" },
+);
+
+onUnmounted(() => {
+  isUnmounted = true;
+  state.value.stopRequested = true;
 });
 
 const heroIds = computed(() => Object.keys(HERO_DICT).map(Number));
@@ -110,6 +131,15 @@ const addLog = (messageText, type = "info") => {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const isSuccessResponse = (res) =>
+  Boolean(
+    res &&
+    typeof res === "object" &&
+    (res.code === undefined || res.code === 0) &&
+    res.success !== false &&
+    (res.result === undefined || res.result === 0),
+  );
 
 /** 启动仅英雄升星 */
 const startHeroUpgrade = async () => {
@@ -161,13 +191,21 @@ const runHeroUpgrade = async (mod) => {
     message.error("WebSocket未连接");
     return;
   }
+  const isSessionActive = () =>
+    !isUnmounted &&
+    tokenStore.selectedToken?.id === tokenId &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected";
   try {
     state.value.isRunning = true;
     for (const heroId of heroIds.value) {
-      if (state.value.stopRequested) break;
+      if (state.value.stopRequested || !isSessionActive()) {
+        state.value.stopRequested = true;
+        break;
+      }
       let skip = false;
       for (let i = 1; i <= 10; i++) {
-        if (state.value.stopRequested) {
+        if (state.value.stopRequested || !isSessionActive()) {
+          state.value.stopRequested = true;
           skip = true;
           break;
         }
@@ -178,20 +216,38 @@ const runHeroUpgrade = async (mod) => {
             { heroId },
             8000,
           );
-          const ok =
-            res && (res.code === 0 || res.success === true || res.result === 0);
+          if (!isSessionActive()) {
+            state.value.stopRequested = true;
+            skip = true;
+            break;
+          }
+          const ok = isSuccessResponse(res);
           addLog(`英雄ID:${heroId} 升星第${i}/10次`, ok ? "success" : "error");
           if (!ok) throw new Error("升星失败");
         } catch (err) {
           addLog(`英雄ID:${heroId} 升星第${i}/10次失败，跳过剩余次数`, "error");
           skip = true;
         }
+        if (state.value.stopRequested || !isSessionActive()) {
+          state.value.stopRequested = true;
+          break;
+        }
         await sleep(mod.delay);
+        if (state.value.stopRequested || !isSessionActive()) {
+          state.value.stopRequested = true;
+          break;
+        }
         if (skip) break;
+      }
+      if (state.value.stopRequested || !isSessionActive()) {
+        state.value.stopRequested = true;
+        break;
       }
       state.value.done++;
     }
-    message.success(state.value.stopRequested ? "已停止" : "英雄升星完成");
+    if (!isUnmounted) {
+      message.success(state.value.stopRequested ? "已停止" : "英雄升星完成");
+    }
   } finally {
     state.value.isRunning = false;
   }
@@ -213,13 +269,21 @@ const runBookUpgrade = async (mod) => {
     message.error("WebSocket未连接");
     return;
   }
+  const isSessionActive = () =>
+    !isUnmounted &&
+    tokenStore.selectedToken?.id === tokenId &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected";
   try {
     state.value.isRunning = true;
     for (const heroId of heroIds.value) {
-      if (state.value.stopRequested) break;
+      if (state.value.stopRequested || !isSessionActive()) {
+        state.value.stopRequested = true;
+        break;
+      }
       let skip = false;
       for (let i = 1; i <= 10; i++) {
-        if (state.value.stopRequested) {
+        if (state.value.stopRequested || !isSessionActive()) {
+          state.value.stopRequested = true;
           skip = true;
           break;
         }
@@ -230,8 +294,12 @@ const runBookUpgrade = async (mod) => {
             { heroId },
             8000,
           );
-          const ok =
-            res && (res.code === 0 || res.success === true || res.result === 0);
+          if (!isSessionActive()) {
+            state.value.stopRequested = true;
+            skip = true;
+            break;
+          }
+          const ok = isSuccessResponse(res);
           addLog(
             `英雄ID:${heroId} 图鉴升星第${i}/10次`,
             ok ? "success" : "error",
@@ -244,12 +312,26 @@ const runBookUpgrade = async (mod) => {
           );
           skip = true;
         }
+        if (state.value.stopRequested || !isSessionActive()) {
+          state.value.stopRequested = true;
+          break;
+        }
         await sleep(mod.delay);
+        if (state.value.stopRequested || !isSessionActive()) {
+          state.value.stopRequested = true;
+          break;
+        }
         if (skip) break;
+      }
+      if (state.value.stopRequested || !isSessionActive()) {
+        state.value.stopRequested = true;
+        break;
       }
       state.value.done++;
     }
-    message.success(state.value.stopRequested ? "已停止" : "图鉴升星完成");
+    if (!isUnmounted) {
+      message.success(state.value.stopRequested ? "已停止" : "图鉴升星完成");
+    }
   } finally {
     state.value.isRunning = false;
   }
@@ -271,10 +353,17 @@ const runClaimRewards = async (mod) => {
     message.error("WebSocket未连接");
     return;
   }
+  const isSessionActive = () =>
+    !isUnmounted &&
+    tokenStore.selectedToken?.id === tokenId &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected";
   try {
     state.value.isRunning = true;
     for (let i = 1; i <= 10; i++) {
-      if (state.value.stopRequested) break;
+      if (state.value.stopRequested || !isSessionActive()) {
+        state.value.stopRequested = true;
+        break;
+      }
       let success = true;
       try {
         const res = await tokenStore.sendMessageWithPromise(
@@ -283,8 +372,11 @@ const runClaimRewards = async (mod) => {
           {},
           8000,
         );
-        const ok =
-          res && (res.code === 0 || res.success === true || res.result === 0);
+        if (!isSessionActive()) {
+          state.value.stopRequested = true;
+          break;
+        }
+        const ok = isSuccessResponse(res);
         addLog(`领取图鉴奖励第${i}/10次`, ok ? "success" : "error");
         if (!ok) throw new Error("领取奖励失败");
         state.value.done++;
@@ -293,10 +385,20 @@ const runClaimRewards = async (mod) => {
         state.value.done++;
         success = false;
       }
+      if (state.value.stopRequested || !isSessionActive()) {
+        state.value.stopRequested = true;
+        break;
+      }
       await sleep(mod.delay);
+      if (state.value.stopRequested || !isSessionActive()) {
+        state.value.stopRequested = true;
+        break;
+      }
       if (!success) break;
     }
-    message.success(state.value.stopRequested ? "已停止" : "领取奖励完成");
+    if (!isUnmounted) {
+      message.success(state.value.stopRequested ? "已停止" : "领取奖励完成");
+    }
   } finally {
     state.value.isRunning = false;
   }

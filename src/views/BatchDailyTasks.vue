@@ -118,7 +118,9 @@
                     margin-bottom: 12px;
                   "
                 >
-                  <label style="font-weight: 500; color: #333">分组选择</label>
+                  <label style="font-weight: 500; color: var(--text-primary)"
+                    >分组选择</label
+                  >
                   <n-button
                     size="small"
                     type="error"
@@ -1033,7 +1035,10 @@ import {
   applyConfigBackupData,
   buildConfigBackupData,
 } from "@/utils/batch/configBackup";
-import { withManagedConnection } from "@/utils/batch/connectionManager";
+import {
+  closeOwnedConnection,
+  withManagedConnection,
+} from "@/utils/batch/connectionManager";
 import {
   claimScheduledOccurrence,
   createScheduledTaskClock,
@@ -3678,98 +3683,133 @@ const ensureConnection = async (
     // 等待连接槽位，限制并发连接数
     await waitForConnectionSlot();
     onSlotChange?.(true);
+    onClientCreated?.(null, null);
 
-    addLog({
-      time: new Date().toLocaleTimeString(),
-      message: `正在连接... (队列: ${connectionQueue.active}/${runtimeBatchSettings.maxActive})`,
-      type: "info",
-    });
+    let slotReleased = false;
+    const releaseOwnedSlot = () => {
+      if (slotReleased) return;
+      slotReleased = true;
+      releaseConnectionSlot();
+      onSlotChange?.(false);
+    };
 
     let createdSocket = null;
-    let createdClient = tokenStore.createWebSocketConnection(
-      tokenId,
-      latestToken.token,
-      latestToken.wsUrl,
-    );
-    if (onClientCreated) {
-      createdClient = await createdClient;
-      createdSocket = toRaw(createdClient?.socket);
-      onClientCreated(createdClient, createdSocket);
-    }
-    connected = await waitForConnection(tokenId);
-
-    if (!connected && maxRetries > 0) {
+    let createdClient = null;
+    try {
       addLog({
         time: new Date().toLocaleTimeString(),
-        message: `连接超时，尝试重连...`,
-        type: "warning",
-      });
-
-      if (onClientCreated) {
-        const current = tokenStore.wsConnections?.[tokenId]?.client;
-        if (
-          current &&
-          (!createdClient ||
-            toRaw(current) !== toRaw(createdClient) ||
-            (createdSocket && toRaw(current.socket) !== createdSocket))
-        ) {
-          const error = new Error("连接已被替换，停止批量任务");
-          error.interrupted = true;
-          throw error;
-        }
-        if (
-          createdClient &&
-          current &&
-          createdSocket &&
-          toRaw(current.socket) === createdSocket
-        )
-          tokenStore.closeWebSocketConnection(tokenId);
-      } else {
-        tokenStore.closeWebSocketConnection(tokenId);
-      }
-      await new Promise((r) =>
-        setTimeout(r, runtimeBatchSettings.reconnectDelay),
-      );
-
-      addLog({
-        time: new Date().toLocaleTimeString(),
-        message: `正在重连...`,
+        message: `正在连接... (队列: ${connectionQueue.active}/${runtimeBatchSettings.maxActive})`,
         type: "info",
       });
 
-      const refreshedToken = tokens.value.find((t) => t.id === tokenId);
-      createdClient = tokenStore.createWebSocketConnection(
+      createdClient = await tokenStore.createWebSocketConnection(
         tokenId,
-        refreshedToken.token,
-        refreshedToken.wsUrl,
+        latestToken.token,
+        latestToken.wsUrl,
       );
-      if (onClientCreated) {
-        createdClient = await createdClient;
-        createdSocket = toRaw(createdClient?.socket);
-        onClientCreated(createdClient, createdSocket);
+      createdSocket = toRaw(createdClient?.socket);
+      onClientCreated?.(createdClient, createdSocket);
+      connected =
+        createdClient || !onClientCreated
+          ? await waitForConnection(tokenId)
+          : false;
+
+      if (!connected && maxRetries > 0 && !shouldStop.value) {
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `连接超时，尝试重连...`,
+          type: "warning",
+        });
+
+        const current = tokenStore.wsConnections?.[tokenId]?.client;
+        if (onClientCreated) {
+          if (
+            current &&
+            (!createdClient ||
+              toRaw(current) !== toRaw(createdClient) ||
+              (createdSocket && toRaw(current.socket) !== createdSocket))
+          ) {
+            const error = new Error("连接已被替换，停止批量任务");
+            error.interrupted = true;
+            throw error;
+          }
+          if (
+            createdClient &&
+            current &&
+            toRaw(current) === toRaw(createdClient) &&
+            (!createdSocket || toRaw(current.socket) === createdSocket)
+          ) {
+            closeOwnedConnection(
+              tokenStore,
+              tokenId,
+              createdClient,
+              createdSocket ?? null,
+            );
+          }
+        } else {
+          tokenStore.closeWebSocketConnection(tokenId);
+        }
+        await new Promise((r) =>
+          setTimeout(r, runtimeBatchSettings.reconnectDelay),
+        );
+
+        if (!shouldStop.value) {
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `正在重连...`,
+            type: "info",
+          });
+
+          const refreshedToken = tokens.value.find((t) => t.id === tokenId);
+          if (!refreshedToken) {
+            throw new Error(`Token not found: ${tokenId}`);
+          }
+          createdClient = await tokenStore.createWebSocketConnection(
+            tokenId,
+            refreshedToken.token,
+            refreshedToken.wsUrl,
+          );
+          createdSocket = toRaw(createdClient?.socket);
+          onClientCreated?.(createdClient, createdSocket);
+
+          connected =
+            createdClient || !onClientCreated
+              ? await waitForConnection(tokenId)
+              : false;
+        }
       }
 
-      connected = await waitForConnection(tokenId);
-    }
-
-    if (!connected) {
-      // 连接失败，释放槽位
-      try {
+      if (!connected) {
         const current = tokenStore.wsConnections?.[tokenId]?.client;
         if (
           !onClientCreated ||
           (createdClient &&
             current &&
-            createdSocket &&
             toRaw(createdClient) === toRaw(current) &&
-            toRaw(current.socket) === createdSocket)
-        )
-          tokenStore.closeWebSocketConnection(tokenId);
-      } finally {
-        releaseConnectionSlot();
-        onSlotChange?.(false);
+            (!createdSocket || toRaw(current.socket) === createdSocket))
+        ) {
+          if (onClientCreated) {
+            closeOwnedConnection(
+              tokenStore,
+              tokenId,
+              createdClient,
+              createdSocket ?? null,
+            );
+          } else {
+            tokenStore.closeWebSocketConnection(tokenId);
+          }
+        }
+        const error = new Error(
+          shouldStop.value ? "任务已停止" : "连接失败 (重试后仍超时)",
+        );
+        if (shouldStop.value) {
+          error.interrupted = true;
+        }
+        throw error;
       }
-      throw new Error("连接失败 (重试后仍超时)");
+    } catch (err) {
+      releaseOwnedSlot();
+      throw err;
     }
   }
 
@@ -4030,6 +4070,7 @@ const startBatch = async () => {
       return;
     }
     let ownsSlot = false;
+    let clientTrackingProvided = false;
     let ownedClient = null;
     let ownedSocket = null;
     let runClient =
@@ -4045,6 +4086,8 @@ const startBatch = async () => {
       if (
         shouldStop.value ||
         connectionInvalidated ||
+        (ownsSlot && (!ownedClient || current !== ownedClient)) ||
+        (clientTrackingProvided && (!ownedClient || current !== ownedClient)) ||
         tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
         !current ||
         !socket ||
@@ -4093,6 +4136,7 @@ const startBatch = async () => {
           ownsSlot = owned;
         },
         (client, socket) => {
+          clientTrackingProvided = true;
           ownedClient = client ? toRaw(client) : null;
           ownedSocket = socket || null;
           if (ownedClient) runClient = ownedClient;
@@ -4189,11 +4233,10 @@ const startBatch = async () => {
           );
           if (
             ownedClient &&
-            ownedSocket &&
             current === ownedClient &&
-            socket === ownedSocket
+            (!ownedSocket || socket === ownedSocket)
           )
-            tokenStore.closeWebSocketConnection(tokenId);
+            closeOwnedConnection(tokenStore, tokenId, ownedClient, ownedSocket);
         } finally {
           releaseConnectionSlot();
         }

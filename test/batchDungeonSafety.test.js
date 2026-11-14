@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as connectionManager from "../src/utils/batch/connectionManager.js";
 import { loadModule } from "./helpers/loadModule.js";
 
 const { createTasksDungeon } = await loadModule(
   new URL("../src/utils/batch/tasksDungeon.js", import.meta.url),
   {
     "@/utils/dreamConstants": { isDungeonOpen: () => true, merchantConfig: {} },
+    "./connectionManager.js": connectionManager,
   },
   {
     setTimeout: (fn) => {
@@ -22,6 +24,7 @@ function fixture() {
   const notices = [];
   const logs = [];
   let released = 0;
+  const clients = { existing: { socket: {} }, owned: { socket: {} } };
   const deps = {
     selectedTokens: { value: ["existing", "owned"] },
     tokens: {
@@ -33,8 +36,12 @@ function fixture() {
     tokenStatus: { value: {} },
     isRunning: { value: false },
     shouldStop: { value: false },
-    ensureConnection: async (id, _retries, report) => {
-      if (id === "owned") report(true);
+    ensureConnection: async (id, _retries, report, onCreated, onReady) => {
+      if (id === "owned") {
+        report(true);
+        onCreated(clients[id], clients[id].socket);
+      }
+      onReady();
     },
     releaseConnectionSlot: () => {
       released++;
@@ -42,6 +49,9 @@ function fixture() {
     connectionQueue: { active: 1 },
     batchSettings: { maxActive: 2, dreamPurchaseList: ["1-11", "1-12"] },
     tokenStore: {
+      wsConnections: Object.fromEntries(
+        Object.entries(clients).map(([id, client]) => [id, { client }]),
+      ),
       closeWebSocketConnection: (id) => closed.push(id),
       async sendMessageWithPromise(id, cmd, params) {
         calls.push({ id, cmd, params });
@@ -99,8 +109,10 @@ test("failed connection without a slot does not close another connection or rele
 test("connection cleanup follows the ownership callback on failed setup", async () => {
   const owned = fixture();
   owned.deps.selectedTokens.value = ["owned"];
-  owned.deps.ensureConnection = async (_id, _retry, report) => {
+  owned.deps.ensureConnection = async (_id, _retry, report, onCreated) => {
     report(true);
+    const client = owned.deps.tokenStore.wsConnections.owned.client;
+    onCreated(client, client.socket);
     throw new Error("初始化失败");
   };
   await createTasksDungeon(owned.deps).batchbaoku45();

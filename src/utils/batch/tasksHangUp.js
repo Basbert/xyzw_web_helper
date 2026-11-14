@@ -50,67 +50,55 @@ export function createTasksHangUp(deps) {
       }
       try {
         await runWithDailyTaskLock(tokenId, async () => {
-          let ownsSlot = false;
           const log = (text, type = "info") =>
             addLog({
               time: new Date().toLocaleTimeString(),
               message: `${token.name}: ${text}`,
               type,
             });
-          const check = () => {
-            if (
-              shouldStop.value ||
-              tokenStore.getWebSocketStatus(tokenId) !== "connected"
-            ) {
-              const error = new Error(
-                "任务已停止或连接已断开，等待重新读取服务器状态",
-              );
-              error.interrupted = true;
-              throw error;
-            }
-          };
-          try {
-            log(`开始${label}`);
-            await ensureConnection(tokenId, 2, (owned) => {
-              ownsSlot = owned;
-            });
-            check();
-            if (claimReward) {
-              log("领取挂机奖励");
-              await tokenStore.sendMessageWithPromise(
-                tokenId,
-                "system_claimhangupreward",
-                {},
-                5000,
-              );
-              check();
-              await new Promise((resolve) => setTimeout(resolve, 500));
-            }
-            const result = await fillHangUpTime({
-              tokenStore,
+          log(`开始${label}`);
+          await withManagedConnection(
+            {
               tokenId,
-              check,
-              onLog: log,
-            });
-            tokenStatus.value[tokenId] = result.remaining
-              ? "pending"
-              : "completed";
-            log(
-              result.remaining ? `${label}仍有步骤待继续` : `${label}完成`,
-              result.remaining ? "warning" : "success",
-            );
-          } finally {
-            if (ownsSlot) {
-              try {
-                tokenStore.closeWebSocketConnection(tokenId);
-              } finally {
-                releaseConnectionSlot();
+              tokenName: token.name,
+              ensureConnection,
+              releaseConnectionSlot,
+              connectionQueue,
+              batchSettings,
+              tokenStore,
+              shouldStop,
+              addLog,
+              logOnClose: true,
+              retries: 2,
+            },
+            async ({ check }) => {
+              check();
+              if (claimReward) {
+                log("领取挂机奖励");
+                await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "system_claimhangupreward",
+                  {},
+                  5000,
+                );
+                check();
+                await new Promise((resolve) => setTimeout(resolve, 500));
               }
-            }
-            log(
-              `连接清理结束 (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-            );
-          }
+              const result = await fillHangUpTime({
+                tokenStore,
+                tokenId,
+                check,
+                onLog: log,
+              });
+              tokenStatus.value[tokenId] = result.remaining
+                ? "pending"
+                : "completed";
+              log(
+                result.remaining ? `${label}仍有步骤待继续` : `${label}完成`,
+                result.remaining ? "warning" : "success",
+              );
+            },
+          );
         });
       } catch (error) {
         tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
@@ -139,6 +127,7 @@ export function createTasksHangUp(deps) {
    * 一键答题
    */
   const batchStudy = async () => {
+    if (isRunning.value) return;
     if (selectedTokens.value.length === 0) return;
 
     isRunning.value = true;
@@ -298,6 +287,7 @@ export function createTasksHangUp(deps) {
    * 一键俱乐部签到
    */
   const batchclubsign = async () => {
+    if (isRunning.value) return;
     if (selectedTokens.value.length === 0) return;
     isRunning.value = true;
     shouldStop.value = false;
@@ -446,6 +436,7 @@ export function createTasksHangUp(deps) {
    * @param {number|string} legionId - 目标俱乐部ID
    */
   const batchApplyLegion = async (legionId) => {
+    if (isRunning.value) return;
     const targetLegionId = Number(legionId);
 
     if (selectedTokens.value.length === 0) {
@@ -593,6 +584,7 @@ export function createTasksHangUp(deps) {
    * @param {number} guessCoin - 竞猜币数量
    */
   const batchWarGuessCheer = async (legionId, guessCoin) => {
+    if (isRunning.value) return;
     if (selectedTokens.value.length === 0) {
       message.warning("请先选择账号");
       return;

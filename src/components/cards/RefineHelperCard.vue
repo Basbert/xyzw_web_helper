@@ -262,7 +262,7 @@
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, ref } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { HERO_DICT } from "@/utils/HeroList.js";
 import MyCard from "../Common/MyCard.vue";
@@ -303,6 +303,13 @@ const state = ref({
 // WebSocket相关
 let continuousTimer = null;
 let autoTimer = null;
+let isUnmounted = false;
+
+const isSessionActive = (targetTokenId) =>
+  !isUnmounted &&
+  Boolean(targetTokenId) &&
+  tokenStore.selectedToken?.id === targetTokenId &&
+  tokenStore.getWebSocketStatus(targetTokenId) === "connected";
 
 // 属性映射
 const attrMap = {
@@ -385,6 +392,7 @@ const refreshHeroes = async () => {
       tokenStore.sendMessageWithPromise(tokenId, "presetteam_getinfo", {}),
       tokenStore.sendMessageWithPromise(tokenId, "role_getroleinfo", {}),
     ]);
+    if (isUnmounted || tokenStore.selectedToken?.id !== tokenId) return;
 
     // 解析队伍数据
     const teamData = parseTeamData(presetTeamInfo);
@@ -667,7 +675,7 @@ const quenchOnce = async () => {
     return;
   }
 
-  await executeQuench();
+  await executeQuench(tokenStore.selectedToken?.id);
 };
 
 // 连续淬炼
@@ -679,16 +687,37 @@ const quenchContinuous = () => {
     return;
   }
 
+  const runTokenId = tokenStore.selectedToken?.id;
+  if (
+    !runTokenId ||
+    tokenStore.getWebSocketStatus(runTokenId) !== "connected"
+  ) {
+    message.error("WebSocket未连接，无法执行淬炼");
+    return;
+  }
+
   state.value.continuousQuenching = true;
   state.value.isRunning = true;
   message.info("开始连续淬炼，出现橙色或红色属性时自动暂停");
 
   const continuousQuench = async () => {
     if (!state.value.continuousQuenching) return;
+    if (!isSessionActive(runTokenId)) {
+      stopQuench({ silent: true });
+      return;
+    }
 
     try {
-      const result = await executeQuench();
-      if (result && checkHighQualityAttr(result)) {
+      const result = await executeQuench(runTokenId);
+      if (!state.value.continuousQuenching || !isSessionActive(runTokenId)) {
+        stopQuench({ silent: true });
+        return;
+      }
+      if (!result) {
+        stopQuench({ silent: true });
+        return;
+      }
+      if (checkHighQualityAttr(result)) {
         message.success("发现橙色或红色属性，已自动暂停");
         stopQuench();
         return;
@@ -696,10 +725,16 @@ const quenchContinuous = () => {
 
       // 随机延迟
       const randomDelay = Math.floor(Math.random() * 150) + delay.value;
-      continuousTimer = setTimeout(continuousQuench, randomDelay);
+      continuousTimer = setTimeout(() => {
+        if (!isSessionActive(runTokenId)) {
+          stopQuench({ silent: true });
+          return;
+        }
+        continuousQuench();
+      }, randomDelay);
     } catch (error) {
       message.error(`连续淬炼失败: ${error.message}`);
-      stopQuench();
+      stopQuench({ silent: true });
     }
   };
 
@@ -740,6 +775,15 @@ const startAutoQuench = () => {
     return;
   }
 
+  const runTokenId = tokenStore.selectedToken?.id;
+  if (
+    !runTokenId ||
+    tokenStore.getWebSocketStatus(runTokenId) !== "connected"
+  ) {
+    message.error("WebSocket未连接，无法执行淬炼");
+    return;
+  }
+
   state.value.autoQuenching = true;
   state.value.isRunning = true;
 
@@ -755,10 +799,22 @@ const startAutoQuench = () => {
 
   const autoQuench = async () => {
     if (!state.value.autoQuenching) return;
+    if (!isSessionActive(runTokenId)) {
+      stopQuench({ silent: true });
+      return;
+    }
 
     try {
-      const result = await executeQuench();
-      if (result && checkTargetAttr(result)) {
+      const result = await executeQuench(runTokenId);
+      if (!state.value.autoQuenching || !isSessionActive(runTokenId)) {
+        stopQuench({ silent: true });
+        return;
+      }
+      if (!result) {
+        stopQuench({ silent: true });
+        return;
+      }
+      if (checkTargetAttr(result)) {
         message.success(`已达到目标条件，自动淬炼已停止`);
         stopQuench();
         return;
@@ -766,10 +822,16 @@ const startAutoQuench = () => {
 
       // 随机延迟
       const randomDelay = Math.floor(Math.random() * 150) + delay.value;
-      autoTimer = setTimeout(autoQuench, randomDelay);
+      autoTimer = setTimeout(() => {
+        if (!isSessionActive(runTokenId)) {
+          stopQuench({ silent: true });
+          return;
+        }
+        autoQuench();
+      }, randomDelay);
     } catch (error) {
       message.error(`自动淬炼失败: ${error.message}`);
-      stopQuench();
+      stopQuench({ silent: true });
     }
   };
 
@@ -777,17 +839,25 @@ const startAutoQuench = () => {
 };
 
 // 执行淬炼
-const executeQuench = async () => {
+const executeQuench = async (
+  expectedTokenId = tokenStore.selectedToken?.id,
+) => {
   const token = tokenStore.selectedToken;
   if (!token) {
     message.warning("请先选择Token");
+    stopQuench({ silent: true });
     return null;
   }
 
-  const tokenId = token.id;
+  const tokenId = expectedTokenId || token.id;
+  if (token.id !== tokenId) {
+    stopQuench({ silent: true });
+    return null;
+  }
   const status = tokenStore.getWebSocketStatus(tokenId);
   if (status !== "connected") {
     message.error("WebSocket未连接，无法执行淬炼");
+    stopQuench({ silent: true });
     return null;
   }
 
@@ -798,6 +868,7 @@ const executeQuench = async () => {
       message.warning(
         `武器等级不足，需要4000级以上（当前${equip?.level || 0}级）`,
       );
+      stopQuench({ silent: true });
       return null;
     }
   }
@@ -807,6 +878,7 @@ const executeQuench = async () => {
     const currentEquip = heroEquipment.value[selectedPart.value];
     if (!currentEquip?.quenches) {
       message.error("未获取到装备孔位信息");
+      stopQuench({ silent: true });
       return null;
     }
 
@@ -819,6 +891,10 @@ const executeQuench = async () => {
     // 如果有高属性孔位且未锁定，先发送equipment_confirm命令
     let seedFromConfirm = 0;
     if (hasHighAttrSlot) {
+      if (!isSessionActive(tokenId)) {
+        stopQuench({ silent: true });
+        return null;
+      }
       // 构建确认请求参数
       const confirmParams = {
         heroId: selectedHeroId.value,
@@ -834,6 +910,10 @@ const executeQuench = async () => {
         confirmParams,
         15000,
       );
+      if (!isSessionActive(tokenId)) {
+        stopQuench({ silent: true });
+        return null;
+      }
 
       // 从确认响应中提取seed值 - WebSocket客户端已返回body部分
       if (confirmResult?.role?.heroes) {
@@ -866,6 +946,11 @@ const executeQuench = async () => {
       }
     }
 
+    if (!isSessionActive(tokenId)) {
+      stopQuench({ silent: true });
+      return null;
+    }
+
     // 构建淬炼制请求参数
     const quenchParams = {
       heroId: selectedHeroId.value,
@@ -883,6 +968,11 @@ const executeQuench = async () => {
       quenchParams,
       15000,
     );
+
+    if (isUnmounted || tokenStore.selectedToken?.id !== tokenId) {
+      stopQuench({ silent: true });
+      return null;
+    }
 
     // 更新淬炼次数
     quenchCount.value++;
@@ -942,7 +1032,10 @@ const executeQuench = async () => {
 
     return result;
   } catch (error) {
-    message.error(`淬炼失败: ${error.message}`);
+    if (!isUnmounted && tokenStore.selectedToken?.id === tokenId) {
+      message.error(`淬炼失败: ${error.message}`);
+    }
+    stopQuench({ silent: true });
     return null;
   }
 };
@@ -1014,7 +1107,11 @@ const checkTargetAttr = (result) => {
 };
 
 // 停止淬炼
-const stopQuench = () => {
+const stopQuench = ({ silent = false } = {}) => {
+  const wasRunning =
+    state.value.isRunning ||
+    state.value.continuousQuenching ||
+    state.value.autoQuenching;
   state.value.continuousQuenching = false;
   state.value.autoQuenching = false;
   state.value.isRunning = false;
@@ -1029,8 +1126,37 @@ const stopQuench = () => {
     autoTimer = null;
   }
 
-  message.success("淬炼已停止");
+  if (!silent && !isUnmounted && wasRunning) {
+    message.success("淬炼已停止");
+  }
 };
+
+const stopContinuousRefine = () => stopQuench({ silent: true });
+const stopAutoRefine = () => stopQuench({ silent: true });
+
+watch(
+  () => tokenStore.selectedToken?.id,
+  () => {
+    stopContinuousRefine();
+    stopAutoRefine();
+    resetPasswordValidation();
+    heroes.value = [];
+    allHeroesData.value = {};
+    heroEquipment.value = {};
+    slots.value = [];
+    selectedHeroId.value = null;
+    selectedPart.value = null;
+    quenchCount.value = 0;
+    jadeCount.value = 0;
+    colorJadeCount.value = 0;
+  },
+);
+
+onUnmounted(() => {
+  isUnmounted = true;
+  stopContinuousRefine();
+  stopAutoRefine();
+});
 
 // 重置淬炼次数
 const resetCount = () => {

@@ -191,6 +191,8 @@ watch(
 onUnmounted(() => {
   componentDisposed = true;
   purchaseGeneration++;
+  continuousBattles.value = {};
+  teamHeroes.value = [];
 });
 watch(
   () => tokenStore.selectedToken?.id,
@@ -198,6 +200,9 @@ watch(
     merchantDataLoaded.value = false;
     merchantData.value = { 1: [], 2: [], 3: [] };
     levelId.value = 0;
+    continuousBattles.value = {};
+    teamHeroes.value = [];
+    hasDefaultInfo.value = false;
   },
 );
 
@@ -299,17 +304,25 @@ async function getDefaultTeam() {
       {},
       15000,
     );
+    if (componentDisposed || tokenStore.selectedToken?.id !== tokenId) {
+      return false;
+    }
 
     if (roleInfo) {
       const extracted = extractDefaultInfoFromResponse(roleInfo);
       if (extracted) {
         message.success("队伍信息获取成功");
+        return true;
       } else {
         message.error("无法提取队伍数据");
       }
     }
+    return false;
   } catch (error) {
-    message.error(`获取默认队伍信息出错: ${error.message}`);
+    if (!componentDisposed && tokenStore.selectedToken?.id === tokenId) {
+      message.error(`获取默认队伍信息出错: ${error.message}`);
+    }
+    return false;
   } finally {
     isLoading.value = false;
   }
@@ -367,23 +380,36 @@ async function selectDreamTeam() {
       15000,
     );
 
-    if (response) {
+    if (
+      !componentDisposed &&
+      tokenStore.selectedToken?.id === tokenId &&
+      response
+    ) {
       message.success("梦境阵容选择成功");
     }
   } catch (error) {
-    message.error(`选择梦境阵容出错: ${error.message}`);
+    if (!componentDisposed && tokenStore.selectedToken?.id === tokenId) {
+      message.error(`选择梦境阵容出错: ${error.message}`);
+    }
   } finally {
     isLoading.value = false;
   }
 }
 
 // 单个英雄战斗
-async function startSingleBattle(heroId) {
-  if (!tokenStore.selectedToken) {
-    return false;
+async function startSingleBattle(
+  heroId,
+  tokenId = tokenStore.selectedToken?.id,
+) {
+  if (
+    componentDisposed ||
+    !tokenId ||
+    tokenStore.selectedToken?.id !== tokenId ||
+    tokenStore.getWebSocketStatus(tokenId) !== "connected"
+  ) {
+    return "stop";
   }
 
-  const tokenId = tokenStore.selectedToken.id;
   const heroName = heroData[heroId] ? heroData[heroId].name : `ID:${heroId}`;
 
   try {
@@ -395,6 +421,14 @@ async function startSingleBattle(heroId) {
       },
       15000,
     );
+
+    if (
+      componentDisposed ||
+      tokenStore.selectedToken?.id !== tokenId ||
+      tokenStore.getWebSocketStatus(tokenId) !== "connected"
+    ) {
+      return "stop";
+    }
 
     if (response) {
       const rawData = response;
@@ -423,14 +457,28 @@ async function startSingleBattle(heroId) {
 
 // 连续战斗功能
 async function startContinuousBattle(heroId) {
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId || tokenStore.getWebSocketStatus(tokenId) !== "connected") {
+    message.warning("请先连接账号");
+    return;
+  }
   const heroName = heroData[heroId] ? heroData[heroId].name : `ID:${heroId}`;
+  const isSessionActive = () =>
+    !componentDisposed &&
+    tokenStore.selectedToken?.id === tokenId &&
+    tokenStore.getWebSocketStatus(tokenId) === "connected";
 
   continuousBattles.value[heroId] = true;
   message.info(`${heroName} 开始连续战斗`);
 
   // 连续战斗循环
-  while (continuousBattles.value[heroId]) {
-    const result = await startSingleBattle(heroId);
+  while (continuousBattles.value[heroId] && isSessionActive()) {
+    const result = await startSingleBattle(heroId, tokenId);
+
+    if (!isSessionActive()) {
+      continuousBattles.value[heroId] = false;
+      break;
+    }
 
     // 如果返回stop，表示遇到2600080或2600050错误，停止战斗
     if (result === "stop") {
@@ -439,9 +487,12 @@ async function startContinuousBattle(heroId) {
     }
 
     // 等待0.1秒再进行下一次战斗
-    if (continuousBattles.value[heroId]) {
+    if (continuousBattles.value[heroId] && isSessionActive()) {
       await delay(0.1);
     }
+  }
+  if (!isSessionActive()) {
+    continuousBattles.value[heroId] = false;
   }
 }
 

@@ -73,8 +73,14 @@ function createFixture(overrides = {}) {
     { id: "alpha", name: "Alpha" },
     { id: "beta", name: "Beta" },
   ];
+  const clients = Object.fromEntries(
+    tokens.map(({ id }) => [id, { socket: {} }]),
+  );
 
   const tokenStore = {
+    wsConnections: Object.fromEntries(
+      tokens.map(({ id }) => [id, { client: clients[id] }]),
+    ),
     gameData: { studyStatus: { isRunning: false, isCompleted: false } },
     getWebSocketStatus: () => "connected",
     getAccountGameData: (id) => accountData[id],
@@ -101,8 +107,16 @@ function createFixture(overrides = {}) {
     isRunning: { value: false },
     shouldStop: { value: false },
     // alpha owns a newly created slot; beta reuses an existing user connection
-    ensureConnection: async (id, _retries, onSlotChange) => {
+    ensureConnection: async (
+      id,
+      _retries,
+      onSlotChange,
+      onClientCreated,
+      onConnectionReady,
+    ) => {
       onSlotChange?.(id === "alpha");
+      if (id === "alpha") onClientCreated?.(clients[id], clients[id].socket);
+      onConnectionReady?.();
       return true;
     },
     releaseConnectionSlot() {

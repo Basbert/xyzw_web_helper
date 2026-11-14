@@ -30,7 +30,10 @@ const { createTasksTower } = await loadModule(
 );
 const { createTasksBottle } = await loadModule(
   new URL("../src/utils/batch/tasksBottle.js", import.meta.url),
-  { "@/utils/dailyTaskState": dailyState },
+  {
+    "@/utils/dailyTaskState": dailyState,
+    "./connectionManager.js": connectionManager,
+  },
   {
     setTimeout: (callback) => {
       callback();
@@ -40,7 +43,18 @@ const { createTasksBottle } = await loadModule(
 );
 const { createTasksLegacy } = await loadModule(
   new URL("../src/utils/batch/tasksLegacy.js", import.meta.url),
-  { "@/utils/dailyTaskState": dailyState },
+  {
+    "@/utils/dailyTaskState": dailyState,
+    "./connectionManager.js": connectionManager,
+  },
+);
+const { createTasksDungeon } = await loadModule(
+  new URL("../src/utils/batch/tasksDungeon.js", import.meta.url),
+  {
+    "@/utils/dreamConstants": { isDungeonOpen: () => true, merchantConfig: {} },
+    "./connectionManager.js": connectionManager,
+  },
+  { setTimeout: (callback) => callback() },
 );
 
 function fixture() {
@@ -56,7 +70,13 @@ function fixture() {
     alpha: { items: { 1007: { quantity: 2 }, 1011: { quantity: 2 } } },
     beta: { items: { 1007: { quantity: 0 }, 1011: { quantity: 0 } } },
   };
+  const clients = Object.fromEntries(
+    tokens.map(({ id }) => [id, { socket: {} }]),
+  );
   const tokenStore = {
+    wsConnections: Object.fromEntries(
+      tokens.map(({ id }) => [id, { client: clients[id] }]),
+    ),
     // A stale shared snapshot belongs to a different account.
     gameData: {
       roleInfo: {
@@ -86,8 +106,18 @@ function fixture() {
     tokenStatus: statuses,
     isRunning: { value: false },
     shouldStop: { value: false },
-    ensureConnection: async (id, _retries, onSlotChange) => {
-      if (id === "alpha") onSlotChange?.(true);
+    ensureConnection: async (
+      id,
+      _retries,
+      onSlotChange,
+      onClientCreated,
+      onReady,
+    ) => {
+      if (id === "alpha") {
+        onSlotChange?.(true);
+        onClientCreated?.(clients[id], clients[id].socket);
+      }
+      onReady?.();
       return true;
     },
     releaseConnectionSlot() {
@@ -444,4 +474,93 @@ test("stopping after the salt helper stops still attempts to restart it", async 
     ["bottlehelper_stop", "bottlehelper_start"],
   );
   assert.equal(statuses.value.alpha, "stopped");
+});
+
+test("formation switch does not write to a replacement connection", async () => {
+  const { calls, deps, roles, statuses } = fixture();
+  deps.selectedTokens.value = ["alpha"];
+  roles.alpha.items[1007].quantity = 3;
+  deps.loadSettings = () => ({ arenaFormation: 3 });
+  const send = deps.tokenStore.sendMessageWithPromise;
+  deps.tokenStore.sendMessageWithPromise = async (...args) => {
+    if (args[1] === "presetteam_getinfo") {
+      calls.push({ id: args[0], cmd: args[1] });
+      deps.tokenStore.wsConnections.alpha.client = { socket: {} };
+      return { presetTeamInfo: { useTeamId: 1 } };
+    }
+    return send(...args);
+  };
+  await createTasksArena(deps).batcharenafight();
+  assert.equal(
+    calls.some(({ cmd }) => cmd === "presetteam_saveteam"),
+    false,
+  );
+  assert.equal(statuses.value.alpha, "stopped");
+});
+
+test("vault stops before any further challenge when its connection changes", async () => {
+  for (const [taskName, towerId] of [
+    ["batchbaoku13", 1],
+    ["batchbaoku45", 4],
+  ]) {
+    const { calls, deps, statuses } = fixture();
+    deps.selectedTokens.value = ["alpha"];
+    deps.tokenStore.sendMessageWithPromise = async (id, cmd) => {
+      calls.push({ id, cmd });
+      if (cmd === "bosstower_getinfo") return { bossTower: { towerId } };
+      if (cmd === "bosstower_startboss") {
+        deps.tokenStore.wsConnections.alpha.client = { socket: {} };
+      }
+      return {};
+    };
+    await createTasksDungeon(deps)[taskName]();
+    assert.equal(
+      calls.filter(({ cmd }) => cmd === "bosstower_startboss").length,
+      1,
+    );
+    assert.equal(
+      calls.some(({ cmd }) => cmd === "bosstower_startbox"),
+      false,
+    );
+    assert.equal(statuses.value.alpha, "stopped");
+  }
+});
+
+test("batch initialization stops before sending to a replacement connection", async () => {
+  const oldClient = { socket: {} };
+  const tokenStore = {
+    wsConnections: { alpha: { client: oldClient } },
+    getWebSocketStatus: () => "connected",
+    async sendMessageWithPromise(_id, cmd) {
+      calls.push(cmd);
+      if (cmd === "role_getroleinfo") {
+        tokenStore.wsConnections.alpha.client = { socket: {} };
+      }
+      return {};
+    },
+  };
+  const calls = [];
+  const manager = connectionManager.createConnectionManager({
+    tokenStore,
+    batchSettings: { maxActive: 1 },
+    addLog() {},
+  });
+  let ran = false;
+  await assert.rejects(
+    () =>
+      connectionManager.withManagedConnection(
+        {
+          tokenId: "alpha",
+          tokenStore,
+          ensureConnection: (id, ...args) =>
+            manager.ensureConnection(id, [{ id: "alpha" }], ...args),
+        },
+        async () => {
+          ran = true;
+        },
+      ),
+    (error) => error.interrupted === true,
+  );
+  assert.equal(ran, false);
+  assert.deepEqual(calls, ["role_getroleinfo"]);
 });

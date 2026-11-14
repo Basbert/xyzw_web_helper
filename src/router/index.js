@@ -3,13 +3,33 @@ import * as autoRoutes from "vue-router/auto-routes";
 import { useTokenStore } from "@/stores/tokenStore";
 import { isNowInLegionWarTime } from "@/utils/legionWarTime";
 
+const MANUAL_VIEW_PATHS = new Set([
+  "/",
+  "/tokens",
+  "/game",
+  "/multi-game",
+  "/websocket-test",
+  "/home",
+  "/dashboard",
+  "/gamefeatures",
+  "/legionwar",
+  "/profile",
+  "/dailytasks",
+  "/batchdailytasks",
+  "/pushinglevels",
+  "/gameplayer",
+  "/gamemultiplayer",
+  "/login",
+  "/register",
+  "/gameroles",
+  "/notfound",
+]);
+
 const generatedRoutes = (autoRoutes.routes ?? []).filter(
   (route) =>
     typeof route?.path === "string" &&
     !route.path.startsWith("/TokenImport/") &&
-    !["/", "/tokens", "/game", "/multi-game", "/websocket-test"].includes(
-      route.path.toLowerCase(),
-    ),
+    !MANUAL_VIEW_PATHS.has(route.path.toLowerCase()),
 );
 
 const my_routes = [
@@ -113,7 +133,7 @@ const my_routes = [
       {
         path: "daily-tasks",
         name: "DailyTasks",
-        component: () => import("@/views/DailyTasks.vue"),
+        redirect: { name: "GameFeatures" },
         meta: {
           title: "日常任务",
           requiresToken: true,

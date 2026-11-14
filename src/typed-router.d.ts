@@ -20,19 +20,15 @@ declare module 'vue-router/auto-routes' {
   export interface RouteNamedMap {
     '/BatchDailyTasks': RouteRecordInfo<'/BatchDailyTasks', '/BatchDailyTasks', Record<never, never>, Record<never, never>>,
     '/Changelog': RouteRecordInfo<'/Changelog', '/Changelog', Record<never, never>, Record<never, never>>,
-    '/DailyTasks': RouteRecordInfo<'/DailyTasks', '/DailyTasks', Record<never, never>, Record<never, never>>,
     '/Dashboard': RouteRecordInfo<'/Dashboard', '/Dashboard', Record<never, never>, Record<never, never>>,
     '/GameFeatures': RouteRecordInfo<'/GameFeatures', '/GameFeatures', Record<never, never>, Record<never, never>>,
     '/GameMultiPlayer': RouteRecordInfo<'/GameMultiPlayer', '/GameMultiPlayer', Record<never, never>, Record<never, never>>,
     '/GamePlayer': RouteRecordInfo<'/GamePlayer', '/GamePlayer', Record<never, never>, Record<never, never>>,
-    '/GameRoles': RouteRecordInfo<'/GameRoles', '/GameRoles', Record<never, never>, Record<never, never>>,
     '/Home': RouteRecordInfo<'/Home', '/Home', Record<never, never>, Record<never, never>>,
     '/LegionWar': RouteRecordInfo<'/LegionWar', '/LegionWar', Record<never, never>, Record<never, never>>,
-    '/Login': RouteRecordInfo<'/Login', '/Login', Record<never, never>, Record<never, never>>,
     '/NotFound': RouteRecordInfo<'/NotFound', '/NotFound', Record<never, never>, Record<never, never>>,
     '/Profile': RouteRecordInfo<'/Profile', '/Profile', Record<never, never>, Record<never, never>>,
     '/PushingLevels': RouteRecordInfo<'/PushingLevels', '/PushingLevels', Record<never, never>, Record<never, never>>,
-    '/Register': RouteRecordInfo<'/Register', '/Register', Record<never, never>, Record<never, never>>,
     '/TokenImport/': RouteRecordInfo<'/TokenImport/', '/TokenImport', Record<never, never>, Record<never, never>>,
   }
 }

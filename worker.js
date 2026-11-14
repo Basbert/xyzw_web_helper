@@ -9,6 +9,7 @@ const HOP_BY_HOP_HEADERS = [
   "keep-alive",
   "proxy-authenticate",
   "proxy-authorization",
+  "set-cookie",
   "te",
   "trailer",
   "transfer-encoding",
