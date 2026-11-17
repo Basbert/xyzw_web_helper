@@ -103,8 +103,12 @@ async function fixture(options = {}) {
       "./events/index.js": { $emit: { emit() {} }, emitPlus() {} },
     },
     {
+      AbortController,
+      WebSocket: { CLOSED: 3 },
       localStorage: storage,
       navigator: network,
+      setTimeout: options.setTimeout || setTimeout,
+      clearTimeout: options.clearTimeout || clearTimeout,
       setInterval: (fn, delay) => {
         const id = ++nextInterval;
         intervals.set(id, { fn, delay });
@@ -231,6 +235,278 @@ test("other tab retains ownership until it releases the connection", async () =>
   f.values.delete("ws_connection_alpha");
   await f.runNext();
   assert.equal(f.clients.length, 2);
+});
+
+test("重复创建不会关闭当前账号已经建立的连接", async () => {
+  const f = await fixture();
+  const first = f.clients[0];
+  const result = await f.store.createWebSocketConnection(
+    "alpha",
+    "test-token-alpha-long",
+  );
+  assert.equal(result, null);
+  assert.equal(f.clients.length, 1);
+  assert.equal(vue.toRaw(f.store.wsConnections.alpha.client), first);
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+  assert.deepEqual(f.sent, ["role_getroleinfo"]);
+});
+
+test("连接进行中再次创建不会取代正在握手的客户端", async () => {
+  const f = await fixture({ skipInitial: true, deferClient: () => true });
+  const first = await f.store.createWebSocketConnection(
+    "alpha",
+    "test-token-alpha-long",
+  );
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connecting");
+  const duplicate = f.store.createWebSocketConnection(
+    "alpha",
+    "test-token-alpha-long",
+  );
+  f.clients[0].onConnect();
+  assert.equal(await duplicate, null);
+  assert.equal(f.clients.length, 1);
+  assert.equal(vue.toRaw(f.store.wsConnections.alpha.client), first);
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+});
+
+test("首个请求等待标签页锁时，后来的请求不会重建已连接的客户端", async () => {
+  let release;
+  let entered;
+  const ready = new Promise((resolve) => {
+    entered = resolve;
+  });
+  let calls = 0;
+  const locks = {
+    request(_name, _options, callback) {
+      if (++calls === 1) {
+        entered();
+        return new Promise((resolve) => {
+          release = () => resolve(callback({}));
+        });
+      }
+      return Promise.resolve().then(() => callback({}));
+    },
+  };
+  const f = await fixture({ locks, skipInitial: true });
+  const first = f.store.createWebSocketConnection(
+    "alpha",
+    "test-token-alpha-long",
+  );
+  await ready;
+  const second = f.store.createWebSocketConnection(
+    "alpha",
+    "test-token-alpha-long",
+  );
+  release();
+  await first;
+  assert.equal(await second, null);
+  assert.equal(f.clients.length, 1);
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+});
+
+function controlledLeaseTimers() {
+  const timers = new Map();
+  let nextId = 100000;
+  return {
+    setTimeout(fn, delay) {
+      if (delay !== 10000) return setTimeout(fn, delay);
+      const id = ++nextId;
+      timers.set(id, fn);
+      return id;
+    },
+    clearTimeout(id) {
+      if (timers.has(id)) timers.delete(id);
+      else clearTimeout(id);
+    },
+    expire() {
+      const [id, fn] = timers.entries().next().value || [];
+      assert.ok(fn, "应存在连接协调超时");
+      timers.delete(id);
+      fn();
+    },
+  };
+}
+
+test("等待跨标签页锁超时后会重试，迟到的锁回调不会创建连接", async () => {
+  const timers = controlledLeaseTimers();
+  let release;
+  let signal;
+  const locks = {
+    request(_name, options, callback) {
+      signal = options.signal;
+      return new Promise((resolve, reject) => {
+        release = () => Promise.resolve().then(callback).then(resolve, reject);
+      });
+    },
+  };
+  const f = await fixture({ locks, skipInitial: true, ...timers });
+  const attempt = f.store.createWebSocketConnection(
+    "alpha",
+    "test-token-alpha-long",
+  );
+  await Promise.resolve();
+  timers.expire();
+  assert.equal(await attempt, null);
+  assert.equal(signal.aborted, true);
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  assert.equal(f.store.getWebSocketStatus("alpha"), "disconnected");
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(f.clients.length, 0);
+});
+
+test("握手后等待标签页锁超时不会一直显示连接中", async () => {
+  const timers = controlledLeaseTimers();
+  let count = 0;
+  let releaseHandshake;
+  const locks = {
+    request(_name, _options, callback) {
+      if (++count === 1) return Promise.resolve().then(callback);
+      return new Promise((resolve, reject) => {
+        releaseHandshake = () =>
+          Promise.resolve().then(callback).then(resolve, reject);
+      });
+    },
+  };
+  const f = await fixture({ locks, skipInitial: true, ...timers });
+  await f.store.createWebSocketConnection("alpha", "test-token-alpha-long");
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connecting");
+  timers.expire();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(f.store.getWebSocketStatus("alpha"), "disconnected");
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  assert.deepEqual(f.sent, []);
+  releaseHandshake();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(f.store.getWebSocketStatus("alpha"), "disconnected");
+  assert.deepEqual(f.sent, []);
+});
+
+test("锁超时后旧连接关闭才完成时，会恢复重试而不继续过期请求", async () => {
+  const lease = controlledLeaseTimers();
+  const pendingCloseTimers = new Map();
+  let nextCloseTimer = 200000;
+  let disconnectStarted;
+  const started = new Promise((resolve) => {
+    disconnectStarted = resolve;
+  });
+  const locks = {
+    request(_name, _options, callback) {
+      return Promise.resolve().then(callback);
+    },
+  };
+  const f = await fixture({
+    locks,
+    skipInitial: true,
+    setTimeout(fn, delay) {
+      if (delay === 100 || delay === 5000) {
+        const id = ++nextCloseTimer;
+        pendingCloseTimers.set(id, { fn, delay });
+        return id;
+      }
+      return lease.setTimeout(fn, delay);
+    },
+    clearTimeout(id) {
+      if (pendingCloseTimers.has(id)) pendingCloseTimers.delete(id);
+      else lease.clearTimeout(id);
+    },
+  });
+  const oldSocket = { readyState: 1 };
+  f.store.wsConnections.alpha = {
+    status: "disconnected",
+    client: {
+      socket: oldSocket,
+      disconnect: () => disconnectStarted(),
+    },
+  };
+  const attempt = f.store.createWebSocketConnection(
+    "alpha",
+    "test-token-alpha-long",
+  );
+  await started;
+  lease.expire();
+  assert.equal(await attempt, null);
+  assert.equal(f.store.getWebSocketStatus("alpha"), "disconnecting");
+  oldSocket.readyState = 3;
+  const [id, poll] = [...pendingCloseTimers.entries()].find(
+    ([, timer]) => timer.delay === 100,
+  );
+  pendingCloseTimers.delete(id);
+  poll.fn();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(f.store.getWebSocketStatus("alpha"), "disconnected");
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  assert.equal([...f.timers.values()][0].delay, 0);
+  assert.equal(f.clients.length, 0);
+});
+
+test("首次连接被其他标签页占用时等待释放并自动重试", async () => {
+  const f = await fixture({ skipInitial: true });
+  f.store.initConnectionCoordination();
+  assert.equal(f.module.gameTokens.value.length, 2);
+  f.values.set(
+    "ws_connection_alpha",
+    JSON.stringify({
+      sessionId: "other-tab",
+      action: "connected",
+      timestamp: Date.now(),
+    }),
+  );
+  assert.equal(
+    await f.store.createWebSocketConnection("alpha", "test-token-alpha-long"),
+    null,
+  );
+  assert.equal(f.store.isConnectionActiveInAnotherTab("alpha"), true);
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  assert.equal([...f.timers.values()][0].delay, 60000);
+  assert.equal(f.clients.length, 0);
+
+  f.values.delete("ws_connection_alpha");
+  f.listeners.storage({ key: "ws_connection_alpha", newValue: null });
+  assert.equal([...f.timers.values()][0].delay, 0);
+  await f.runNext();
+  assert.equal(f.clients.length, 1);
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "restored");
+});
+
+test("其他标签页主动断开并广播状态时立即重试", async () => {
+  const f = await fixture({ skipInitial: true });
+  const state = {
+    sessionId: "other-tab",
+    action: "connected",
+    timestamp: Date.now(),
+  };
+  f.values.set("ws_connection_alpha", JSON.stringify(state));
+  await f.store.createWebSocketConnection("alpha", "test-token-alpha-long");
+  assert.equal([...f.timers.values()][0].delay, 60000);
+  state.action = "disconnected";
+  const newValue = JSON.stringify(state);
+  f.values.set("ws_connection_alpha", newValue);
+  f.listeners.storage({ key: "ws_connection_alpha", newValue });
+  assert.equal([...f.timers.values()][0].delay, 0);
+  await f.runNext();
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+  assert.equal(f.clients.length, 1);
+});
+
+test("用户手动断开后其他页面释放连接也不会自动重连", async () => {
+  const f = await fixture({ skipInitial: true });
+  f.store.initConnectionCoordination();
+  f.values.set(
+    "ws_connection_alpha",
+    JSON.stringify({
+      sessionId: "other-tab",
+      action: "connected",
+      timestamp: Date.now(),
+    }),
+  );
+  await f.store.createWebSocketConnection("alpha", "test-token-alpha-long");
+  f.store.closeWebSocketConnection("alpha");
+  f.values.delete("ws_connection_alpha");
+  f.listeners.storage({ key: "ws_connection_alpha", newValue: null });
+  assert.equal(f.timers.size, 0);
+  assert.equal(f.clients.length, 0);
 });
 
 test("heartbeats renew only the current tab's lease", async () => {
@@ -411,7 +687,7 @@ test("多个标签页通过跨标签锁原子领取连接，只有一个创建�
   const lockNames = [];
   let tail = Promise.resolve();
   const locks = {
-    request(name, callback) {
+    request(name, _options, callback) {
       lockNames.push(name);
       const result = tail.then(() => callback({}));
       tail = result.then(() => {});
@@ -455,7 +731,7 @@ test("用户断开时，等待跨标签锁的连接不能随后启动", async ()
     entered = resolve;
   });
   const locks = {
-    request: async (_name, callback) => {
+    request: async (_name, _options, callback) => {
       entered();
       await new Promise((resolve) => {
         release = resolve;
@@ -485,7 +761,7 @@ test("自动恢复等待跨标签锁期间 A→B→A，旧请求失效且不影�
   });
   let count = 0;
   f.network.locks = {
-    request: async (_name, callback) => {
+    request: async (_name, _options, callback) => {
       if (++count === 1) {
         entered();
         await new Promise((resolve) => {
@@ -583,7 +859,7 @@ test("两页用同一跨标签锁：过期租约被 B 接管后 A 的迟到握�
   const values = new Map();
   let tail = Promise.resolve();
   const locks = {
-    request(_name, callback) {
+    request(_name, _options, callback) {
       const result = tail.then(() => callback({}));
       tail = result.then(() => {});
       return result;

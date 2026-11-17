@@ -69,7 +69,8 @@
 <script setup>
 import { useMessage } from "naive-ui";
 
-import { onMounted, ref } from "vue";
+import { onMounted, onUnmounted, ref, watch } from "vue";
+import { useRouter } from "vue-router";
 import { useTokenStore } from "@/stores/tokenStore";
 import { getCurrentTimeByFormat } from "@/utils/DateTimeUtils";
 
@@ -80,17 +81,34 @@ import {
   HexGraph,
   typeBg,
 } from "@/utils/legionWar";
+import { waitForAccountConnection } from "@/utils/waitForAccountConnection";
 import { XyzwLegionWarWebSocketClient } from "@/utils/xyzwLegionWarWebSocket";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
+const router = useRouter();
 
 let legionWarWebSocket = null;
+let battlefieldTimer = null;
+let connectingBattlefield = false;
+let accountGeneration = 0;
+const pageAbort = new AbortController();
 const hint = ref(null);
 
 //是否进入战场
 const isEntireBattlefield = ref(false);
 const currentDateTime = ref(getCurrentTimeByFormat("yyyy-MM-dd HH:mm:ss"));
+watch(
+  () => tokenStore.selectedToken?.id,
+  () => {
+    accountGeneration++;
+    if (battlefieldTimer !== null) clearTimeout(battlefieldTimer);
+    legionWarWebSocket?.disconnect();
+    legionWarWebSocket = null;
+    isEntireBattlefield.value = false;
+  },
+  { flush: "sync" },
+);
 
 const connectionClass = computed(() => {
   return isEntireBattlefield.value ? "status-connected" : "status-disconnected";
@@ -732,41 +750,86 @@ function resizeAndRedraw(canvas) {
   drawCanvasContent();
 }
 
-const connectWebSocket = () => {
+const connectWebSocket = async () => {
+  if (connectingBattlefield) return;
   if (!tokenStore.selectedToken) {
     message.warning("请先选择一个Token");
     router.push("/tokens");
     return;
   }
 
+  const selected = tokenStore.selectedToken;
+  const tokenId = selected.id;
+  const generation = accountGeneration;
+  const isCurrent = () =>
+    !pageAbort.signal.aborted &&
+    accountGeneration === generation &&
+    tokenStore.selectedToken?.id === tokenId;
+  connectingBattlefield = true;
   try {
-    const tokenId = tokenStore.selectedToken.id;
-    const token = tokenStore.selectedToken.token;
-
-    // 使用 tokenStore 的 WebSocket 连接管理
-    tokenStore.createWebSocketConnection(tokenId, token);
-    message.info("正在建立 WebSocket 连接...");
-
-    // 等待连接建立
-    setTimeout(async () => {
-      const status = tokenStore.getWebSocketStatus(tokenId);
-      if (status === "connected") {
-        message.success("WebSocket 连接成功");
-
-        const getbattlefield = await tokenStore.sendMessageWithPromise(
-          tokenId,
-          "legion_getbattlefield",
-          {},
-          10000,
+    const status = tokenStore.getWebSocketStatus(tokenId);
+    if (!["connected", "connecting"].includes(status)) {
+      const client = await tokenStore.createWebSocketConnection(
+        tokenId,
+        selected.token,
+        selected.wsUrl,
+      );
+      if (!isCurrent()) return;
+      const currentStatus = tokenStore.getWebSocketStatus(tokenId);
+      if (!client && !["connected", "connecting"].includes(currentStatus)) {
+        message.warning(
+          tokenStore.isConnectionActiveInAnotherTab(tokenId)
+            ? "该账号可能已在另一个助手页面连接，关闭那个页面后会自动重试"
+            : "助手连接未能建立，请检查网络或账号状态",
         );
-        fetchBattleRecords1(getbattlefield);
+        return;
       }
-    }, 2000);
+    }
+
+    const connected = await waitForAccountConnection(tokenStore, tokenId, {
+      signal: pageAbort.signal,
+    });
+    if (!isCurrent()) return;
+    if (!connected) {
+      message.warning("助手连接暂未建立，请检查网络后重试");
+      return;
+    }
+    const battlefield = await tokenStore.sendMessageWithPromise(
+      tokenId,
+      "legion_getbattlefield",
+      {},
+      10000,
+    );
+    if (isCurrent() && tokenStore.getWebSocketStatus(tokenId) === "connected")
+      await fetchBattleRecords1(battlefield);
   } catch (error) {
-    console.error("WebSocket连接失败:", error);
-    message.error("WebSocket连接失败");
+    if (isCurrent()) {
+      console.error("连接战场失败:", error);
+      message.error("无法获取战场信息，请稍后重试");
+    }
+  } finally {
+    connectingBattlefield = false;
   }
 };
+
+watch(
+  () => [
+    tokenStore.selectedToken?.id,
+    tokenStore.selectedToken
+      ? tokenStore.getWebSocketStatus(tokenStore.selectedToken.id)
+      : "disconnected",
+  ],
+  ([id, status]) => {
+    if (
+      id &&
+      status === "connected" &&
+      !connectingBattlefield &&
+      !isEntireBattlefield.value &&
+      !pageAbort.signal.aborted
+    )
+      connectWebSocket();
+  },
+);
 
 /**
  * 建立盐场连接请求与处理
@@ -775,26 +838,39 @@ const fetchBattleRecords1 = async (getbattlefield) => {
   if (tokenStore.selectedToken) {
     const tokenId = tokenStore.selectedToken.id;
     const status = tokenStore.getWebSocketStatus(tokenStore.selectedToken.id);
-    if (status !== "connected") {
-      connectWebSocket();
+    if (status !== "connected") return;
+    if (
+      getbattlefield?.info?.sid == null ||
+      getbattlefield?.info?.battlefieldId == null
+    ) {
+      message.warning("暂未获取到战场信息，请稍后重试");
       return;
     }
     const baseWsUrl =
       "wss://xxz-xyzw-new.hortorgames.com/agent" +
       `?p=${encodeURIComponent(tokenStore.selectedToken.token)}&e=x&sid2=${getbattlefield?.info.sid}&lang=chinese&sid2=${getbattlefield?.info.sid}`;
     hint.value = getbattlefield?.info.battlefieldId;
-    legionWarWebSocket = new XyzwLegionWarWebSocketClient({
+    if (battlefieldTimer !== null) clearTimeout(battlefieldTimer);
+    legionWarWebSocket?.disconnect();
+    const client = new XyzwLegionWarWebSocketClient({
       url: baseWsUrl,
       utils: null,
       hint: hint.value,
       heartbeatMs: 5000,
     });
+    legionWarWebSocket = client;
 
-    legionWarWebSocket.onConnect = async () => {
+    client.onConnect = async () => {
       try {
-        setTimeout(() => {
+        battlefieldTimer = setTimeout(() => {
+          if (
+            pageAbort.signal.aborted ||
+            tokenStore.selectedToken?.id !== tokenId ||
+            legionWarWebSocket !== client
+          )
+            return;
           isEntireBattlefield.value = true;
-          legionWarWebSocket.send("war_enterbattlefield", {
+          client.send("war_enterbattlefield", {
             battlefieldId: hint.value,
             useGzip: true,
           });
@@ -804,7 +880,7 @@ const fetchBattleRecords1 = async (getbattlefield) => {
       }
     };
     // 10. 设置消息监听
-    legionWarWebSocket.setMessageListener((message) => {
+    client.setMessageListener((message) => {
       const cmd = message?.cmd || "unknown";
       if (cmd.includes("war_getbattlefieldinfo")) {
         console.log(message.rawData);
@@ -812,16 +888,18 @@ const fetchBattleRecords1 = async (getbattlefield) => {
         resizeAndRedraw(legionWarMapDom.value);
       }
     });
-    legionWarWebSocket.onDisconnect = (event) => {
+    client.onDisconnect = (event) => {
+      if (legionWarWebSocket === client) isEntireBattlefield.value = false;
       console.log(event);
     };
 
-    legionWarWebSocket.onError = (error) => {
+    client.onError = (error) => {
+      if (legionWarWebSocket === client) isEntireBattlefield.value = false;
       console.log(error);
     };
 
     // 11. 初始化连接
-    legionWarWebSocket.init();
+    client.init();
   }
 };
 
@@ -835,12 +913,12 @@ const getBattlefieldInfo = async () => {
     });
     currentDateTime.value = getCurrentTimeByFormat("");
   } else {
-    message.error("暂未进入战场,请稍后");
+    connectWebSocket();
   }
 };
 
 onMounted(() => {
-  fetchBattleRecords1();
+  connectWebSocket();
   const canvas = legionWarMapDom.value;
   ctx = canvas.getContext("2d");
 
@@ -868,6 +946,9 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  pageAbort.abort();
+  if (battlefieldTimer !== null) clearTimeout(battlefieldTimer);
+  legionWarWebSocket?.disconnect();
   window.removeEventListener("resize", resizeHandler);
 });
 </script>

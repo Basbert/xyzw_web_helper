@@ -49,7 +49,11 @@
       <div class="ws-status-card">
         <div class="status-header">
           <h3>连接状态</h3>
-          <n-button text @click="toggleConnection">
+          <n-button
+            text
+            :disabled="connectionStatus === 'connecting'"
+            @click="toggleConnection"
+          >
             {{ isConnected ? "断开连接" : "重新连接" }}
           </n-button>
         </div>
@@ -86,17 +90,23 @@ const tokenStore = useTokenStore();
 // 响应式数据
 const showFeedback = ref(true);
 const lastActivity = ref(null);
+const connectingAccount = ref(null);
+let connectionAttempt = 0;
+let pageUnmounted = false;
 
 // 计算属性
 const connectionStatus = computed(() => {
   if (!tokenStore.selectedToken) return "disconnected";
-  const status = tokenStore.getWebSocketStatus(tokenStore.selectedToken.id);
+  const tokenId = tokenStore.selectedToken.id;
+  const status = tokenStore.getWebSocketStatus(tokenId);
+  if (status !== "connected" && connectingAccount.value?.tokenId === tokenId)
+    return "connecting";
   return ["connected", "connecting"].includes(status) ? status : "disconnected";
 });
 
 const connectionStatusText = computed(() => {
   if (!tokenStore.selectedToken) return "未选择Token";
-  const status = tokenStore.getWebSocketStatus(tokenStore.selectedToken.id);
+  const status = connectionStatus.value;
   return status === "connected"
     ? "已连接"
     : status === "connecting"
@@ -117,8 +127,13 @@ const isConnected = computed(() => {
 const recoveryNote = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
   const state = tokenId && tokenStore.connectionRecoveryStatus?.[tokenId];
-  if (state === "waiting")
-    return "连接中断，正在自动尝试重连。切到后台时浏览器可能暂停页面或延迟重连。";
+  if (state === "waiting") {
+    if (connectionStatus.value === "connecting")
+      return "正在重新连接助手，请稍候。";
+    if (tokenStore.isConnectionActiveInAnotherTab(tokenId))
+      return "该账号可能仍在另一个助手标签页连接；关闭那个页面后会自动重试。";
+    return "暂未连接，正在自动重试。切到后台时浏览器可能暂停页面或延迟重连。";
+  }
   if (state === "restored")
     return "连接已恢复，请先核对中断任务的状态和游戏内结果，再决定是否继续。";
   return "";
@@ -128,32 +143,58 @@ const recoveryNote = computed(() => {
 
 // 已移除 sendWebSocketMessage，使用 tokenStore.sendMessage 代替
 
-const connectWebSocket = () => {
+const connectWebSocket = async () => {
   if (!tokenStore.selectedToken) {
     message.warning("请先选择一个Token");
     router.push("/tokens");
     return;
   }
 
-  try {
-    const tokenId = tokenStore.selectedToken.id;
-    const token = tokenStore.selectedToken.token;
+  const selected = tokenStore.selectedToken;
+  const tokenId = selected.id;
+  const status = tokenStore.getWebSocketStatus(tokenId);
+  if (
+    ["connected", "connecting"].includes(status) ||
+    connectingAccount.value?.tokenId === tokenId
+  )
+    return;
+  const attempt = ++connectionAttempt;
+  connectingAccount.value = { tokenId, attempt };
+  const isCurrentAttempt = () =>
+    !pageUnmounted &&
+    attempt === connectionAttempt &&
+    tokenStore.selectedToken?.id === tokenId;
 
-    // 使用 tokenStore 的 WebSocket 连接管理
-    tokenStore.createWebSocketConnection(
+  try {
+    const client = await tokenStore.createWebSocketConnection(
       tokenId,
-      token,
-      tokenStore.selectedToken.wsUrl,
+      selected.token,
+      selected.wsUrl,
     );
-    message.info("正在建立 WebSocket 连接...");
+    if (!isCurrentAttempt()) return;
+    const currentStatus = tokenStore.getWebSocketStatus(tokenId);
+    if (!client && !["connected", "connecting"].includes(currentStatus)) {
+      message.warning(
+        tokenStore.isConnectionActiveInAnotherTab(tokenId)
+          ? "该账号可能已在另一个助手页面连接，关闭那个页面后会自动重试"
+          : "暂时无法建立助手连接，请检查网络或账号状态",
+      );
+    }
   } catch (error) {
-    console.error("WebSocket连接失败:", error);
-    message.error("WebSocket连接失败");
+    if (isCurrentAttempt()) {
+      console.error("WebSocket连接失败:", error);
+      message.error("助手连接未能建立，请稍后重试");
+    }
+  } finally {
+    if (connectingAccount.value?.attempt === attempt)
+      connectingAccount.value = null;
   }
 };
 
 const disconnectWebSocket = () => {
   if (tokenStore.selectedToken) {
+    connectionAttempt++;
+    connectingAccount.value = null;
     const tokenId = tokenStore.selectedToken.id;
     tokenStore.closeWebSocketConnection(tokenId);
     message.info("WebSocket连接已断开");
@@ -163,7 +204,7 @@ const disconnectWebSocket = () => {
 const toggleConnection = () => {
   if (connectionStatus.value === "connected") {
     disconnectWebSocket();
-  } else {
+  } else if (connectionStatus.value !== "connecting") {
     connectWebSocket();
   }
 };
@@ -172,6 +213,7 @@ const toggleConnection = () => {
 
 // 生命周期
 onMounted(() => {
+  tokenStore.initConnectionCoordination();
   // 检查是否需要连接 WebSocket
   if (tokenStore.selectedToken) {
     const status = tokenStore.getWebSocketStatus(tokenStore.selectedToken.id);
@@ -183,6 +225,15 @@ onMounted(() => {
     }
   }
 });
+
+watch(
+  () => tokenStore.selectedToken?.id,
+  () => {
+    connectionAttempt++;
+    connectingAccount.value = null;
+  },
+  { flush: "sync" },
+);
 
 watch(
   [() => tokenStore.selectedToken?.id, connectionStatus],
@@ -258,7 +309,8 @@ const initializeGameData = async ({ readOnly = false } = {}) => {
 };
 
 onUnmounted(() => {
-  // WebSocket 连接由 tokenStore 管理，不需要手动清理
+  pageUnmounted = true;
+  connectionAttempt++;
 });
 </script>
 
