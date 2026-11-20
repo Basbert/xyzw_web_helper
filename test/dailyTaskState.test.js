@@ -18,6 +18,22 @@ function officialConfig() {
     WeekLimitConf: { 1: { id: 1, limit: 100 }, 2: { id: 2, limit: 200 } },
   };
 }
+function officialBundle() {
+  const uuids = Array.from({ length: 10 }, () => null);
+  uuids[9] = "7cuVHMuxpM/41XwmFGubmZ";
+  return {
+    name: "config",
+    paths: { 9: ["config", 0] },
+    types: ["cc.JsonAsset"],
+    uuids,
+    versions: { import: [9, "1c043"] },
+  };
+}
+function officialAsset(config = officialConfig()) {
+  return [null, null, null, null, null, [[0, "config", config]]];
+}
+const assetUrl =
+  "https://xxz-xyzw-res.hortorgames.com/remote/config/import/7c/7cb951cc-bb1a-4cff-8d57-c26146b9b999.1c043.json";
 function role(complete = {}) {
   return { dailyTask: { dailyTime: 1700000000, complete } };
 }
@@ -120,17 +136,159 @@ test("config version is verified each run while immutable configuration requests
       return { dataBundleVer: "test-config-merge" };
     },
   };
-  const fetchConfig = async () => {
+  const fetchConfig = async (url) => {
     reads++;
-    return { ok: true, json: async () => officialConfig() };
+    return {
+      ok: true,
+      json: async () => (url === assetUrl ? officialAsset() : officialBundle()),
+    };
   };
   const [a, b] = await Promise.all([
     loadDailyTaskConfig(store, "a", fetchConfig),
     loadDailyTaskConfig(store, "b", fetchConfig),
   ]);
   assert.equal(a, b);
-  assert.equal(reads, 1);
+  assert.equal(reads, 2);
   assert.equal(versions, 2);
+});
+
+test("使用账号服务器的数据版本，解析官方配置包和资源哈希", async () => {
+  const requests = [];
+  const commands = [];
+  const store = {
+    async sendMessageWithPromise(id, cmd) {
+      commands.push([id, cmd]);
+      return { dataBundleVer: "152261a3c8" };
+    },
+  };
+  const fetchConfig = async (url) => {
+    requests.push(url);
+    return {
+      ok: true,
+      json: async () => (url === assetUrl ? officialAsset() : officialBundle()),
+    };
+  };
+  const config = await loadDailyTaskConfig(store, "account", fetchConfig);
+  assert.deepEqual(commands, [["account", "system_getdatabundlever"]]);
+  assert.deepEqual(requests, [
+    "https://xxz-xyzw-res.hortorgames.com/remote/config/config.152261a3c8.json",
+    assetUrl,
+  ]);
+  assert.equal(config.tasks[0].completeValue, 3);
+  assert.equal(config.dailyRewards[1].limit, 40);
+});
+
+test("版本化配置包不存在时，只能回退到同一版本的旧地址", async () => {
+  const requests = [];
+  const version = "legacy-version-404";
+  const config = await loadDailyTaskConfig(
+    { sendMessageWithPromise: async () => ({ dataBundleVer: version }) },
+    "account",
+    async (url) => {
+      requests.push(url);
+      if (url.includes("/remote/config/config."))
+        return { ok: false, status: 404 };
+      return { ok: true, json: async () => officialConfig() };
+    },
+  );
+  assert.equal(config.tasks.length, 3);
+  assert.deepEqual(requests, [
+    `https://xxz-xyzw-res.hortorgames.com/remote/config/config.${version}.json`,
+    `https://xxz-xyzw-res.hortorgames.com/data/${version}/config.json`,
+  ]);
+});
+
+test("配置包或任务表无法确认时停止，不使用其他版本", async () => {
+  for (const problem of [
+    "bundle",
+    "type",
+    "asset",
+    "asset-format",
+    "invalid-json",
+    "task-table",
+    "http",
+  ]) {
+    const requests = [];
+    const bundle = officialBundle();
+    if (problem === "bundle") bundle.versions.import = [];
+    if (problem === "type") bundle.types = ["cc.BufferAsset"];
+    const config = officialConfig();
+    if (problem === "task-table") delete config.DailyTaskConf;
+    await assert.rejects(
+      loadDailyTaskConfig(
+        {
+          sendMessageWithPromise: async () => ({
+            dataBundleVer: `invalid-official-${problem}`,
+          }),
+        },
+        "account",
+        async (url) => {
+          requests.push(url);
+          if (problem === "http") return { ok: false, status: 404 };
+          if (url === assetUrl) {
+            if (problem === "asset") return { ok: false, status: 503 };
+            return {
+              ok: true,
+              json: async () => {
+                if (problem === "invalid-json") throw new SyntaxError("bad");
+                const asset = officialAsset(config);
+                if (problem === "asset-format") asset[5][0][1] = "other";
+                return asset;
+              },
+            };
+          }
+          return { ok: true, json: async () => bundle };
+        },
+      ),
+      /无效|读取失败/,
+      problem,
+    );
+    assert.ok(
+      requests.every((url) => !url.includes("78fbc")),
+      problem,
+    );
+    if (["bundle", "type"].includes(problem)) assert.equal(requests.length, 1);
+    if (problem === "asset") assert.equal(requests.length, 2);
+  }
+});
+
+test("配置文件超时会提示重试且不使用缓存的错误结果", async () => {
+  const store = {
+    sendMessageWithPromise: async () => ({
+      dataBundleVer: "timeout-config-retry",
+    }),
+  };
+  await assert.rejects(
+    loadDailyTaskConfig(store, "account", async () => {
+      const error = new Error("timeout");
+      error.name = "TimeoutError";
+      throw error;
+    }),
+    /请求超时/,
+  );
+  const config = await loadDailyTaskConfig(store, "account", async (url) => ({
+    ok: true,
+    json: async () => (url === assetUrl ? officialAsset() : officialBundle()),
+  }));
+  assert.equal(config.tasks.length, 3);
+});
+
+test("两种配置地址均不可用时提示各自的 HTTP 状态", async () => {
+  await assert.rejects(
+    loadDailyTaskConfig(
+      {
+        sendMessageWithPromise: async () => ({
+          dataBundleVer: "both-sources-unavailable",
+        }),
+      },
+      "account",
+      async (url) => ({
+        ok: false,
+        status: url.includes("/remote/config/") ? 404 : 503,
+      }),
+    ),
+    /配置包 HTTP 404，旧地址 HTTP 503/,
+  );
 });
 
 test("failed config reads can be retried and unsafe versions are rejected", async () => {
@@ -140,10 +298,10 @@ test("failed config reads can be retried and unsafe versions are rejected", asyn
       return { dataBundleVer: "test-config-retry" };
     },
   };
-  const fetchConfig = async () => ({
-    ok: ++attempt > 1,
-    json: async () => officialConfig(),
-  });
+  const fetchConfig = async (url) =>
+    url.includes("/remote/config/config.")
+      ? { ok: false, status: 404 }
+      : { ok: ++attempt > 1, status: 404, json: async () => officialConfig() };
   await assert.rejects(
     loadDailyTaskConfig(store, "a", fetchConfig),
     /读取失败/,
@@ -189,10 +347,13 @@ test("an evicted failed config request cannot remove a newer cached request for 
         rejectFirst = reject;
       });
     }
-    return { ok: true, json: async () => officialConfig() };
+    return {
+      ok: true,
+      json: async () => (url === assetUrl ? officialAsset() : officialBundle()),
+    };
   };
   const first = loadDailyTaskConfig(store, "cache-race-a", fetchConfig);
-  const rejected = assert.rejects(first, /first request failed/);
+  const rejected = assert.rejects(first, /网络异常/);
   await started;
   await loadDailyTaskConfig(store, "cache-race-b", fetchConfig);
   await loadDailyTaskConfig(store, "cache-race-a", fetchConfig);

@@ -2,6 +2,11 @@ import { readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import {
+  CONFIG_BUNDLE_BASE,
+  getAssetInfo,
+  unpackAsset,
+} from "../src/utils/cocosConfigBundle.js";
 import { HERO_DICT } from "../src/utils/HeroList.js";
 import { TOWER_MANIFEST_URL } from "../src/utils/towerEnemyLineups.js";
 
@@ -15,7 +20,7 @@ if (args.length && (args.length !== 2 || args[0] !== "--offline-dir")) {
   );
 }
 const offlineDir = args[1];
-const base = "https://xxz-xyzw-res.hortorgames.com/remote/config/";
+const base = CONFIG_BUNDLE_BASE;
 
 async function getJson(url, name, options = {}) {
   if (offlineDir)
@@ -27,50 +32,6 @@ async function getJson(url, name, options = {}) {
 
 function asObject(value) {
   return typeof value === "string" ? JSON.parse(value) : value;
-}
-
-// Cocos Creator stores asset UUIDs in this compact form in its bundle manifest.
-function decodeUuid(value) {
-  if (typeof value !== "string" || value.length !== 22)
-    throw new Error("Unexpected Cocos asset UUID");
-  const chars =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  let hex = value.slice(0, 2);
-  for (let i = 2; i < value.length; i += 2) {
-    const first = chars.indexOf(value[i]);
-    const second = chars.indexOf(value[i + 1]);
-    if (first < 0 || second < 0) throw new Error("Invalid Cocos asset UUID");
-    hex += (first >> 2).toString(16);
-    hex += (((first & 3) << 2) | (second >> 4)).toString(16);
-    hex += (second & 15).toString(16);
-  }
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-
-function getAssetInfo(bundle, name) {
-  const entry = Object.entries(bundle?.paths || {}).find(
-    ([, path]) => path?.[0] === name,
-  );
-  if (!entry) throw new Error(`Missing ${name} in official config bundle`);
-  const index = Number(entry[0]);
-  const uuid = decodeUuid(bundle.uuids?.[index]);
-  const versions = bundle.versions?.import || [];
-  let version = null;
-  for (let i = 0; i < versions.length; i += 2)
-    if (versions[i] === index) version = versions[i + 1];
-  if (typeof version !== "string" || !/^[a-z\d]+$/i.test(version))
-    throw new Error(`Missing ${name} asset version`);
-  return {
-    version,
-    url: `${base}import/${uuid.slice(0, 2)}/${uuid}.${version}.json`,
-  };
-}
-
-function unpackAsset(asset, name) {
-  const payload = asset?.[5]?.[0];
-  if (payload?.[1] !== name || !payload?.[2] || typeof payload[2] !== "object")
-    throw new Error(`Unexpected ${name} asset format`);
-  return payload[2];
 }
 
 const manifest = await getJson(TOWER_MANIFEST_URL, "manifest", {

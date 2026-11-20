@@ -1,3 +1,9 @@
+import {
+  CONFIG_BUNDLE_BASE,
+  getAssetInfo,
+  unpackAsset,
+} from "./cocosConfigBundle.js";
+
 const configsByVersion = new Map();
 const activeTokenRuns = new Set();
 
@@ -169,17 +175,68 @@ export async function loadDailyTaskConfig(
     15000,
   );
   const version = response?.dataBundleVer;
-  if (typeof version !== "string" || !/^[\w-]+$/.test(version))
+  if (typeof version !== "string" || !/^[\w-]{1,128}$/.test(version))
     throw new Error("服务器未提供有效的任务配置版本");
   if (!configsByVersion.has(version)) {
     const loading = (async () => {
-      const response = await fetchConfig(
-        `https://xxz-xyzw-res.hortorgames.com/data/${version}/config.json`,
-        { signal: AbortSignal.timeout(30000) },
+      const fetchOfficial = async (url, label) => {
+        try {
+          return await fetchConfig(url, { signal: AbortSignal.timeout(30000) });
+        } catch (error) {
+          const reason =
+            error?.name === "AbortError" || error?.name === "TimeoutError"
+              ? "请求超时"
+              : "网络异常";
+          throw new Error(`官方任务配置读取失败（${label}：${reason}）`, {
+            cause: error,
+          });
+        }
+      };
+      const statusText = (result) =>
+        Number.isInteger(result?.status) && result.status >= 100
+          ? `HTTP ${result.status}`
+          : "响应异常";
+      const readJson = async (result, label) => {
+        try {
+          return await result.json();
+        } catch (error) {
+          throw new Error(`官方任务配置读取失败（${label}不是有效的 JSON）`, {
+            cause: error,
+          });
+        }
+      };
+
+      // The game publishes a Cocos bundle for the exact data version
+      // returned by the account's server. Its asset hash changes separately.
+      const bundleResponse = await fetchOfficial(
+        `${CONFIG_BUNDLE_BASE}config.${version}.json`,
+        "配置包",
       );
-      if (!response.ok) throw new Error("官方任务配置读取失败");
-      const config = await response.json();
-      return validateDailyTaskConfig(config);
+      if (!bundleResponse.ok) {
+        // Some older versions expose a direct JSON file instead. Never fall
+        // back to a different version, which could repeat or miss tasks.
+        const legacyResponse = await fetchOfficial(
+          `https://xxz-xyzw-res.hortorgames.com/data/${version}/config.json`,
+          "旧配置地址",
+        );
+        if (!legacyResponse.ok)
+          throw new Error(
+            `官方任务配置读取失败（配置包 ${statusText(bundleResponse)}，旧地址 ${statusText(legacyResponse)}）`,
+          );
+        return validateDailyTaskConfig(
+          await readJson(legacyResponse, "旧配置"),
+        );
+      }
+      const bundle = await readJson(bundleResponse, "配置包");
+      const asset = getAssetInfo(bundle, "config");
+      const assetResponse = await fetchOfficial(asset.url, "任务配置资源");
+      if (!assetResponse.ok)
+        throw new Error(
+          `官方任务配置读取失败（任务配置资源 ${statusText(assetResponse)}）`,
+        );
+      return validateDailyTaskConfig(
+        unpackAsset(await readJson(assetResponse, "任务配置资源"), "config"),
+      );
     })();
     configsByVersion.set(version, loading);
     loading.catch(() => {
