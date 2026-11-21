@@ -43,8 +43,21 @@ const { createTasksItem } = await loadModule(
 const { createTasksHangUp } = await loadModule(
   new URL("../src/utils/batch/tasksHangUp.js", import.meta.url),
   {
-    "@/utils/dailyTaskState": dailyState,
-    "@/utils/studyQuestionsFromJSON.js": { preloadQuestions: async () => {} },
+    "@/utils/dailyTaskState": {
+      ...dailyState,
+      loadDailyTaskConfig: async () => ({ weeklyQuiz: {} }),
+    },
+    "../weeklyQuiz.js": {
+      runWeeklyQuiz: async ({ tokenStore, tokenId, check, loadConfig }) => {
+        check();
+        await loadConfig();
+        tokenStore.getAccountGameData(tokenId).value.visitedQuiz = true;
+        return {
+          status: tokenId === "alpha" ? "completed" : "pending",
+          message: "answered",
+        };
+      },
+    },
     "./connectionManager.js": connectionManager,
   },
   { setTimeout: immediateSetTimeout },
@@ -66,8 +79,8 @@ function createFixture(overrides = {}) {
   let releases = 0;
   const statuses = { value: {} };
   const accountData = {
-    alpha: { value: { studyStatus: {} } },
-    beta: { value: { studyStatus: {} } },
+    alpha: { value: {} },
+    beta: { value: {} },
   };
   const tokens = overrides.tokens || [
     { id: "alpha", name: "Alpha" },
@@ -81,7 +94,7 @@ function createFixture(overrides = {}) {
     wsConnections: Object.fromEntries(
       tokens.map(({ id }) => [id, { client: clients[id] }]),
     ),
-    gameData: { studyStatus: { isRunning: false, isCompleted: false } },
+    gameData: {},
     getWebSocketStatus: () => "connected",
     getAccountGameData: (id) => accountData[id],
     async sendMessage(id, cmd, params) {
@@ -135,7 +148,7 @@ function createFixture(overrides = {}) {
     addLog(entry) {
       logs.push(entry);
     },
-    message: { success() {}, warning() {}, error() {} },
+    message: { info() {}, success() {}, warning() {}, error() {} },
     currentRunningTokenId: { value: null },
     delayConfig: { battle: 0, action: 0 },
     loadSettings: () => ({}),
@@ -241,32 +254,15 @@ test("tasksItem keeps pre-existing connections and marks interrupted runs stoppe
   assert.equal(interrupted.getReleases(), 0);
 });
 
-test("tasksHangUp batchStudy isolates per-account studyStatus and preserves existing connections", async () => {
-  const fixture = createFixture({
-    onSend: async (id, cmd) => {
-      if (cmd === "study_startgame") {
-        fixture.accountData[id].value.studyStatus = {
-          isAnswering: false,
-          questionCount: 10,
-          answeredCount: id === "alpha" ? 10 : 8,
-          status: "completed",
-          timestamp: Date.now(),
-        };
-      }
-      return {};
-    },
-  });
-
+test("tasksHangUp batchStudy visits each account and preserves existing connections", async () => {
+  const fixture = createFixture();
   await createTasksHangUp(fixture.deps).batchStudy();
 
   assert.equal(fixture.statuses.value.alpha, "completed");
-  assert.equal(fixture.statuses.value.beta, "completed");
-  assert.equal(fixture.accountData.alpha.value.studyStatus.answeredCount, 10);
-  assert.equal(fixture.accountData.beta.value.studyStatus.answeredCount, 8);
-  assert.equal(
-    fixture.deps.tokenStore.gameData.studyStatus.answeredCount,
-    undefined,
-  );
+  assert.equal(fixture.statuses.value.beta, "pending");
+  assert.equal(fixture.accountData.alpha.value.visitedQuiz, true);
+  assert.equal(fixture.accountData.beta.value.visitedQuiz, true);
+  assert.equal(fixture.deps.tokenStore.gameData.visitedQuiz, undefined);
   assert.deepEqual(fixture.closed, ["alpha"]);
   assert.equal(fixture.getReleases(), 1);
 });

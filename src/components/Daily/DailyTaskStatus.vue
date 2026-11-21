@@ -199,6 +199,14 @@
                 aria-label="领取邮件奖励"
               />
             </div>
+
+            <div class="switch-row">
+              <span class="switch-label">咸鱼大冲关（每周答题）</span>
+              <n-switch
+                v-model:value="settings.weeklyQuizEnabled"
+                aria-label="咸鱼大冲关（每周答题）"
+              />
+            </div>
           </div>
         </section>
 

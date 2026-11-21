@@ -243,7 +243,7 @@ src/
 │   ├── GameStatus.vue            # Real-time game status display
 │   ├── ThemeToggle.vue           # Dark/light theme toggle button
 │   ├── Daily/
-│   │   └── DailyTaskCard.vue     # Daily task visualization card
+│   │   └── DailyTaskStatus.vue   # Daily task controls and progress
 │   ├── Club/                     # Guild/club related components
 │   ├── Tower/                    # Tower climbing components
 │   ├── Team/                     # Team management components

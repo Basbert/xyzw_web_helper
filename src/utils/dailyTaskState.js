@@ -4,6 +4,8 @@ import {
   unpackAsset,
 } from "./cocosConfigBundle.js";
 
+import { readWeeklyQuizConfig } from "./weeklyQuiz.js";
+
 const configsByVersion = new Map();
 const activeTokenRuns = new Set();
 
@@ -290,10 +292,12 @@ export function validateDailyTaskConfig(config) {
   )
     throw new Error("官方每日任务配置无效，停止执行");
   const claimSeconds = config?.ConstantConf?.stayRewardTime;
+  const weeklyQuiz = readWeeklyQuizConfig(config);
   return {
     tasks,
     dailyRewards,
     weeklyRewards,
+    ...(weeklyQuiz ? { weeklyQuiz } : {}),
     ...(Number.isFinite(claimSeconds) && claimSeconds > 0
       ? { hangUpClaimInterval: claimSeconds * 1000 }
       : {}),

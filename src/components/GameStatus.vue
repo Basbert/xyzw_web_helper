@@ -849,8 +849,6 @@ const legionSignin = ref({
   clubName: "",
 });
 
-// 使用 tokenStore 中的答题状态（仍用于 badge 状态等场景，如果仅在子组件中使用也可移除）
-
 // 计算属性
 const roleInfo = computed(() => {
   return tokenStore.gameData?.roleInfo || null;
@@ -970,8 +968,6 @@ const ENABLE_LEGION_MATCH = false;
 const ENABLE_LEGION_SIGNIN_CARD = false;
 
 // 盐场战绩入口已移动至俱乐部信息模块
-
-// 学习答题逻辑已移动到 StudyChallengeCard 组件
 
 // 监听角色信息变化
 watch(

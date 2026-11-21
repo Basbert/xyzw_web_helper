@@ -8,7 +8,6 @@ import { ChatPlugin } from "./chat.ts";
 import { HangupPlugin } from "./hangup.ts";
 import { LegionPlugin } from "./legion.ts";
 import { RolePlugin } from "./role.ts";
-import { StudyPlugin } from "./study.ts";
 import { TeamPlugin } from "./team.ts";
 import { TowerPlugin } from "./tower.ts";
 
@@ -67,8 +66,6 @@ ActivityPlugin(evmInst);
 RolePlugin(evmInst);
 
 TeamPlugin(evmInst);
-
-StudyPlugin(evmInst);
 
 TowerPlugin(evmInst);
 

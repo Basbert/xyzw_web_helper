@@ -140,13 +140,7 @@ export const useTokenStore = defineStore("tokens", () => {
     evoTowerInfo: null, //怪异塔
     presetTeam: null,
     battleVersion: null as number | null, // 战斗版本号
-    studyStatus: {
-      isAnswering: false,
-      questionCount: 0,
-      answeredCount: 0,
-      status: "", // '', 'starting', 'answering', 'claiming_rewards', 'completed'
-      timestamp: null,
-    },
+    weeklyQuizPhase: "",
     lastUpdated: null as string | null,
   });
   const accountGameData = createAccountGameData(

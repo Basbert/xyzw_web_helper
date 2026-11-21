@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { reactive } from "vue";
 import * as settingsHelpers from "../src/utils/dailyTaskSettings.js";
 import * as stateHelpers from "../src/utils/dailyTaskState.js";
+import * as weeklyQuiz from "../src/utils/weeklyQuiz.js";
 import { loadModule } from "./helpers/loadModule.js";
 
 const { DailyTaskRunner } = await loadModule(
@@ -10,6 +11,7 @@ const { DailyTaskRunner } = await loadModule(
   {
     "@/utils/dailyTaskState": stateHelpers,
     "@/utils/dailyTaskSettings": settingsHelpers,
+    "./weeklyQuiz.js": weeklyQuiz,
   },
 );
 const definitions = [
@@ -1190,4 +1192,46 @@ test("提醒存储故障不影响已完成的梦境购买", async () => {
     );
   assert.equal(result.failed, 0);
   assert.ok(messages.some((line) => line.includes("提醒状态未能保存")));
+});
+
+test("一键每日默认核对本周答题，关闭开关后跳过", async () => {
+  const f = fixture();
+  const day = Date.parse("2026-11-16T00:00:00+08:00") / 1000;
+  f.role.dailyTask.dailyTime = day;
+  f.role.study = {
+    beginTime: day + 60,
+    maxCorrectNum: 10,
+    taskComplete: { 1: "claimed" },
+  };
+  const account = { value: {} };
+  const client = f.store.wsConnections["account-a"].client;
+  f.store.getAccountGameData = () => account;
+  f.store.getWebSocketClient = () => client;
+
+  const runner = f.runner({
+    loadConfig: async () => ({
+      ...config,
+      weeklyQuiz: { target: 10, rewardIds: [1] },
+    }),
+  });
+  const log = [];
+  const callbacks = { onLog: ({ message }) => log.push(message) };
+  await runner.run("account-a", callbacks, settings);
+  assert.ok(
+    log.some((message) => message.includes("本周咸鱼大冲关已答满并领奖")),
+  );
+  assert.equal(
+    f.calls.some(({ cmd }) => cmd.startsWith("study_")),
+    false,
+  );
+
+  log.length = 0;
+  await runner.run("account-a", callbacks, {
+    ...settings,
+    weeklyQuizEnabled: false,
+  });
+  assert.equal(
+    log.some((message) => message.includes("咸鱼大冲关")),
+    false,
+  );
 });

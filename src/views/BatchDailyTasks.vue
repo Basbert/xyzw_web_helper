@@ -1206,6 +1206,7 @@ const currentSettings = reactive({
   claimEmail: true,
   blackMarketPurchase: true,
   dreamShopPurchase: true,
+  weeklyQuizEnabled: true,
 });
 
 // Task Template State

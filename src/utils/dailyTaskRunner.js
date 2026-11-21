@@ -10,6 +10,8 @@ import {
   runWithDailyTaskLock,
 } from "@/utils/dailyTaskState";
 
+import { runWeeklyQuiz } from "./weeklyQuiz.js";
+
 const taskLabels = {
   1: "登录游戏",
   2: "分享游戏",
@@ -1026,6 +1028,35 @@ export class DailyTaskRunner {
           "领取通行证奖励",
         ),
     });
+
+    if (settings.weeklyQuizEnabled !== false && roleData.study) {
+      taskList.push({
+        name: "咸鱼大冲关",
+        execute: async () => {
+          const quiz = await runWeeklyQuiz({
+            tokenStore: this.tokenStore,
+            tokenId,
+            loadConfig: () => this.taskConfig.weeklyQuiz,
+            readRole: () => this.refreshServerRole(tokenId),
+            check: () => {
+              this.throwIfInterrupted(tokenId);
+              if (this.getRunConnection(tokenId) !== this.initialConnection) {
+                const error = new Error("原连接已变化，停止执行咸鱼大冲关");
+                error.interrupted = true;
+                throw error;
+              }
+            },
+            daily: true,
+            sleep: this.sleep,
+          });
+          this.log(
+            quiz.message,
+            quiz.status === "pending" ? "warning" : "info",
+          );
+          return quiz.status !== "pending";
+        },
+      });
+    }
 
     const summary = { completed: 0, skipped: 0, failed: 0, deferred: 0 };
     let supplementalIncomplete = 0;

@@ -100,7 +100,7 @@ src/
 ├── 📱 views/               # 主要页面
 │   ├── TokenImport.vue    # Token导入管理
 │   ├── Dashboard.vue      # 主控制台
-│   ├── DailyTasks.vue     # 日常任务
+│   ├── BatchDailyTasks.vue # 批量日常与浏览器定时
 │   ├── GameFeatures.vue   # 游戏功能
 │   └── Profile.vue        # 用户设置
 │
@@ -108,7 +108,7 @@ src/
     ├── TokenManager.vue   # Token管理器
     ├── ThemeToggle.vue    # 主题切换按钮
     ├── GameStatus.vue     # 游戏状态组件
-    ├── DailyTaskCard.vue  # 任务卡片
+    ├── Daily/DailyTaskStatus.vue  # 日常任务入口
     ├── MessageTester.vue  # 消息测试器
     └── WebSocketTester.vue # WebSocket调试器
 ```

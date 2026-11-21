@@ -2,7 +2,12 @@
  * 挂机、答题、签到类任务
  * 包含: claimHangUpRewards, batchAddHangUpTime, batchStudy, batchclubsign
  */
-import { fillHangUpTime, runWithDailyTaskLock } from "@/utils/dailyTaskState";
+import {
+  fillHangUpTime,
+  loadDailyTaskConfig,
+  runWithDailyTaskLock,
+} from "@/utils/dailyTaskState";
+import { runWeeklyQuiz } from "../weeklyQuiz.js";
 import { withManagedConnection } from "./connectionManager.js";
 
 /**
@@ -123,164 +128,77 @@ export function createTasksHangUp(deps) {
   /** Refill help slots without claiming rewards or trusting local task progress. */
   const batchAddHangUpTime = () => runHangUpTasks(false);
 
-  /**
-   * 一键答题
-   */
+  /** Run or claim the weekly quiz for each selected account. */
   const batchStudy = async () => {
-    if (isRunning.value) return;
-    if (selectedTokens.value.length === 0) return;
-
+    if (isRunning.value || selectedTokens.value.length === 0) return;
     isRunning.value = true;
     shouldStop.value = false;
+    const accountIds = [...selectedTokens.value];
 
-    selectedTokens.value.forEach((id) => {
-      tokenStatus.value[id] = "waiting";
-    });
+    const logQuiz = (text, type) =>
+      addLog({ time: new Date().toLocaleTimeString(), message: text, type });
 
-    // Preload questions
-    const { preloadQuestions } =
-      await import("@/utils/studyQuestionsFromJSON.js");
-    addLog({
-      time: new Date().toLocaleTimeString(),
-      message: `正在加载题库...`,
-      type: "info",
-    });
-    await preloadQuestions();
+    try {
+      for (const tokenId of accountIds) tokenStatus.value[tokenId] = "waiting";
+      await Promise.all(
+        accountIds.map(async (tokenId) => {
+          if (shouldStop.value) {
+            tokenStatus.value[tokenId] = "stopped";
+            return;
+          }
 
-    const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) {
-        tokenStatus.value[tokenId] = "stopped";
-        return;
-      }
-
-      tokenStatus.value[tokenId] = "running";
-
-      const token = tokens.value.find((t) => t.id === tokenId);
-      if (!token) {
-        tokenStatus.value[tokenId] = "failed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `账号已不存在，跳过答题`,
-          type: "error",
-        });
-        return;
-      }
-
-      try {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== 开始答题: ${token.name} ===`,
-          type: "info",
-        });
-
-        await withManagedConnection(
-          {
-            tokenId,
-            tokenName: token.name,
-            ensureConnection,
-            releaseConnectionSlot,
-            connectionQueue,
-            batchSettings,
-            tokenStore,
-            shouldStop,
-            addLog,
-            logOnClose: true,
-          },
-          async ({ check }) => {
-            const getAccountStudyTarget = () =>
-              tokenStore.getAccountGameData
-                ? tokenStore.getAccountGameData(tokenId).value
-                : tokenStore.gameData;
-
-            const accountData = getAccountStudyTarget();
-            // Reset only this account's study status to prevent cross-account interference
-            accountData.studyStatus = {
-              isAnswering: false,
-              questionCount: 0,
-              answeredCount: 0,
-              status: "",
-              timestamp: null,
-            };
-
-            // Send start command
-            await tokenStore.sendMessageWithPromise(
-              tokenId,
-              "study_startgame",
-              {},
-              5000,
+          const token = tokens.value.find((item) => item.id === tokenId);
+          if (!token) {
+            tokenStatus.value[tokenId] = "failed";
+            logQuiz("账号已不存在，跳过答题", "error");
+            return;
+          }
+          tokenStatus.value[tokenId] = "running";
+          try {
+            const quiz = await withManagedConnection(
+              {
+                tokenId,
+                tokenName: token.name,
+                ensureConnection,
+                releaseConnectionSlot,
+                connectionQueue,
+                batchSettings,
+                tokenStore,
+                shouldStop,
+                addLog,
+                logOnClose: true,
+              },
+              ({ check }) =>
+                runWeeklyQuiz({
+                  tokenStore,
+                  tokenId,
+                  check,
+                  loadConfig: async () =>
+                    (await loadDailyTaskConfig(tokenStore, tokenId)).weeklyQuiz,
+                }),
             );
-            check();
-
-            // Wait for completion
-            let maxWait = 90;
-            let completed = false;
-            let lastStatus = "";
-
-            while (maxWait > 0) {
-              check();
-              const status = getAccountStudyTarget().studyStatus || {};
-
-              if (status.status !== lastStatus) {
-                lastStatus = status.status;
-                if (status.status === "answering") {
-                  addLog({
-                    time: new Date().toLocaleTimeString(),
-                    message: `${token.name} 开始答题...`,
-                    type: "info",
-                  });
-                } else if (status.status === "claiming_rewards") {
-                  addLog({
-                    time: new Date().toLocaleTimeString(),
-                    message: `${token.name} 领取奖励...`,
-                    type: "info",
-                  });
-                }
-              }
-
-              if (status.status === "completed") {
-                completed = true;
-                break;
-              }
-
-              await new Promise((r) => setTimeout(r, 1000));
-              maxWait--;
-            }
-
-            if (completed) {
-              tokenStatus.value[tokenId] = "completed";
-              addLog({
-                time: new Date().toLocaleTimeString(),
-                message: `=== ${token.name} 答题完成 ===`,
-                type: "success",
-              });
-            } else {
-              tokenStatus.value[tokenId] = "failed";
-              addLog({
-                time: new Date().toLocaleTimeString(),
-                message: `${token.name} 答题超时或未开始`,
-                type: "error",
-              });
-            }
-          },
-        );
-      } catch (error) {
-        console.error(error);
-        tokenStatus.value[tokenId] = error?.interrupted ? "stopped" : "failed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: error?.interrupted
-            ? `${token.name} 已停止`
-            : `答题失败: ${error.message}`,
-          type: error?.interrupted ? "warning" : "error",
-        });
-      }
-    });
-
-    await Promise.all(taskPromises);
-
-    isRunning.value = false;
-    currentRunningTokenId.value = null;
-    message.success("批量答题结束");
+            const pending = quiz.status === "pending";
+            tokenStatus.value[tokenId] = pending ? "pending" : "completed";
+            logQuiz(
+              `${token.name} · ${quiz.message}`,
+              pending ? "warning" : "info",
+            );
+          } catch (error) {
+            tokenStatus.value[tokenId] = error.interrupted
+              ? "stopped"
+              : "failed";
+            logQuiz(
+              `${token.name} · ${error.message}`,
+              error.interrupted ? "warning" : "error",
+            );
+          }
+        }),
+      );
+    } finally {
+      isRunning.value = false;
+      currentRunningTokenId.value = null;
+    }
+    message.info("批量答题检查结束，请查看各角色结果");
   };
 
   /**

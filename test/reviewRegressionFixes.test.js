@@ -977,6 +977,7 @@ test("Fix #7: WeirdTowerStatus runs follow-up items and merge after timeout or m
     timeouts.length = 0;
     const cmds = [];
     const fightGate = createDeferred();
+    const fightEntered = createDeferred();
     const tokenStore = vue.reactive({
       selectedToken: { id: "A", name: "A" },
       wsConnections: { A: { status: "connected", client: { id: "cA" } } },
@@ -1003,6 +1004,7 @@ test("Fix #7: WeirdTowerStatus runs follow-up items and merge after timeout or m
           return { mergeBox: { boxNum: 0 } };
         }
         if (cmd === "evotower_readyfight") {
+          fightEntered.resolve();
           await fightGate.promise;
           return { evoTower: { id: 10, energy: 2 } };
         }
@@ -1037,19 +1039,21 @@ test("Fix #7: WeirdTowerStatus runs follow-up items and merge after timeout or m
         },
       },
       {
+        Date: createFixedDate("2025-12-13T12:00:00Z"),
         setTimeout: fakeSetTimeout,
         clearTimeout: fakeClearTimeout,
       },
     );
-    return { bindings, cmds, fightGate, cleanup };
+    return { bindings, cmds, fightGate, fightEntered, cleanup };
   };
 
   // Timeout path -> executes follow-ups
   {
-    const { bindings, cmds, fightGate, cleanup } = await makeTestEnv();
+    const { bindings, cmds, fightGate, fightEntered, cleanup } =
+      await makeTestEnv();
     try {
       const run = bindings.startTowerClimb();
-      await new Promise((r) => setTimeout(r, 15));
+      await Promise.race([fightEntered.promise, run]);
       assert.equal(timeouts.length, 1);
       timeouts[0].fn();
       fightGate.resolve();
@@ -1065,10 +1069,11 @@ test("Fix #7: WeirdTowerStatus runs follow-up items and merge after timeout or m
 
   // Manual stop stops fighting but still handles items and merging.
   {
-    const { bindings, cmds, fightGate, cleanup } = await makeTestEnv();
+    const { bindings, cmds, fightGate, fightEntered, cleanup } =
+      await makeTestEnv();
     try {
       const run = bindings.startTowerClimb();
-      await new Promise((r) => setTimeout(r, 15));
+      await Promise.race([fightEntered.promise, run]);
       bindings.stopClimbing();
       fightGate.resolve();
       await run;

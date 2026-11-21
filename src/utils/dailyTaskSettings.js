@@ -11,6 +11,7 @@ export const DAILY_TASK_DEFAULTS = Object.freeze({
   claimHangUp: true,
   claimLegacy: true,
   claimEmail: true,
+  weeklyQuizEnabled: true,
   blackMarketPurchase: true,
   dreamShopPurchase: true,
   commandDelay: 500,
@@ -46,6 +47,7 @@ export const SAFE_DAILY_TASK_DEFAULTS = Object.freeze({
   payRecruit: false,
   blackMarketPurchase: false,
   dreamShopPurchase: false,
+  weeklyQuizEnabled: false,
 });
 
 const executionDefaults = {

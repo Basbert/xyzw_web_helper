@@ -3,15 +3,12 @@ import { gameLogger } from "@/utils/logger";
 import { useTokenStore } from "../tokenStore";
 
 // 处理加钟/时钟相关事件，触发获取角色信息以更新状态
-export const RolePlugin = ({ onSome, $emit }: EVM) => {
+export const RolePlugin = ({ onSome }: EVM) => {
   onSome(["role_getroleinforesp", "role_getroleinfo"], (data: XyzwSession) => {
     gameLogger.verbose(`收到角色信息事件: ${data.tokenId}`);
     const { body, tokenId } = data;
     data.gameData.value.roleInfo = body;
     data.gameData.value.lastUpdated = new Date().toISOString();
-    if (body.role?.study?.maxCorrectNum !== undefined) {
-      $emit.emit("I-study", data);
-    }
 
     // 从角色信息中提取游戏名称和服务器信息，并更新到token列表
     const tokenStore = useTokenStore();

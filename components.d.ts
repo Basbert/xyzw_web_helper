@@ -37,7 +37,6 @@ declare module 'vue' {
     CompassCard: typeof import('./src/components/cards/CompassCard.vue')['default']
     ConsumptionProgressCard: typeof import('./src/components/cards/ConsumptionProgressCard.vue')['default']
     DailyActivityReminders: typeof import('./src/components/DailyActivityReminders.vue')['default']
-    DailyTaskCard: typeof import('./src/components/Daily/DailyTaskCard.vue')['default']
     DailyTaskStatus: typeof import('./src/components/Daily/DailyTaskStatus.vue')['default']
     DreamHelperCard: typeof import('./src/components/cards/DreamHelperCard.vue')['default']
     FightHelperCard: typeof import('./src/components/cards/FightHelperCard.vue')['default']

@@ -139,6 +139,13 @@ watch(
             <n-switch v-model:value="settingsDraft.claimEmail" />
           </div>
           <div class="switch-row">
+            <span class="switch-label">咸鱼大冲关（每周答题）</span>
+            <n-switch
+              v-model:value="settingsDraft.weeklyQuizEnabled"
+              aria-label="咸鱼大冲关（每周答题）"
+            />
+          </div>
+          <div class="switch-row">
             <span class="switch-label">黑市购买物品</span>
             <n-switch v-model:value="settingsDraft.blackMarketPurchase" />
           </div>
