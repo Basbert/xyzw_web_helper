@@ -10,6 +10,10 @@ import {
   runWithDailyTaskLock,
 } from "@/utils/dailyTaskState";
 
+import { trackAccountConnection } from "./accountConnection.js";
+import { normalizeRoleId } from "./accountIdentity.js";
+import { dailyArenaTask } from "./daily/arena.js";
+import { dailyDreamTasks } from "./daily/dream.js";
 import { runWeeklyQuiz } from "./weeklyQuiz.js";
 
 const taskLabels = {
@@ -24,44 +28,10 @@ const taskLabels = {
   13: "竞技场战斗",
   14: "收获盐罐",
 };
-// 辅助函数
-const pickArenaTargetId = (targets) => {
-  if (!targets) return null;
-
-  // Handle if targets is an array directly
-  if (Array.isArray(targets)) {
-    const candidate = targets[0];
-    return candidate?.roleId || candidate?.id || candidate?.targetId;
-  }
-
-  const candidate =
-    targets?.rankList?.[0] ||
-    targets?.roleList?.[0] ||
-    targets?.targets?.[0] ||
-    targets?.targetList?.[0] ||
-    targets?.list?.[0];
-
-  if (candidate) {
-    if (candidate.roleId) return candidate.roleId;
-    if (candidate.id) return candidate.id;
-    if (candidate.targetId) return candidate.targetId;
-  }
-
-  return targets?.roleId || targets?.id || targets?.targetId;
-};
-
 const getTodayBossId = (dailyTime) => {
   const DAY_BOSS_MAP = [9904, 9905, 9901, 9902, 9903, 9904, 9905]; // 周日~周六
   const dayOfWeek = new Date((dailyTime + 8 * 60 * 60) * 1000).getUTCDay();
   return DAY_BOSS_MAP[dayOfWeek];
-};
-
-const serverRoleIdentity = (value) => {
-  if (typeof value !== "string" && typeof value !== "number") return null;
-  if (typeof value === "number" && (!Number.isSafeInteger(value) || value <= 0))
-    return null;
-  const id = String(value).trim();
-  return id && id !== "0" ? id : null;
 };
 
 export class DailyTaskRunner {
@@ -93,33 +63,20 @@ export class DailyTaskRunner {
 
   /**
    * Send once; uncertain results stop this run and require a fresh server snapshot.
-   * @param {string} tokenId Account identity.
    * @param {Function} request Transport call without automatic retries.
    * @returns {Promise<*>} Server response.
    */
-  async sendRequest(tokenId, request) {
-    if (this.restoringFormation) this.assertRunConnection(tokenId);
-    else this.throwIfInterrupted(tokenId);
+  async sendRequest(request) {
+    if (this.restoringFormation) this.assertRunConnection();
+    else this.throwIfInterrupted();
     const response = await request();
-    if (this.restoringFormation) this.assertRunConnection(tokenId);
-    else this.throwIfInterrupted(tokenId);
+    if (this.restoringFormation) this.assertRunConnection();
+    else this.throwIfInterrupted();
     return response;
   }
 
-  getRunConnection(tokenId) {
-    return (
-      this.tokenStore.getWebSocketClient?.(tokenId) ??
-      this.tokenStore.wsConnections?.[tokenId]?.client ??
-      null
-    );
-  }
-
-  assertRunConnection(tokenId) {
-    if (
-      !this.initialConnection ||
-      this.getRunConnection(tokenId) !== this.initialConnection ||
-      this.tokenStore.getWebSocketStatus?.(tokenId) !== "connected"
-    )
+  assertRunConnection() {
+    if (!this.connection?.isIntact())
       throw new Error("原连接已变化，未恢复阵容，请在游戏中检查");
   }
 
@@ -133,7 +90,7 @@ export class DailyTaskRunner {
     try {
       if (description) this.log(`执行: ${description}`);
       this.roleStateDirty = true;
-      const result = await this.sendRequest(tokenId, () =>
+      const result = await this.sendRequest(() =>
         this.tokenStore.sendMessageWithPromise(tokenId, cmd, params, timeout),
       );
       await this.sleep(this.delaySettings.commandDelay);
@@ -207,11 +164,11 @@ export class DailyTaskRunner {
     }
   }
 
-  loadSettings(roleId) {
+  loadSettings(tokenId) {
     try {
       const token = this.tokenStore.gameTokens?.find(
-        (item) => item.id === roleId,
-      ) || { id: roleId };
+        (item) => item.id === tokenId,
+      ) || { id: tokenId };
       const saved = readDailyTaskSettingsForExecution(
         token,
         this.tokenStore.gameTokens || [],
@@ -228,10 +185,9 @@ export class DailyTaskRunner {
   }
 
   /** Check cancellation and live connection before starting another operation. */
-  throwIfInterrupted(tokenId) {
+  throwIfInterrupted() {
     const stopped = this.callbacks?.shouldStop?.();
-    const status = this.tokenStore.getWebSocketStatus?.(tokenId);
-    if (stopped || (status && status !== "connected")) {
+    if (stopped || !this.connection?.isIntact()) {
       const error = new Error(
         stopped
           ? "任务已停止，再次执行将根据服务器任务列表补差"
@@ -250,13 +206,20 @@ export class DailyTaskRunner {
    */
   async refreshServerRole(tokenId) {
     try {
-      this.throwIfInterrupted(tokenId);
-      const response = await this.sendRequest(tokenId, () =>
+      this.throwIfInterrupted();
+      const response = await this.sendRequest(() =>
         this.tokenStore.sendGetRoleInfo(tokenId, {}, 2),
       );
       await this.sleep(this.delaySettings.commandDelay);
-      this.throwIfInterrupted(tokenId);
+      this.throwIfInterrupted();
       const role = response?.role;
+      const roleId = normalizeRoleId(role?.roleId);
+      if (this.roleId && roleId && this.roleId !== roleId) {
+        const error = new Error("服务器角色已变化，请重新连接后再继续");
+        error.interrupted = true;
+        throw error;
+      }
+      this.roleId ??= roleId;
       const states = getDailyTaskStates(role, this.taskConfig);
       if (
         this.taskDay !== undefined &&
@@ -323,29 +286,37 @@ export class DailyTaskRunner {
     // A settings form can change while this run is waiting for the server.
     // Keep the flat task options tied to the account that started this run.
     const runSettings = customSettings ? { ...customSettings } : null;
-    return runWithDailyTaskLock(tokenId, () =>
-      this.runTasks(tokenId, callbacks, runSettings),
-    );
+    return runWithDailyTaskLock(tokenId, async () => {
+      if (this.connection) throw new Error("每日任务执行器正在使用");
+      const connection = trackAccountConnection(this.tokenStore, tokenId);
+      this.connection = connection;
+      try {
+        return await this.runTasks(tokenId, callbacks, runSettings);
+      } finally {
+        connection.stop();
+        this.connection = null;
+      }
+    });
   }
 
   async runTasks(tokenId, callbacks = {}, customSettings = null) {
     this.callbacks = callbacks;
-    this.initialConnection = this.getRunConnection(tokenId);
     this.taskDay = undefined;
+    this.roleId = null;
     this.activeCondition = undefined;
     this.originalFormation = undefined;
     this.formationChanged = false;
     this.roleStateDirty = true;
     this.reportedProgress = undefined;
     this.loggedTaskStates = new Map();
-    this.throwIfInterrupted(tokenId);
+    this.throwIfInterrupted();
     const settings = customSettings || this.loadSettings(tokenId);
     if (!settings) throw new Error("每日任务设置无法读取");
     this.log("读取服务器任务配置与当前任务列表...");
     this.taskConfig = await this.loadConfig(
       {
         sendMessageWithPromise: (id, cmd, params, timeout) =>
-          this.sendRequest(id, () =>
+          this.sendRequest(() =>
             this.tokenStore.sendMessageWithPromise(id, cmd, params, timeout),
           ),
       },
@@ -353,7 +324,6 @@ export class DailyTaskRunner {
     );
     const roleData = await this.refreshServerRole(tokenId);
     this.taskDay = roleData.dailyTask.dailyTime;
-    const initialRoleId = serverRoleIdentity(roleData.roleId);
 
     this.log("开始执行每日任务补差");
 
@@ -491,7 +461,7 @@ export class DailyTaskRunner {
                   { isSkipShareCard: true, type: 2 },
                   "挂机加钟",
                 ),
-              check: () => this.throwIfInterrupted(tokenId),
+              check: () => this.throwIfInterrupted(),
               onLog: (message) => this.log(message),
               sleep: this.sleep,
               delay: 0,
@@ -565,76 +535,22 @@ export class DailyTaskRunner {
       );
     }
     if (!isTaskCompleted(13) && settings.arenaEnable) {
-      taskList.push({
-        name: "竞技场战斗",
-        condition: 13,
-        execute: async () => {
-          this.log("开始竞技场战斗流程");
-          const hour = this.getCurrentHour();
-          if (hour < 6) {
-            this.log("当前时间未到6点，跳过竞技场战斗", "warning");
-            return false;
-          }
-          if (hour >= 22) {
-            this.log("当前时间已到22点，跳过竞技场战斗", "warning");
-            return false;
-          }
-
-          // Recheck immediately before entering: other game sessions may have
-          // completed the one-fight daily goal since this run was planned.
-          await this.refreshServerRole(tokenId);
-          if (this.getTaskState(13).remaining === 0) {
-            this.log(
-              "竞技场每日任务已完成，无法确认剩余免费次数，跳过额外挑战",
-              "warning",
-            );
-            return false;
-          }
-
-          await this.switchToFormationIfNeeded(
-            tokenId,
-            settings.arenaFormation,
-            "竞技场阵容",
-          );
-          await this.executeGameCommand(
-            tokenId,
-            "arena_startarea",
-            {},
-            "开始竞技场",
-          );
-
-          // The daily goal requires one fight; it is not the free-fight limit.
-          // Only start this three-fight sequence while that goal is still pending.
-          const arenaAttempts = 3;
-          for (let i = 1; i <= arenaAttempts; i++) {
-            this.log(`竞技场战斗 ${i}/${arenaAttempts}`);
-            const targets = await this.executeGameCommand(
+      taskList.push(
+        dailyArenaTask({
+          getCurrentHour: this.getCurrentHour,
+          log: (text, type) => this.log(text, type),
+          refreshRole: () => this.refreshServerRole(tokenId),
+          goalReached: () => isTaskCompleted(13),
+          switchFormation: () =>
+            this.switchToFormationIfNeeded(
               tokenId,
-              "arena_getareatarget",
-              {},
-              `获取竞技场目标${i}`,
-            );
-
-            const targetId = pickArenaTargetId(targets);
-            if (targetId) {
-              await this.executeGameCommand(
-                tokenId,
-                "fight_startareaarena",
-                { targetId },
-                `竞技场战斗${i}`,
-                10000,
-              );
-            } else {
-              this.log(
-                `竞技场战斗${i} - 未找到目标: ${JSON.stringify(targets)}`,
-                "warning",
-              );
-              return false;
-            }
-            await this.sleep(1000);
-          }
-        },
-      });
+              settings.arenaFormation,
+              "竞技场阵容",
+            ),
+          execute: (...args) => this.executeGameCommand(tokenId, ...args),
+          sleep: this.sleep,
+        }),
+      );
     }
 
     // 3. BOSS
@@ -854,112 +770,38 @@ export class DailyTaskRunner {
       });
     }
 
-    // 咸王梦境
-    const mengyandayOfWeek = new Date(
-      (roleData.dailyTask.dailyTime + 8 * 60 * 60) * 1000,
-    ).getUTCDay();
-    if ([0, 1, 3, 4].includes(mengyandayOfWeek)) {
-      const mjbattleTeam = { 0: 107 };
-      // The client considers id < 0 complete only within the current
-      // two-day dream event; a prior event's state must not skip today's run.
-      const dreamBegin = Number(roleData.dungeon?.beginTime);
-      const serverDay = Math.floor(
-        (roleData.dailyTask.dailyTime + 28800) / 86400,
-      );
-      const dreamDay = Math.floor((dreamBegin + 28800) / 86400);
-      let dreamStepCompleted =
-        Number.isInteger(roleData.dungeon?.id) &&
-        roleData.dungeon.id < 0 &&
-        Number.isFinite(dreamBegin) &&
-        dreamBegin > 0 &&
-        serverDay - dreamDay >= 0 &&
-        serverDay - dreamDay < 2;
-      taskList.push({
-        name: "咸王梦境",
-        execute: async () => {
-          if (dreamStepCompleted) {
-            this.log("服务器显示本期梦境已完成，直接检查商店");
-            return true;
-          }
-          const response = await this.executeGameCommand(
-            tokenId,
-            "dungeon_selecthero",
-            { battleTeam: mjbattleTeam },
-            "咸王梦境",
-          );
-          dreamStepCompleted = true;
-          return response;
-        },
-      });
-      if (settings.dreamShopPurchase && this.runDreamShopPurchases) {
-        taskList.push({
-          name: "购买梦境金币商品和高级商人黄金鱼竿",
-          execute: async () => {
-            if (!dreamStepCompleted) {
-              this.log("梦境步骤未成功，跳过梦境商店购买", "warning");
-              return false;
-            }
-            this.throwIfInterrupted(tokenId);
-            const result = await this.runDreamShopPurchases({
-              tokenStore: this.tokenStore,
-              tokenId,
-              checkActive: () => this.throwIfInterrupted(tokenId),
-              sleep: this.sleep,
-              log: (text, type) => this.log(text, type),
-            });
-            if (result?.message) this.log(result.message);
-            if (
-              result?.status === "completed" &&
-              typeof this.onDreamShopChecked === "function" &&
-              initialRoleId &&
-              Number.isSafeInteger(this.taskDay) &&
-              this.taskDay > 0
-            ) {
-              let verifiedRole;
-              try {
-                // Role info has a separate request limit from shop purchases.
-                await this.sleep(1000);
-                const response = await this.sendRequest(tokenId, () =>
-                  this.tokenStore.sendGetRoleInfo(tokenId, {}, 2),
-                );
-                verifiedRole = response?.role;
-              } catch (error) {
-                if (error.interrupted) throw error;
-                this.log("商店已检查，但未能核对今日状态", "warning");
-              }
-              const verifiedId = serverRoleIdentity(verifiedRole?.roleId);
-              if (verifiedId && verifiedId !== initialRoleId) {
-                const error = new Error("服务器角色已变化，请重新连接后再继续");
-                error.interrupted = true;
-                throw error;
-              }
-              if (
-                verifiedRole &&
-                verifiedId === initialRoleId &&
-                verifiedRole.dailyTask?.dailyTime === this.taskDay
-              ) {
-                try {
-                  await this.onDreamShopChecked({
-                    tokenId,
-                    roleId: initialRoleId,
-                    taskDay: this.taskDay,
-                  });
-                } catch {
-                  this.log("商店已检查，但提醒状态未能保存", "warning");
-                }
-              } else if (verifiedRole) {
-                this.log("商店已检查，但身份或日期未能核对", "warning");
-              }
-            }
-            return result?.status === "completed";
-          },
-        });
-      }
-    }
+    const gameWeekday = new Date((this.taskDay + 28800) * 1000).getUTCDay();
+    taskList.push(
+      ...dailyDreamTasks({
+        role: roleData,
+        tokenId,
+        weekday: gameWeekday,
+        execute: (...args) => this.executeGameCommand(tokenId, ...args),
+        purchase:
+          settings.dreamShopPurchase && this.runDreamShopPurchases
+            ? (options) =>
+                this.runDreamShopPurchases({
+                  ...options,
+                  tokenId,
+                  tokenStore: this.tokenStore,
+                })
+            : null,
+        readRole: async () =>
+          (
+            await this.sendRequest(() =>
+              this.tokenStore.sendGetRoleInfo(tokenId, {}, 2),
+            )
+          )?.role,
+        onChecked: this.onDreamShopChecked,
+        checkActive: () => this.throwIfInterrupted(),
+        sleep: this.sleep,
+        log: (text, type) => this.log(text, type),
+      }),
+    );
 
     // 深海灯神
     if (
-      mengyandayOfWeek === 1 &&
+      gameWeekday === 1 &&
       isTodayAvailable(statisticsTime[`genie:daily:free:5`])
     ) {
       taskList.push({
@@ -1007,7 +849,7 @@ export class DailyTaskRunner {
             weekly,
           );
           for (const rewardId of ids) {
-            this.throwIfInterrupted(tokenId);
+            this.throwIfInterrupted();
             await this.executeGameCommand(
               tokenId,
               weekly ? "task_claimweekreward" : "task_claimdailyreward",
@@ -1038,14 +880,7 @@ export class DailyTaskRunner {
             tokenId,
             loadConfig: () => this.taskConfig.weeklyQuiz,
             readRole: () => this.refreshServerRole(tokenId),
-            check: () => {
-              this.throwIfInterrupted(tokenId);
-              if (this.getRunConnection(tokenId) !== this.initialConnection) {
-                const error = new Error("原连接已变化，停止执行咸鱼大冲关");
-                error.interrupted = true;
-                throw error;
-              }
-            },
+            check: () => this.throwIfInterrupted(),
             daily: true,
             sleep: this.sleep,
           });
@@ -1068,7 +903,7 @@ export class DailyTaskRunner {
     let claimsStarted = false;
     try {
       for (let i = 0; i < taskList.length; i++) {
-        this.throwIfInterrupted(tokenId);
+        this.throwIfInterrupted();
         const task = taskList[i];
         this.activeCondition = task.condition ?? task.claimCondition;
         try {
@@ -1116,7 +951,7 @@ export class DailyTaskRunner {
             /服务器错误:\s*\d+/.test(error.message || "") &&
             !/\b(?:200400|12400000)\b/.test(error.message || "")
           ) {
-            this.throwIfInterrupted(tokenId);
+            this.throwIfInterrupted();
             continue;
           }
           throw error;
@@ -1131,7 +966,7 @@ export class DailyTaskRunner {
       if (this.formationChanged && this.originalFormation !== undefined) {
         this.restoringFormation = true;
         try {
-          this.assertRunConnection(tokenId);
+          this.assertRunConnection();
           await this.switchToFormationIfNeeded(
             tokenId,
             this.originalFormation,

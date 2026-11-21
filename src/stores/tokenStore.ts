@@ -1,11 +1,12 @@
 import type { ProtoMsg } from "@/utils/bonProtocol";
 import { useLocalStorage } from "@vueuse/core";
 import { defineStore } from "pinia";
-
 import { computed, onScopeDispose, ref, toRaw, watch } from "vue";
+
 import useIndexedDB from "@/hooks/useIndexedDB";
 import router from "@/router";
 import { createAccountGameData } from "@/utils/accountGameData";
+import { normalizeRoleId } from "@/utils/accountIdentity.js";
 import { g_utils } from "@/utils/bonProtocol";
 import { createConnectionRecovery } from "@/utils/connectionRecovery";
 
@@ -303,14 +304,10 @@ export const useTokenStore = defineStore("tokens", () => {
   // A newly imported token can change, but the game role ID remains stable.
   const rememberRoleId = (tokenId: string, role: any) => {
     const roleId = role?.roleId;
-    if (
-      (typeof roleId !== "string" && typeof roleId !== "number") ||
-      !String(roleId).trim() ||
-      String(roleId) === "0"
-    )
-      return;
+    const identity = normalizeRoleId(roleId);
+    if (!identity) return;
     const token = gameTokens.value.find((item) => item.id === tokenId);
-    if (token && String(token.roleId ?? "") !== String(roleId))
+    if (token && normalizeRoleId(token.roleId) !== identity)
       updateToken(tokenId, { roleId });
   };
 

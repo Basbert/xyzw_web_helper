@@ -391,8 +391,7 @@ import {
 } from "vue";
 import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
-import { runDailyDreamPurchase } from "@/utils/dailyDreamPurchase";
-import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
+import { runDailyTasks } from "@/utils/daily/runDailyTasks.js";
 import {
   DAILY_TASK_DEFAULTS,
   readDailyTaskSettingsForExecution,
@@ -403,7 +402,6 @@ import {
   loadDailyTaskConfig,
 } from "@/utils/dailyTaskState";
 import { isDungeonOpen } from "@/utils/dreamConstants";
-import { markDreamShopChecked } from "@/utils/dreamShopCheckState";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
@@ -666,45 +664,16 @@ const runDailyFix = async () => {
   try {
     log("=== 开始执行一键补差任务 ===");
 
-    // 使用 DailyTaskRunner 执行任务
-    const runner = new DailyTaskRunner(
+    const result = await runDailyTasks({
       tokenStore,
-      {
-        commandDelay: runSettings.commandDelay,
-        taskDelay: runSettings.taskDelay,
-      },
-      {
-        onDreamShopChecked: markDreamShopChecked,
-        runDreamShopPurchases: ({ tokenId, checkActive, sleep, log }) =>
-          runDailyDreamPurchase({
-            accountId: tokenId,
-            isOpen: true,
-            send: (command, params) =>
-              tokenStore.sendMessageWithPromise(
-                tokenId,
-                command,
-                params,
-                15000,
-              ),
-            checkActive,
-            pause: sleep,
-            onProgress: ({ confirmed, total }) =>
-              log(`梦境商品：已确认购买 ${confirmed}/${total} 件`),
-          }),
-      },
-    );
-
-    const result = await runner.run(
-      runToken.id,
-      {
+      tokenId: runToken.id,
+      settings: runSettings,
+      callbacks: {
         shouldStop: () => runConnectionGeneration !== runGeneration,
         onLog: (logItem) => log(logItem.message, logItem.type),
-        onProgress: (progress) => {
-          log(`服务器每日任务完成并领奖: ${progress}%`);
-        },
+        onProgress: (progress) => log(`服务器每日任务完成并领奖: ${progress}%`),
       },
-      runSettings,
-    ); // 执行器会固定本次任务的设置
+    });
 
     const incomplete = result.incomplete;
     const details = [];

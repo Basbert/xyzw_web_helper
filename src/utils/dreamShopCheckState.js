@@ -1,17 +1,12 @@
+import { normalizeRoleId } from "./accountIdentity.js";
 import { campClock } from "./campChallenge.js";
 
 export const DREAM_SHOP_CHECK_EVENT = "dream-shop-check-updated";
 const KEY_PREFIX = "dream-shop-checked:v1:";
 
 function roleKey(roleId) {
-  if (typeof roleId !== "string" && typeof roleId !== "number") return null;
-  if (
-    typeof roleId === "number" &&
-    (!Number.isSafeInteger(roleId) || roleId <= 0)
-  )
-    return null;
-  const id = String(roleId).trim();
-  return id && id !== "0" ? `${KEY_PREFIX}${encodeURIComponent(id)}` : null;
+  const id = normalizeRoleId(roleId);
+  return id ? `${KEY_PREFIX}${encodeURIComponent(id)}` : null;
 }
 
 /** Record only a verified server task day and server-confirmed role ID. */

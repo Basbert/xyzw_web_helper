@@ -170,79 +170,6 @@
 
     <!-- 消耗活动进度（提取组件） -->
     <ConsumptionProgressCard v-if="activeSection === 'tools'" />
-    <!-- 俱乐部排位（暂时隐藏） -->
-    <div
-      class="status-card legion-match"
-      v-if="ENABLE_LEGION_MATCH && activeSection === 'club'"
-    >
-      <div class="card-header">
-        <img
-          src="/icons/1733492491706152.png"
-          alt="俱乐部图标"
-          class="status-icon"
-        />
-        <div class="status-info">
-          <h3>俱乐部排位</h3>
-          <p>赛事状态</p>
-        </div>
-        <div class="status-badge" :class="{ active: legionMatch.isRegistered }">
-          <div class="status-dot" />
-          <span>{{ legionMatch.isRegistered ? "已报名" : "未报名" }}</span>
-        </div>
-      </div>
-      <div class="card-content">
-        <p class="description">
-          每逢周三周四周五有比赛<br />
-          立即报名参与精彩对决！
-        </p>
-        <button
-          class="action-button"
-          :disabled="legionMatch.isRegistered"
-          @click="registerLegionMatch"
-        >
-          {{ legionMatch.isRegistered ? "已报名" : "立即报名" }}
-        </button>
-      </div>
-    </div>
-
-    <!-- 俱乐部签到（已迁移到俱乐部信息-概览，故隐藏原卡片） -->
-    <div
-      class="status-card legion-signin"
-      v-if="ENABLE_LEGION_SIGNIN_CARD && activeSection === 'club'"
-    >
-      <div class="card-header">
-        <img
-          src="/icons/1733492491706148.png"
-          alt="签到图标"
-          class="status-icon"
-        />
-        <div class="status-info">
-          <h3>俱乐部签到</h3>
-          <p>每日签到状态</p>
-        </div>
-        <div class="status-badge" :class="{ active: legionSignin.isSignedIn }">
-          <div class="status-dot" />
-          <span>{{ legionSignin.isSignedIn ? "已签到" : "待签到" }}</span>
-        </div>
-      </div>
-      <div class="card-content">
-        <p v-if="legionSignin.clubName" class="club-name">
-          当前俱乐部<br />
-          <strong>{{ legionSignin.clubName }}</strong>
-        </p>
-        <p v-else class="description">尚未加入任何俱乐部</p>
-        <div class="action-row">
-          <button
-            class="action-button"
-            :disabled="legionSignin.isSignedIn"
-            @click="signInLegion"
-          >
-            {{ legionSignin.isSignedIn ? "已签到" : "立即签到" }}
-          </button>
-        </div>
-      </div>
-    </div>
-
     <!-- 俱乐部信息（仅俱乐部分区） -->
     <ClubInfo v-if="activeSection === 'club'" />
 
@@ -670,10 +597,6 @@ const runCombinedDailyAction = async () => {
   }
 };
 
-const legionMatch = ref({
-  isRegistered: false,
-});
-
 // 响应式数据
 
 const ENABLE_TOOLS_TAB = true; // 工具分区开关
@@ -828,27 +751,6 @@ watch(peachStyle, (newStyle) => {
 
 // 活动开放时间：仅周一到周三可参与
 
-const bottleHelper = ref({
-  isRunning: false,
-  remainingTime: 0,
-  stopTime: 0,
-});
-
-const hangUp = ref({
-  isActive: false,
-  remainingTime: 0,
-  elapsedTime: 0,
-  lastTime: 0,
-  hangUpTime: 0,
-  isExtending: false, // 加钟状态
-  isClaiming: false, // 领取奖励状态
-});
-
-const legionSignin = ref({
-  isSignedIn: false,
-  clubName: "",
-});
-
 // 计算属性
 const roleInfo = computed(() => {
   return tokenStore.gameData?.roleInfo || null;
@@ -862,123 +764,6 @@ const isShowTowerStatus = computed(() => {
   }
   return true;
 });
-
-// WebSocket连接状态
-
-// 格式化时间 - 确保显示到秒
-
-// 更新数据
-const updateGameStatus = () => {
-  if (!roleInfo.value) return;
-
-  const role = roleInfo.value.role;
-
-  // 更新盐罐机器人状态
-  if (role.bottleHelpers) {
-    const now = Date.now() / 1000;
-    bottleHelper.value.stopTime = role.bottleHelpers.helperStopTime;
-    bottleHelper.value.isRunning = role.bottleHelpers.helperStopTime > now;
-    // 确保剩余时间为整数秒
-    bottleHelper.value.remainingTime = Math.max(
-      0,
-      Math.floor(role.bottleHelpers.helperStopTime - now),
-    );
-    // 控制台精简，避免频繁刷屏
-  }
-
-  // 更新挂机状态
-  if (role.hangUp) {
-    const now = Date.now() / 1000;
-    hangUp.value.lastTime = role.hangUp.lastTime;
-    hangUp.value.hangUpTime = role.hangUp.hangUpTime;
-
-    const elapsed = now - hangUp.value.lastTime;
-    if (elapsed <= hangUp.value.hangUpTime) {
-      // 确保剩余时间为整数秒
-      hangUp.value.remainingTime = Math.floor(
-        hangUp.value.hangUpTime - elapsed,
-      );
-      hangUp.value.isActive = true;
-    } else {
-      hangUp.value.remainingTime = 0;
-      hangUp.value.isActive = false;
-    }
-    // 确保已挂机时间为整数秒
-    hangUp.value.elapsedTime = Math.floor(
-      hangUp.value.hangUpTime - hangUp.value.remainingTime,
-    );
-    // 控制台精简
-  }
-
-  // 更新俱乐部排位状态
-  if (role.statistics) {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayTimestamp = today.getTime() / 1000;
-
-    legionMatch.value.isRegistered =
-      Number(role.statistics["last:legion:match:sign:up:time"]) >
-      todayTimestamp;
-  }
-
-  // 更新俱乐部签到状态
-  if (role.statisticsTime) {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayTimestamp = today.getTime() / 1000;
-
-    legionSignin.value.isSignedIn =
-      role.statisticsTime["legion:sign:in"] > todayTimestamp;
-  }
-};
-
-// 定时器更新
-let timer = null;
-const startTimer = () => {
-  if (timer) clearInterval(timer);
-  timer = setInterval(() => {
-    // 更新盐罐机器人剩余时间
-    if (bottleHelper.value.isRunning && bottleHelper.value.remainingTime > 0) {
-      bottleHelper.value.remainingTime = Math.max(
-        0,
-        bottleHelper.value.remainingTime - 1,
-      );
-      if (bottleHelper.value.remainingTime <= 0) {
-        bottleHelper.value.isRunning = false;
-      }
-    }
-
-    // 更新挂机剩余时间
-    if (hangUp.value.isActive && hangUp.value.remainingTime > 0) {
-      hangUp.value.remainingTime = Math.max(0, hangUp.value.remainingTime - 1);
-      hangUp.value.elapsedTime = hangUp.value.elapsedTime + 1;
-      if (hangUp.value.remainingTime <= 0) {
-        hangUp.value.isActive = false;
-      }
-    }
-  }, 1000);
-};
-
-// 盐罐机器人操作
-
-// 挂机操作 - 参考HangUpStatus逻辑优化
-
-// 功能开关：暂时隐藏俱乐部排位与旧签到卡片
-const ENABLE_LEGION_MATCH = false;
-const ENABLE_LEGION_SIGNIN_CARD = false;
-
-// 盐场战绩入口已移动至俱乐部信息模块
-
-// 监听角色信息变化
-watch(
-  roleInfo,
-  (newValue) => {
-    if (newValue) {
-      updateGameStatus();
-    }
-  },
-  { deep: true, immediate: true },
-);
 
 // 监听 WebSocket 连接状态（俱乐部信息）
 const hasFetchedLegionOnce = ref(false);
@@ -1002,8 +787,6 @@ watch(
 
 // 生命周期
 onMounted(() => {
-  updateGameStatus();
-  startTimer();
   // 获取俱乐部信息
   if (
     tokenStore.selectedToken &&
@@ -1015,12 +798,8 @@ onMounted(() => {
   }
 });
 
-// 组件卸载时清理定时器
 onUnmounted(() => {
   dreamObserver?.disconnect();
-  if (timer) {
-    clearInterval(timer);
-  }
 });
 </script>
 

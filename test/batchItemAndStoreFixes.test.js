@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createPinia, defineStore, setActivePinia } from "pinia";
 import * as vue from "vue";
 import * as accountData from "../src/utils/accountGameData.js";
+import * as accountIdentity from "../src/utils/accountIdentity.js";
 import * as blackMarketConfig from "../src/utils/batch/blackMarketConfig.js";
 import * as connectionManager from "../src/utils/batch/connectionManager.js";
 import { createTasksArena } from "../src/utils/batch/tasksArena.js";
@@ -449,6 +450,7 @@ test("Item 6: tokenStore only clears xyzw_chat_msg_list when connecting or switc
   const module = await loadModule(
     new URL("../src/stores/tokenStore.ts", import.meta.url),
     {
+      "@/utils/accountIdentity.js": accountIdentity,
       "@vueuse/core": { useLocalStorage: (_key, value) => vue.ref(value) },
       pinia: { defineStore },
       vue,

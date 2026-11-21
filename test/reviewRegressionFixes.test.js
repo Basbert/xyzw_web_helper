@@ -8,7 +8,13 @@ import { createPinia, defineStore, setActivePinia } from "pinia";
 import ts from "typescript";
 import * as vue from "vue";
 import { compileScript, parse } from "vue/compiler-sfc";
+import * as accountConnection from "../src/utils/accountConnection.js";
 import * as accountData from "../src/utils/accountGameData.js";
+import * as accountIdentity from "../src/utils/accountIdentity.js";
+import {
+  createConnectionManager,
+  withManagedConnection,
+} from "../src/utils/batch/connectionManager.js";
 import * as connectionRecovery from "../src/utils/connectionRecovery.js";
 import { loadModule } from "./helpers/loadModule.js";
 
@@ -320,7 +326,7 @@ test("Fix #9: MonthlyTasksCard detects A -> B -> A synchronous switch in fish an
 test("Fix #2 & #3: batcharenafight stops before fight on shouldStop and never restores formation to replacement client", async () => {
   const connMod = await loadModule(
     new URL("../src/utils/batch/connectionManager.js", import.meta.url),
-    { vue },
+    { "../accountConnection.js": accountConnection },
   );
   const arenaMod = await loadModule(
     new URL("../src/utils/batch/tasksArena.js", import.meta.url),
@@ -468,7 +474,7 @@ test("Fix #2 & #3: batcharenafight stops before fight on shouldStop and never re
 test("Fix #3 & #6: Tower and Arena TopUp reject invalid useTeamId and downgrade status if restore fails", async () => {
   const connMod = await loadModule(
     new URL("../src/utils/batch/connectionManager.js", import.meta.url),
-    { vue },
+    { "../accountConnection.js": accountConnection },
   );
   const towerMod = await loadModule(
     new URL("../src/utils/batch/tasksTower.js", import.meta.url),
@@ -761,7 +767,7 @@ test("Fix #3 & #6: Tower and Arena TopUp reject invalid useTeamId and downgrade 
 test("Fix #4: batchCampChallengePet skips tokens interrupted by connection replacement across rounds", async () => {
   const connMod = await loadModule(
     new URL("../src/utils/batch/connectionManager.js", import.meta.url),
-    { vue },
+    { "../accountConnection.js": accountConnection },
   );
   const campMod = await loadModule(
     new URL("../src/utils/batch/tasksCampChallenge.js", import.meta.url),
@@ -857,7 +863,7 @@ test("Fix #4: batchCampChallengePet skips tokens interrupted by connection repla
 test("Fix #5: connectionManager neither adopts nor closes user connection when client creation fails", async () => {
   const connMod = await loadModule(
     new URL("../src/utils/batch/connectionManager.js", import.meta.url),
-    { vue },
+    { "../accountConnection.js": accountConnection },
   );
 
   const userClient = { id: "user", socket: { id: "su" } };
@@ -1094,7 +1100,7 @@ test("Fix #7: WeirdTowerStatus runs follow-up items and merge after timeout or m
 test("Fix #8: batchGenieSweep sweeps all 45 tickets in 20+20+5 batches when response omits ticket quantity", async () => {
   const connMod = await loadModule(
     new URL("../src/utils/batch/connectionManager.js", import.meta.url),
-    { vue },
+    { "../accountConnection.js": accountConnection },
   );
   const itemMod = await loadModule(
     new URL("../src/utils/batch/tasksItem.js", import.meta.url),
@@ -1195,6 +1201,7 @@ test("Fix #10: switching accounts clears reactive @vueuse/core chat cache so old
   const storeMod = await loadModule(
     new URL("../src/stores/tokenStore.ts", import.meta.url),
     {
+      "@/utils/accountIdentity.js": accountIdentity,
       "@vueuse/core": {
         useLocalStorage: (_k, initial) => vue.ref(initial),
       },
@@ -1428,8 +1435,8 @@ test("Fix #12: BatchDailyTasks ensureConnection aborts without reconnecting when
       },
       "@/utils/batch/configBackup": factoryProxy,
       "@/utils/batch/connectionManager": {
-        ...factoryProxy,
-        closeOwnedConnection: (store, id) => store.closeWebSocketConnection(id),
+        createConnectionManager,
+        withManagedConnection,
       },
       "@/utils/batch/scheduledClock": factoryProxy,
       "@/utils/batch/scheduledRuns": {
@@ -1440,8 +1447,7 @@ test("Fix #12: BatchDailyTasks ensureConnection aborts without reconnecting when
         }),
         summarizeScheduledRun: () => ({}),
       },
-      "@/utils/dailyDreamPurchase": factoryProxy,
-      "@/utils/dailyTaskRunner": { DailyTaskRunner: class {} },
+      "@/utils/daily/runDailyTasks.js": factoryProxy,
       "@/utils/dailyTaskSettings": {
         DAILY_TASK_DEFAULTS: {},
         readDailyTaskSettingsForExecution: () => ({}),
@@ -1454,7 +1460,6 @@ test("Fix #12: BatchDailyTasks ensureConnection aborts without reconnecting when
         isDungeonOpen: () => false,
         merchantConfig: [],
       },
-      "@/utils/dreamShopCheckState": { markDreamShopChecked: () => {} },
       "@/utils/towerClimbLimit.js": { DEFAULT_WEIRD_TOWER_MAX_CLIMB: 100 },
     },
     {
@@ -1811,6 +1816,7 @@ test("a queued owned close cannot disconnect a newly created connection", async 
   const mod = await loadModule(
     new URL("../src/stores/tokenStore.ts", import.meta.url),
     {
+      "@/utils/accountIdentity.js": accountIdentity,
       "@vueuse/core": { useLocalStorage: (_key, initial) => vue.ref(initial) },
       pinia: { defineStore },
       vue,

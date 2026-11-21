@@ -47,28 +47,18 @@ function fixture(result, options = {}) {
       taskDelay: 0,
     }),
     runConnectionGeneration: 0,
-    markDreamShopChecked: () => true,
-    runDailyDreamPurchase: async (request) => {
-      context.dreamRequest = request;
-      return { status: "completed", purchases: [] };
-    },
     log: (message) => calls.push(message),
     message: new Proxy(
       {},
       { get: (_, kind) => (text) => messages.push([kind, text]) },
     ),
     console: { error() {} },
-    DailyTaskRunner: class {
-      constructor(_store, _delays, runnerOptions) {
-        context.runnerOptions = runnerOptions;
-      }
-      async run(tokenId, callbacks) {
-        context.callbacks = callbacks;
-        calls.push(tokenId);
-        await gate;
-        if (options.error) throw new Error("连接已断开");
-        return result;
-      }
+    async runDailyTasks({ tokenId, callbacks }) {
+      context.callbacks = callbacks;
+      calls.push(tokenId);
+      await gate;
+      if (options.error) throw new Error("连接已断开");
+      return result;
     },
   };
   vm.createContext(context);
@@ -119,21 +109,10 @@ test("an interrupted run is shown as interrupted and keeps its account", async (
   assert.equal(f.context.busy.value, false);
 });
 
-test("daily runner receives account-bound interruption and dream purchase hooks", async () => {
+test("shared daily runner receives account-bound interruption", async () => {
   const f = fixture({ incomplete: 0, failed: 0, skipped: 0 });
   const run = f.run();
   assert.equal(f.context.callbacks.shouldStop(), false);
-  const checkActive = () => {};
-  const sleep = async () => {};
-  await f.context.runnerOptions.runDreamShopPurchases({
-    tokenId: "A",
-    checkActive,
-    sleep,
-    log: () => {},
-  });
-  assert.equal(f.context.dreamRequest.accountId, "A");
-  assert.equal(f.context.dreamRequest.isOpen, true);
-  assert.equal(f.context.dreamRequest.checkActive, checkActive);
   f.context.runConnectionGeneration++;
   assert.equal(f.context.callbacks.shouldStop(), true);
   f.release();

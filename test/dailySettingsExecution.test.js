@@ -102,10 +102,8 @@ test("日常页面在执行前检查损坏的设置，不发送请求", async ()
       warning: (value) => warnings.push(value),
       error: (value) => warnings.push(value),
     },
-    DailyTaskRunner: class {
-      constructor() {
-        runnerCreated = true;
-      }
+    runDailyTasks: () => {
+      runnerCreated = true;
     },
   };
   try {

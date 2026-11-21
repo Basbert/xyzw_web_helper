@@ -1,4 +1,5 @@
 import { reactive, watch } from "vue";
+import { normalizeRoleId } from "./accountIdentity.js";
 
 export const DAILY_TASK_DEFAULTS = Object.freeze({
   arenaFormation: 1,
@@ -18,14 +19,9 @@ export const DAILY_TASK_DEFAULTS = Object.freeze({
   taskDelay: 500,
 });
 
-const roleIdentity = (roleId) => {
-  if (roleId === undefined || roleId === null) return null;
-  const id = String(roleId).trim();
-  return id && id !== "0" ? id : null;
-};
 const tokenKey = (token) => `daily-settings:${token.id}`;
 const roleKey = (token) => {
-  const roleId = roleIdentity(token?.roleId);
+  const roleId = normalizeRoleId(token?.roleId);
   return roleId ? `daily-role-settings:${encodeURIComponent(roleId)}` : null;
 };
 const parseSettings = (value) => {
@@ -95,7 +91,7 @@ export function readDailyTaskSettingsForExecution(
       .filter(
         (other) =>
           other.id !== token.id &&
-          roleIdentity(other.roleId) === roleIdentity(token.roleId),
+          normalizeRoleId(other.roleId) === normalizeRoleId(token.roleId),
       )
       .map((other) => inspect(tokenKey(other)))
       .filter(Boolean);
@@ -122,7 +118,7 @@ export function readDailyTaskSettings(
       .filter(
         (other) =>
           other.id !== token.id &&
-          roleIdentity(other.roleId) === roleIdentity(token.roleId),
+          normalizeRoleId(other.roleId) === normalizeRoleId(token.roleId),
       )
       .map((other) => parseSettings(storage.getItem(tokenKey(other))))
       .filter(Boolean);

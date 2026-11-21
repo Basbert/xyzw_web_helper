@@ -3,9 +3,13 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import vm from "node:vm";
 import ts from "typescript";
-import { computed, reactive, ref, toRaw, watch } from "vue";
-import { closeOwnedConnection } from "../src/utils/batch/connectionManager.js";
+import { computed, reactive, ref } from "vue";
+import {
+  createConnectionManager,
+  withManagedConnection,
+} from "../src/utils/batch/connectionManager.js";
 import { isDungeonOpen } from "../src/utils/dreamConstants.js";
+import { loadModule } from "./helpers/loadModule.js";
 
 const component = await readFile(
   new URL("../src/views/BatchDailyTasks.vue", import.meta.url),
@@ -20,8 +24,8 @@ const source = ts.createSourceFile(
   true,
 );
 const names = new Set([
-  "waitForConnectionSlot",
-  "releaseConnectionSlot",
+  "connectionManager",
+  "{ connectionQueue, releaseConnectionSlot }",
   "ensureConnection",
   "startBatch",
 ]);
@@ -35,6 +39,23 @@ const declarations = source.statements
   )
   .map((statement) => statement.getText(source))
   .join("\n");
+
+async function runDailyTasksWithFixture(context, options) {
+  const { runDailyTasks } = await loadModule(
+    new URL("../src/utils/daily/runDailyTasks.js", import.meta.url),
+    {
+      "../dailyTaskRunner.js": { DailyTaskRunner: context.DailyTaskRunner },
+      "../dailyDreamPurchase.js": {
+        runDailyDreamPurchase: (request) =>
+          context.runDailyDreamPurchase(request),
+      },
+      "../dreamShopCheckState.js": {
+        markDreamShopChecked: context.markDreamShopChecked,
+      },
+    },
+  );
+  return runDailyTasks(options);
+}
 
 /** Run the component's actual batch orchestration with isolated transports and refs. */
 function fixture({
@@ -66,25 +87,18 @@ function fixture({
     isRunning: { value: false },
     shouldStop: { value: false },
     currentRunningTokenId: { value: null },
-    connectionQueue: { active: 1 },
-    closeOwnedConnection,
-    toRaw,
-    watch,
+    createConnectionManager: (options) =>
+      createConnectionManager({ ...options, connectionQueue: { active: 1 } }),
+    withManagedConnection,
     batchSettings: {
       maxActive: 2,
       reconnectDelay: 0,
+      connectionTimeout: connectionSucceeds ? 1000 : 0,
       commandDelay: 0,
       taskDelay: 0,
     },
     addLog: (log) => logs.push(log),
     message: { info() {}, warning() {}, success() {} },
-    setTimeout: (callback) => {
-      callback();
-    },
-    waitForConnection: async () => {
-      state.connected = connectionSucceeds;
-      return connectionSucceeds;
-    },
     tokenStore: {
       wsConnections: connections,
       getWebSocketStatus: () =>
@@ -92,6 +106,7 @@ function fixture({
       createWebSocketConnection(id) {
         const client = { socket: {} };
         connections[id] = { client };
+        state.connected = connectionSucceeds;
         return client;
       },
       closeWebSocketConnection() {
@@ -132,12 +147,14 @@ function fixture({
       }
     },
   };
+  context.runDailyTasks = (options) =>
+    runDailyTasksWithFixture(context, options);
   context.executionTokens = context.selectedTokens;
   context.runtimeBatchSettings = context.batchSettings;
   context.activeScheduledRun = { value: null };
   vm.createContext(context);
   vm.runInContext(
-    `${declarations}\nglobalThis.api = { startBatch, waitForConnectionSlot, ensureConnection };`,
+    `${declarations}\nglobalThis.connectionQueue = connectionQueue; globalThis.api = { startBatch, waitForConnectionSlot: connectionManager.waitForConnectionSlot, ensureConnection };`,
     context,
   );
   return { context, state, logs, ...context.api };
@@ -238,7 +255,7 @@ test("定时任务保留角色设置快照，关闭和缺失开关都不擅自�
 
 test("断开又重连即使客户端不变，也停止后续梦境购买", async () => {
   const f = fixture({
-    runImpl: async ({ id, options, context, state }) => {
+    runImpl: async ({ id, callbacks, options, context, state }) => {
       context.runDailyDreamPurchase = async (purchase) => {
         purchase.checkActive();
         state.connected = false;
@@ -248,7 +265,13 @@ test("断开又重连即使客户端不变，也停止后续梦境购买", async
       };
       await options.runDreamShopPurchases({
         tokenId: id,
-        checkActive() {},
+        checkActive() {
+          if (callbacks.shouldStop()) {
+            const error = new Error("连接已改变");
+            error.interrupted = true;
+            throw error;
+          }
+        },
         sleep: async () => {},
         log() {},
       });
@@ -364,4 +387,39 @@ test("定时梦境开放判断读取执行当刻，而不是上一分钟 UI 状�
   instant = Date.parse("2026-11-10T16:00:00Z");
   assert.equal(scope.skip("batchmengjing"), false);
   assert.equal(scope.skip("batchBuyDreamItems"), false);
+});
+
+test("a user connection that arrives while a batch task waits for a slot is borrowed", async () => {
+  const queue = { active: 1 };
+  const store = {
+    wsConnections: {},
+    getWebSocketStatus: () =>
+      store.wsConnections.a ? "connected" : "disconnected",
+    createWebSocketConnection: () =>
+      assert.fail("must reuse the user connection"),
+  };
+  const { createConnectionManager } = await loadModule(
+    new URL("../src/utils/batch/connectionManager.js", import.meta.url),
+    {
+      "../accountConnection.js":
+        await import("../src/utils/accountConnection.js"),
+    },
+    {
+      setTimeout(callback) {
+        store.wsConnections.a = { client: { socket: {} } };
+        queue.active = 0;
+        callback();
+      },
+    },
+  );
+  const manager = createConnectionManager({
+    tokenStore: store,
+    batchSettings: { maxActive: 1 },
+    connectionQueue: queue,
+  });
+  await manager.ensureConnection("a", [{ id: "a" }], 2, null, null, null, {
+    skipInitialization: true,
+  });
+  assert.equal(queue.active, 0);
+  assert.ok(store.wsConnections.a);
 });

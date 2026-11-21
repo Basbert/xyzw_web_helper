@@ -201,13 +201,11 @@ import { formatShanghaiDate, useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
 import { compactApexGuessStatus } from "@/utils/apexGuessHelper.js";
 import { runBottleAndHangUp } from "@/utils/bottleAndHangUp";
-import { runDailyDreamPurchase } from "@/utils/dailyDreamPurchase";
-import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
+import { runDailyTasks } from "@/utils/daily/runDailyTasks.js";
 import {
   DAILY_TASK_DEFAULTS,
   readDailyTaskSettingsForExecution,
 } from "@/utils/dailyTaskSettings";
-import { markDreamShopChecked } from "@/utils/dreamShopCheckState";
 import { convertBinToLx } from "@/utils/gameLauncher";
 
 const router = useRouter();
@@ -228,36 +226,18 @@ const dailyActions = useDashboardDailyActions(tokenStore, {
   }),
   executeMaintenance: ({ tokenId, shouldStop, onProgress }) =>
     runBottleAndHangUp({ tokenStore, tokenId, shouldStop, onProgress }),
-  executeDaily: ({ tokenId, settings, shouldStop, onProgress }) => {
-    const runner = new DailyTaskRunner(
+  executeDaily: ({ tokenId, settings, shouldStop, onProgress }) =>
+    runDailyTasks({
       tokenStore,
-      { commandDelay: settings.commandDelay, taskDelay: settings.taskDelay },
-      {
-        onDreamShopChecked: markDreamShopChecked,
-        runDreamShopPurchases: ({ tokenId: id, checkActive, sleep, log }) =>
-          runDailyDreamPurchase({
-            accountId: id,
-            isOpen: true,
-            send: (command, params) =>
-              tokenStore.sendMessageWithPromise(id, command, params, 15000),
-            checkActive,
-            pause: sleep,
-            onProgress: ({ confirmed, total }) =>
-              log(`梦境商品：已确认购买 ${confirmed}/${total} 件`),
-          }),
-      },
-    );
-    return runner.run(
       tokenId,
-      {
+      settings,
+      callbacks: {
         shouldStop,
         onLog: (item) => onProgress(item.message),
         onProgress: (progress) =>
           onProgress(`服务器每日任务完成并领奖：${progress}%`),
       },
-      settings,
-    );
-  },
+    }),
 });
 const dashboardDailyResult = computed(
   () => dailyActions.results[tokenStore.selectedToken?.id] || null,

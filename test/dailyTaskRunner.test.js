@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { reactive } from "vue";
+import * as accountConnection from "../src/utils/accountConnection.js";
+import * as accountIdentity from "../src/utils/accountIdentity.js";
+import * as arena from "../src/utils/daily/arena.js";
+import * as dream from "../src/utils/daily/dream.js";
 import * as settingsHelpers from "../src/utils/dailyTaskSettings.js";
 import * as stateHelpers from "../src/utils/dailyTaskState.js";
 import * as weeklyQuiz from "../src/utils/weeklyQuiz.js";
@@ -11,6 +15,10 @@ const { DailyTaskRunner } = await loadModule(
   {
     "@/utils/dailyTaskState": stateHelpers,
     "@/utils/dailyTaskSettings": settingsHelpers,
+    "./accountConnection.js": accountConnection,
+    "./accountIdentity.js": accountIdentity,
+    "./daily/arena.js": arena,
+    "./daily/dream.js": dream,
     "./weeklyQuiz.js": weeklyQuiz,
   },
 );
@@ -510,6 +518,7 @@ test("a role response arriving after disconnect is discarded before game operati
 test("different accounts are judged by their own server response", async () => {
   const a = fixture();
   const b = fixture({ 6: 2 });
+  b.store.wsConnections["account-b"] = { client: {} };
   await Promise.all([
     a.runner().run("account-a", {}, settings),
     b.runner().run("account-b", {}, settings),
@@ -676,7 +685,7 @@ test("a failed formation query never triggers a forced switch", async () => {
     return send(...args);
   };
   await assert.rejects(
-    f.runner().switchToFormationIfNeeded("account-a", 2, "Test"),
+    f.runner().run("account-a", {}, settings),
     /Network timeout/,
   );
   assert.equal(
@@ -1232,6 +1241,26 @@ test("一键每日默认核对本周答题，关闭开关后跳过", async () =>
   });
   assert.equal(
     log.some((message) => message.includes("咸鱼大冲关")),
+    false,
+  );
+});
+
+test("the daily runner stops before another write if its account connection was replaced", async () => {
+  const f = fixture({ 6: 0 });
+  const send = f.store.sendMessageWithPromise;
+  f.store.sendMessageWithPromise = async (...args) => {
+    const response = await send(...args);
+    if (args[1] === "system_buygold")
+      f.store.wsConnections["account-a"] = { client: {} };
+    return response;
+  };
+
+  await assert.rejects(f.runner().run("account-a", {}, settings), {
+    interrupted: true,
+  });
+  assert.equal(f.calls.filter(({ cmd }) => cmd === "system_buygold").length, 1);
+  assert.equal(
+    f.calls.some(({ cmd }) => cmd === "task_claimdailypoint"),
     false,
   );
 });

@@ -60,9 +60,9 @@ The application is built around a **token-centric architecture** that replaces t
 Central state management for token operations using Pinia and VueUse:
 - **Token Lifecycle**: Import → Parse → Store → Select → Connect
 - **Base64 Parsing**: Supports multiple formats (JSON, plain text, prefixed, bin files, URL sources)
-- **WebSocket Management**: Automatic connection establishment with status tracking and connection pooling
-- **Connection Queue System**: Rate limiting with configurable max concurrent connections (default 10) and delay intervals
-- **Task Coordination**: Tracks running tasks, scheduled tasks, and manages connection lifecycle around task execution
+- **Connection lifecycle**: `tokenStore.ts` manages the per-account client, status, and recovery. `utils/accountConnection.js` pins the client and socket for an operation.
+- **Batch connection queue**: `utils/batch/connectionManager.js` acquires slots, reuses live connections, and closes only the connection owned by the batch operation.
+- **Account identity**: `tokenId` identifies an imported entry and its connection. `roleId` identifies the server character. `utils/accountIdentity.js` normalizes the latter for comparison and role-based settings.
 - **Data Persistence**: localStorage via `useLocalStorage` composable with cross-session state recovery
 - **TypeScript Interfaces**: `TokenData`, `WebSocketConnection`, `ConnectLock` for type safety
 
@@ -93,7 +93,9 @@ Token-aware navigation system with file-based routing:
 
 #### 5. Daily Task Automation (`src/utils/dailyTaskRunner.js`)
 Task orchestration system for automated game operations:
-- **DailyTaskRunner Class**: Centralized task execution with configurable delays
+- **Entry Point**: The dashboard, daily view, and browser batch scheduler call `utils/daily/runDailyTasks.js`.
+- **DailyTaskRunner Class**: Owns the run, the server progress snapshot, the operation order, and formation restoration.
+- **Task steps**: `utils/daily/arena.js` and `utils/daily/dream.js` define their own steps. The runner supplies the account-scoped transport and progress callbacks.
 - **Promise-based Commands**: Timeout-aware game command execution via `executeGameCommand()`
 - **Task Chaining**: Sequential task execution with error handling and logging
 - **Progress Callbacks**: Real-time task progress updates via callback system
@@ -119,7 +121,7 @@ Token Import → Base64 Decode → Local Storage → Token Selection → Connect
 ### State Management Pattern
 
 **Pinia Store Structure**:
-- `tokenStore` (TS): Primary token management, WebSocket connections, connection pooling, task coordination
+- `tokenStore` (TS): Imported accounts, per-account game state, WebSocket lifecycle, and reconnection
 - `auth` (JS): Simplified authentication state for legacy compatibility
 - `gameRoles` (JS): Role-specific game data management
 - `localTokenManager` (JS): Low-level token persistence utilities

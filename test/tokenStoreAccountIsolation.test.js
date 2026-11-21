@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { createPinia, defineStore, setActivePinia } from "pinia";
 import * as vue from "vue";
 import * as accountData from "../src/utils/accountGameData.js";
+import * as accountIdentity from "../src/utils/accountIdentity.js";
 import * as connectionRecovery from "../src/utils/connectionRecovery.js";
 import { loadModule } from "./helpers/loadModule.js";
 
@@ -12,6 +13,7 @@ test("token store keeps role responses and battle versions with their own accoun
   const module = await loadModule(
     new URL("../src/stores/tokenStore.ts", import.meta.url),
     {
+      "@/utils/accountIdentity.js": accountIdentity,
       "@vueuse/core": { useLocalStorage: (_key, value) => vue.ref(value) },
       pinia: { defineStore },
       vue,

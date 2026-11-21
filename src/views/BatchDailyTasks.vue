@@ -966,7 +966,6 @@ import {
   reactive,
   ref,
   shallowReactive,
-  toRaw,
   watch,
 } from "vue";
 import BatchApplyLegionModal from "@/components/BatchDaily/BatchApplyLegionModal.vue";
@@ -1036,7 +1035,7 @@ import {
   buildConfigBackupData,
 } from "@/utils/batch/configBackup";
 import {
-  closeOwnedConnection,
+  createConnectionManager,
   withManagedConnection,
 } from "@/utils/batch/connectionManager";
 import {
@@ -1048,8 +1047,7 @@ import {
   createScheduledRunQueue,
   summarizeScheduledRun,
 } from "@/utils/batch/scheduledRuns";
-import { runDailyDreamPurchase } from "@/utils/dailyDreamPurchase";
-import { DailyTaskRunner } from "@/utils/dailyTaskRunner";
+import { runDailyTasks } from "@/utils/daily/runDailyTasks.js";
 import {
   DAILY_TASK_DEFAULTS,
   readDailyTaskSettingsForExecution,
@@ -1062,7 +1060,6 @@ import {
   isDungeonOpen,
   merchantConfig,
 } from "@/utils/dreamConstants";
-import { markDreamShopChecked } from "@/utils/dreamShopCheckState";
 
 import { DEFAULT_WEIRD_TOWER_MAX_CLIMB } from "@/utils/towerClimbLimit.js";
 
@@ -3618,239 +3615,15 @@ const clearLogs = () => {
   message.success("日志已清空");
 };
 
-const waitForConnection = async (
-  tokenId,
-  timeout = runtimeBatchSettings.connectionTimeout,
-) => {
-  const start = Date.now();
-  while (Date.now() - start < timeout) {
-    if (shouldStop.value) return false;
-    const status = tokenStore.getWebSocketStatus(tokenId);
-    if (status === "connected") return true;
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  return false;
-};
-
-// 全局连接队列控制 - 限制并发连接数
-const connectionQueue = { active: 0 };
-
-const waitForConnectionSlot = async () => {
-  while (connectionQueue.active >= runtimeBatchSettings.maxActive) {
-    if (shouldStop.value) break;
-    await new Promise((r) => setTimeout(r, 1000));
-  }
-  if (shouldStop.value) {
-    const error = new Error("批量任务已停止，取消等待连接槽位");
-    error.interrupted = true;
-    throw error;
-  }
-  connectionQueue.active++;
-};
-
-const releaseConnectionSlot = () => {
-  if (connectionQueue.active > 0) {
-    connectionQueue.active--;
-  }
-};
-
-/**
- * Establish a connection and report whether this caller owns a queue slot.
- * @param {string} tokenId Account identity.
- * @param {number} maxRetries Whether connection retry is allowed.
- * @param {Function|null} onSlotChange Optional ownership notification.
- * @param {Function|null} onClientCreated Optional exact created-client notification.
- * @param {Function|null} onConnectionReady Optional guard before initialization.
- * @param {object} options Connection options; `skipInitialization` is read-only.
- * @returns {Promise<boolean>} True after connection initialization.
- */
-const ensureConnection = async (
-  tokenId,
-  maxRetries = 2,
-  onSlotChange = null,
-  onClientCreated = null,
-  onConnectionReady = null,
-  options = {},
-) => {
-  const latestToken = tokens.value.find((t) => t.id === tokenId);
-  if (!latestToken) {
-    throw new Error(`Token not found: ${tokenId}`);
-  }
-
-  const status = tokenStore.getWebSocketStatus(tokenId);
-  let connected = status === "connected";
-
-  if (!connected) {
-    // 等待连接槽位，限制并发连接数
-    await waitForConnectionSlot();
-    onSlotChange?.(true);
-    onClientCreated?.(null, null);
-
-    let slotReleased = false;
-    const releaseOwnedSlot = () => {
-      if (slotReleased) return;
-      slotReleased = true;
-      releaseConnectionSlot();
-      onSlotChange?.(false);
-    };
-
-    let createdSocket = null;
-    let createdClient = null;
-    try {
-      addLog({
-        time: new Date().toLocaleTimeString(),
-        message: `正在连接... (队列: ${connectionQueue.active}/${runtimeBatchSettings.maxActive})`,
-        type: "info",
-      });
-
-      createdClient = await tokenStore.createWebSocketConnection(
-        tokenId,
-        latestToken.token,
-        latestToken.wsUrl,
-      );
-      createdSocket = toRaw(createdClient?.socket);
-      onClientCreated?.(createdClient, createdSocket);
-      connected =
-        createdClient || !onClientCreated
-          ? await waitForConnection(tokenId)
-          : false;
-
-      if (!connected && maxRetries > 0 && !shouldStop.value) {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `连接超时，尝试重连...`,
-          type: "warning",
-        });
-
-        const current = tokenStore.wsConnections?.[tokenId]?.client;
-        if (onClientCreated) {
-          if (
-            current &&
-            (!createdClient ||
-              toRaw(current) !== toRaw(createdClient) ||
-              (createdSocket && toRaw(current.socket) !== createdSocket))
-          ) {
-            const error = new Error("连接已被替换，停止批量任务");
-            error.interrupted = true;
-            throw error;
-          }
-          if (
-            createdClient &&
-            current &&
-            toRaw(current) === toRaw(createdClient) &&
-            (!createdSocket || toRaw(current.socket) === createdSocket)
-          ) {
-            closeOwnedConnection(
-              tokenStore,
-              tokenId,
-              createdClient,
-              createdSocket ?? null,
-            );
-          }
-        } else {
-          tokenStore.closeWebSocketConnection(tokenId);
-        }
-        await new Promise((r) =>
-          setTimeout(r, runtimeBatchSettings.reconnectDelay),
-        );
-
-        if (!shouldStop.value) {
-          addLog({
-            time: new Date().toLocaleTimeString(),
-            message: `正在重连...`,
-            type: "info",
-          });
-
-          const refreshedToken = tokens.value.find((t) => t.id === tokenId);
-          if (!refreshedToken) {
-            throw new Error(`Token not found: ${tokenId}`);
-          }
-          createdClient = await tokenStore.createWebSocketConnection(
-            tokenId,
-            refreshedToken.token,
-            refreshedToken.wsUrl,
-          );
-          createdSocket = toRaw(createdClient?.socket);
-          onClientCreated?.(createdClient, createdSocket);
-
-          connected =
-            createdClient || !onClientCreated
-              ? await waitForConnection(tokenId)
-              : false;
-        }
-      }
-
-      if (!connected) {
-        const current = tokenStore.wsConnections?.[tokenId]?.client;
-        if (
-          !onClientCreated ||
-          (createdClient &&
-            current &&
-            toRaw(createdClient) === toRaw(current) &&
-            (!createdSocket || toRaw(current.socket) === createdSocket))
-        ) {
-          if (onClientCreated) {
-            closeOwnedConnection(
-              tokenStore,
-              tokenId,
-              createdClient,
-              createdSocket ?? null,
-            );
-          } else {
-            tokenStore.closeWebSocketConnection(tokenId);
-          }
-        }
-        const error = new Error(
-          shouldStop.value ? "任务已停止" : "连接失败 (重试后仍超时)",
-        );
-        if (shouldStop.value) {
-          error.interrupted = true;
-        }
-        throw error;
-      }
-    } catch (err) {
-      releaseOwnedSlot();
-      throw err;
-    }
-  }
-
-  // 连接成功，槽位保持占用，直到任务完成后手动释放
-  onConnectionReady?.();
-  if (options.skipInitialization) return true;
-
-  // Initialize Game Data (Critical for Battle Version and Session)
-  try {
-    // Fetch Role Info first (Standard flow)
-    await tokenStore.sendMessageWithPromise(
-      tokenId,
-      "role_getroleinfo",
-      {},
-      5000,
-    );
-    onConnectionReady?.();
-
-    // Fetch Battle Version
-    const res = await tokenStore.sendMessageWithPromise(
-      tokenId,
-      "fight_startlevel",
-      {},
-      5000,
-    );
-    onConnectionReady?.();
-    if (res?.battleData?.version) {
-      tokenStore.setBattleVersion(res.battleData.version, tokenId);
-    }
-  } catch (e) {
-    if (e?.interrupted) throw e;
-    addLog({
-      time: new Date().toLocaleTimeString(),
-      message: `初始化数据失败: ${e.message}`,
-      type: "warning",
-    });
-  }
-
-  return true;
-};
+const connectionManager = createConnectionManager({
+  tokenStore,
+  batchSettings: runtimeBatchSettings,
+  addLog,
+  shouldStop,
+});
+const { connectionQueue, releaseConnectionSlot } = connectionManager;
+const ensureConnection = (tokenId, ...args) =>
+  connectionManager.ensureConnection(tokenId, tokens.value, ...args);
 
 const readScheduledSettings = (name, fallback) =>
   new Proxy(fallback, {
@@ -4070,144 +3843,51 @@ const startBatch = async () => {
       });
       return;
     }
-    let ownsSlot = false;
-    let clientTrackingProvided = false;
-    let ownedClient = null;
-    let ownedSocket = null;
-    let runClient =
-      tokenStore.getWebSocketStatus(tokenId) === "connected"
-        ? toRaw(tokenStore.wsConnections?.[tokenId]?.client)
-        : null;
-    let runSocket = runClient ? toRaw(runClient.socket) : null;
-    let connectionInvalidated = false;
-    let stopConnectionWatch = null;
-    const assertRunConnection = () => {
-      const current = toRaw(tokenStore.wsConnections?.[tokenId]?.client);
-      const socket = toRaw(tokenStore.wsConnections?.[tokenId]?.client?.socket);
-      if (
-        shouldStop.value ||
-        connectionInvalidated ||
-        (ownsSlot && (!ownedClient || current !== ownedClient)) ||
-        (clientTrackingProvided && (!ownedClient || current !== ownedClient)) ||
-        tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
-        !current ||
-        !socket ||
-        (runClient && current !== runClient) ||
-        (runSocket && socket !== runSocket)
-      ) {
-        const error = new Error("批量任务已停止或账号连接已变化");
-        error.interrupted = true;
-        throw error;
-      }
-      if (!runClient) runClient = current;
-      if (!runSocket) runSocket = socket;
-      if (ownedClient === current && !ownedSocket) ownedSocket = socket;
-    };
-    const watchRunConnection = () => {
-      assertRunConnection();
-      if (!stopConnectionWatch) {
-        stopConnectionWatch = watch(
-          () => [
-            tokenStore.getWebSocketStatus(tokenId),
-            toRaw(tokenStore.wsConnections?.[tokenId]?.client),
-            toRaw(tokenStore.wsConnections?.[tokenId]?.client?.socket),
-          ],
-          ([status, client, socket]) => {
-            if (
-              status !== "connected" ||
-              client !== runClient ||
-              socket !== runSocket
-            )
-              connectionInvalidated = true;
-          },
-          { flush: "sync" },
-        );
-      }
-    };
     try {
       addLog({
         time: new Date().toLocaleTimeString(),
         message: `=== 开始执行: ${token.name} ===`,
         type: "info",
       });
-      await ensureConnection(
-        tokenId,
-        2,
-        (owned) => {
-          ownsSlot = owned;
-        },
-        (client, socket) => {
-          clientTrackingProvided = true;
-          ownedClient = client ? toRaw(client) : null;
-          ownedSocket = socket || null;
-          if (ownedClient) runClient = ownedClient;
-          if (ownedSocket) runSocket = ownedSocket;
-        },
-        watchRunConnection,
-      );
-      assertRunConnection();
-      const runner = new DailyTaskRunner(
-        tokenStore,
+      const result = await withManagedConnection(
         {
-          commandDelay: runtimeBatchSettings.commandDelay,
-          taskDelay: runtimeBatchSettings.taskDelay,
+          tokenId,
+          tokenName: token.name,
+          ensureConnection,
+          releaseConnectionSlot,
+          connectionQueue,
+          batchSettings: runtimeBatchSettings,
+          tokenStore,
+          shouldStop,
+          addLog,
+          logOnClose: true,
         },
-        {
-          onDreamShopChecked: (details) => {
-            assertRunConnection();
-            return markDreamShopChecked(details);
-          },
-          runDreamShopPurchases: ({ tokenId: id, checkActive, sleep, log }) => {
-            if (id !== tokenId) {
-              const error = new Error("梦境购买账号已变化，停止执行");
-              error.interrupted = true;
-              throw error;
-            }
-            return runDailyDreamPurchase({
-              accountId: id,
-              isOpen: true,
-              send: (command, params) => {
-                assertRunConnection();
-                return tokenStore.sendMessageWithPromise(
-                  id,
-                  command,
-                  params,
-                  15000,
-                );
-              },
-              checkActive: () => {
-                checkActive();
-                assertRunConnection();
-              },
-              pause: sleep,
-              onProgress: ({ confirmed, total }) =>
-                log(`梦境商品：已确认购买 ${confirmed}/${total} 件`),
-            });
-          },
+        async ({ check, isConnectionIntact }) => {
+          const result = await runDailyTasks({
+            tokenStore,
+            tokenId,
+            delays: {
+              commandDelay: runtimeBatchSettings.commandDelay,
+              taskDelay: runtimeBatchSettings.taskDelay,
+            },
+            settings:
+              activeScheduledRun.value?.accountSettings[tokenId] ?? null,
+            callbacks: {
+              shouldStop: () => shouldStop.value || !isConnectionIntact(),
+              onLog: (log) =>
+                addLog({ ...log, message: `${token.name}: ${log.message}` }),
+              onProgress: (progress) =>
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `${token.name}: 服务器每日任务完成并领奖 ${progress}%`,
+                  type: "info",
+                }),
+            },
+          });
+          check();
+          return result;
         },
       );
-      const result = await runner.run(
-        tokenId,
-        {
-          shouldStop: () =>
-            shouldStop.value ||
-            connectionInvalidated ||
-            tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
-            toRaw(tokenStore.wsConnections?.[tokenId]?.client) !== runClient ||
-            toRaw(tokenStore.wsConnections?.[tokenId]?.client?.socket) !==
-              runSocket,
-          onLog: (log) =>
-            addLog({ ...log, message: `${token.name}: ${log.message}` }),
-          onProgress: (progress) =>
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name}: 服务器每日任务完成并领奖 ${progress}%`,
-              type: "info",
-            }),
-        },
-        activeScheduledRun.value?.accountSettings[tokenId] ?? null,
-      );
-      assertRunConnection();
       const needsAttention = Boolean(result.incomplete || result.failed);
       tokenStatus.value[tokenId] = needsAttention ? "pending" : "completed";
       addLog({
@@ -4223,29 +3903,6 @@ const startBatch = async () => {
         time: new Date().toLocaleTimeString(),
         message: `${token.name}: ${error.message}`,
         type: error.interrupted ? "warning" : "error",
-      });
-    } finally {
-      stopConnectionWatch?.();
-      if (ownsSlot) {
-        try {
-          const current = toRaw(tokenStore.wsConnections?.[tokenId]?.client);
-          const socket = toRaw(
-            tokenStore.wsConnections?.[tokenId]?.client?.socket,
-          );
-          if (
-            ownedClient &&
-            current === ownedClient &&
-            (!ownedSocket || socket === ownedSocket)
-          )
-            closeOwnedConnection(tokenStore, tokenId, ownedClient, ownedSocket);
-        } finally {
-          releaseConnectionSlot();
-        }
-      }
-      addLog({
-        time: new Date().toLocaleTimeString(),
-        message: `${token.name} 连接清理结束  (队列: ${connectionQueue.active}/${runtimeBatchSettings.maxActive})`,
-        type: "info",
       });
     }
   });

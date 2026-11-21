@@ -174,39 +174,17 @@ Cloudflare Pages 的 Git 自动部署与 GitHub Actions 是独立流程。仅添
 
 需要检查窄屏布局时，可先启动 `pnpm dev --host 127.0.0.1 --port 4173 --strictPort`，再运行 `node test/visualSmoke.mjs`。脚本使用独立浏览器配置、虚构账号并禁用游戏连接，检查 360、390、768 像素的深浅色页面；默认使用 macOS 的 Microsoft Edge，其他环境可通过 `XYZW_BROWSER` 指定 Chromium 兼容浏览器路径。截图默认保存在系统临时目录，可通过 `XYZW_SCREENSHOTS` 指定。此检查不能代替真实账号、触屏及加载实际商品后的验收。
 
-### 部署代理服务 (Cloudflare Pages)
+### 部署与运行方式
 
-本项目推荐使用 Cloudflare Pages 进行部署，内置了对 API 代理的支持。
+| 方式 | 负责的功能 | 检查入口 |
+| --- | --- | --- |
+| Cloudflare Pages | 托管前端和登录代理。使用 `npm run build`，发布 `dist`；构建时将 `worker.js` 复制为 `dist/_worker.js`。 | 对应提交的 Pages 检查和线上实际资源 |
+| Vite 本地开发 / 构建预览 | `pnpm dev` 读取源码，`pnpm preview` 读取构建产物。两者都使用 `vite.config.js` 的登录代理。 | 本地网页及登录代理 |
+| Wrangler 本地预览 | 运行 `wrangler pages dev dist`，验证 Pages Worker 和静态资源。 | Wrangler 返回的本地地址 |
+| Render 调度 | `render-backend/` 提供独立的任务 API、Supabase 存储与服务器 Cron。任务能力以 `server.js` 的注册表为准，例如 `studyGame` 只包含开局命令。 | `npm ci --prefix render-backend` 后运行 `npm test --prefix render-backend` |
+| 其他托管适配 | EdgeOne 使用 `edge-functions/`，Azure 的静态路由配置位于 `staticwebapp.config.json`，Docker 使用 `docker/` 下的 Nginx 配置。 | 各环境独立验收 |
 
-1. **准备代码**：https://github.com/w1249178256/xyzw_web_helper.git
-2. **连接仓库**：在 Cloudflare Dashboard 中选择 "Pages" -> "Connect to Git"，选择本项目仓库。
-3. **构建设置**：
-    - **构建命令**: `npm run build`
-    - **构建输出目录**: `dist`
-4. **环境变量**（可选）：可以在 Cloudflare Pages 设置中添加环境变量。
-5. **部署**：点击 "Save and Deploy"。
-
-Cloudflare Pages 会自动识别 `dist/_worker.js` 并启用 Advanced Mode，无需额外配置即可实现 API 代理和静态资源托管。
-
-### 本地预览 (Cloudflare Pages)
-
-为了在本地模拟 Cloudflare Pages 环境（包括 `worker.js` 的代理功能），请使用 `wrangler`：
-
-1. **安装 wrangler**: `npm install -g wrangler`
-2. **构建项目**: `npm run build`
-3. **启动预览**: `npx wrangler pages dev dist`
-4. **访问**: 打开浏览器访问 `http://localhost:8787`
-
-> 说明：`vite.config.js` 的 `preview.proxy` 已同步复用本地开发代理配置（`/api/*`）；如需完整验证 Cloudflare Worker（`dist/_worker.js`）行为，仍可使用 `wrangler pages dev dist`。
-
-### 可选独立后端服务 (`render-backend/`)
-
-仓库内的 `render-backend/` 目录提供了基于 Node.js（Express + Supabase + `node-cron`）的可选后端调度服务，用于在服务端托管定时任务。日常纯前端或 Cloudflare Pages 部署无需启动该服务。
-
-```bash
-npm ci --prefix render-backend
-npm test --prefix render-backend
-```
+浏览器批量定时任务由 `BatchDailyTasks.vue` 发起，和 Render 的服务器调度分别配置。客户端连接由所在页面管理，角色数据和任务设置按浏览器站点保存。
 
 ---
 

@@ -1,3 +1,8 @@
+import {
+  getAccountClient,
+  trackAccountConnection,
+} from "../accountConnection.js";
+
 /**
  * WebSocket连接管理器
  */
@@ -63,25 +68,20 @@ export async function withManagedConnection(
   let ownedClient = null;
   let ownedSocket = null;
   let clientTrackingProvided = false;
-  let connectionInvalidated = false;
+  let connection = null;
 
-  const matchesOwnedConnection = () => {
-    if (typeof tokenStore?.getWebSocketStatus === "function") {
-      const status = tokenStore.getWebSocketStatus(tokenId);
-      if (status !== "connected") return false;
-    }
-    if (!ownedClient) {
-      return !(ownsSlot && clientTrackingProvided);
-    }
-    const current = unwrapRaw(tokenStore?.wsConnections?.[tokenId]?.client);
-    const currentSocket = unwrapRaw(current?.socket);
-    return (
-      current === ownedClient && (!ownedSocket || currentSocket === ownedSocket)
-    );
-  };
+  const initialClient =
+    tokenStore.getWebSocketStatus?.(tokenId) === "connected"
+      ? getAccountClient(tokenStore, tokenId)
+      : null;
+  if (initialClient)
+    connection = trackAccountConnection(tokenStore, tokenId, initialClient);
 
   const isConnectionIntact = () =>
-    !connectionInvalidated && matchesOwnedConnection();
+    (!tokenStore.getWebSocketStatus ||
+      tokenStore.getWebSocketStatus(tokenId) === "connected") &&
+    (!clientTrackingProvided || Boolean(ownedClient)) &&
+    (connection?.isIntact() ?? true);
 
   const check = () => {
     if (shouldStop?.value || !isConnectionIntact()) {
@@ -89,6 +89,20 @@ export async function withManagedConnection(
       error.interrupted = true;
       throw error;
     }
+  };
+
+  const checkReadyConnection = () => {
+    if (!ownedClient && !clientTrackingProvided && !ownsSlot)
+      ownedClient = getAccountClient(tokenStore, tokenId);
+    if (ownedClient) ownedSocket ??= unwrapRaw(ownedClient.socket) ?? null;
+    if (!connection && ownedClient)
+      connection = trackAccountConnection(
+        tokenStore,
+        tokenId,
+        ownedClient,
+        ownedSocket,
+      );
+    check();
   };
 
   try {
@@ -107,49 +121,23 @@ export async function withManagedConnection(
             ? unwrapRaw(client.socket)
             : null;
       },
-      () => {
-        if (!ownedClient) {
-          if (ownsSlot || clientTrackingProvided) {
-            connectionInvalidated = true;
-            check();
-          }
-          const readyClient = unwrapRaw(
-            tokenStore?.wsConnections?.[tokenId]?.client,
-          );
-          if (readyClient) {
-            ownedClient = readyClient;
-            ownedSocket = unwrapRaw(readyClient?.socket) || null;
-          }
-        }
-        if (!matchesOwnedConnection()) {
-          connectionInvalidated = true;
-        }
-        check();
-      },
+      checkReadyConnection,
       connectionOptions,
     );
-    if (!ownedClient && !ownsSlot && !clientTrackingProvided) {
-      const readyClient = unwrapRaw(
-        tokenStore?.wsConnections?.[tokenId]?.client,
-      );
-      if (readyClient) {
-        ownedClient = readyClient;
-        ownedSocket = unwrapRaw(readyClient?.socket) || null;
-      }
-    }
-    check();
+    checkReadyConnection();
     return await handler({ check, ownsSlot, isConnectionIntact });
   } finally {
+    connection?.stop();
     if (ownsSlot) {
       let closeRequested = false;
       try {
         const current = unwrapRaw(tokenStore.wsConnections?.[tokenId]?.client);
         const currentSocket = unwrapRaw(current?.socket);
-        const canClose = ownedClient
-          ? current === ownedClient &&
-            (!ownedSocket || currentSocket === ownedSocket)
-          : !clientTrackingProvided && !current;
-        if (canClose && ownedClient) {
+        if (
+          ownedClient &&
+          current === ownedClient &&
+          (!ownedSocket || currentSocket === ownedSocket)
+        ) {
           closeOwnedConnection(tokenStore, tokenId, ownedClient, ownedSocket);
           closeRequested = true;
         }
@@ -281,6 +269,7 @@ export async function restorePresetFormation({
  * @param {object} options.batchSettings - 批量设置
  * @param {function} options.addLog - 日志添加函数
  * @param {object} [options.shouldStop] - 可选停止标志 ref
+ * @param {object} [options.connectionQueue] - 当前批量运行页面的槽位计数
  * @returns {object} - 连接管理器对象
  */
 export function createConnectionManager({
@@ -288,6 +277,7 @@ export function createConnectionManager({
   batchSettings,
   addLog,
   shouldStop = null,
+  connectionQueue = { active: 0 },
 }) {
   /**
    * 等待连接槽位
@@ -362,6 +352,10 @@ export function createConnectionManager({
 
     if (!connected) {
       await waitForConnectionSlot();
+      connected = tokenStore.getWebSocketStatus(tokenId) === "connected";
+      if (connected) releaseConnectionSlot();
+    }
+    if (!connected) {
       onSlotChange?.(true);
       onClientCreated?.(null, null);
 
@@ -531,33 +525,12 @@ export function createConnectionManager({
     return true;
   };
 
-  /**
-   * 关闭连接并释放槽位
-   * @param {string} tokenId - Token ID
-   * @param {string} tokenName - Token名称
-   * @param {boolean} ownsSlot - 是否由当前调用创建并持有槽位
-   */
-  const closeConnection = (tokenId, tokenName, ownsSlot = true) => {
-    if (!ownsSlot) return;
-    try {
-      tokenStore.closeWebSocketConnection(tokenId);
-    } finally {
-      releaseConnectionSlot();
-    }
-    addLog({
-      time: new Date().toLocaleTimeString(),
-      message: `${tokenName} 连接已关闭  (队列: ${connectionQueue.active}/${batchSettings.maxActive})`,
-      type: "info",
-    });
-  };
-
   return {
     connectionQueue,
     waitForConnectionSlot,
     releaseConnectionSlot,
     waitForConnection,
     ensureConnection,
-    closeConnection,
   };
 }
 

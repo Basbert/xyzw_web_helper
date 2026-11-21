@@ -1,3 +1,8 @@
+import {
+  getAccountClient,
+  trackAccountConnection,
+} from "./accountConnection.js";
+
 // QuizModule uses the standard activity (actId 1) and weekly reward tiers.
 const STANDARD_QUIZ_ID = 1;
 const WEEKLY_PERIOD = 2;
@@ -121,16 +126,11 @@ export async function runWeeklyQuiz({
   if (account.value.weeklyQuizPhase)
     return result("pending", "咸鱼大冲关正在执行");
 
-  const client = tokenStore.getWebSocketClient(tokenId);
-  const socket = client?.socket;
+  const client = getAccountClient(tokenStore, tokenId);
+  const connection = trackAccountConnection(tokenStore, tokenId, client);
   const checkConnection = () => {
     check();
-    if (
-      !client ||
-      tokenStore.getWebSocketStatus(tokenId) !== "connected" ||
-      tokenStore.getWebSocketClient(tokenId) !== client ||
-      client.socket !== socket
-    ) {
+    if (!client || !connection.isIntact()) {
       const error = new Error("咸鱼大冲关已停止，原连接发生变化");
       error.interrupted = true;
       throw error;
@@ -249,6 +249,7 @@ export async function runWeeklyQuiz({
     if (error.interrupted) throw error;
     return result("pending", `咸鱼大冲关待核对：${error.message}`);
   } finally {
+    connection.stop();
     account.value.weeklyQuizPhase = "";
   }
 }
