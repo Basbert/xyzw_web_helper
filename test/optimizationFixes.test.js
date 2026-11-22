@@ -3106,6 +3106,7 @@ describe("Commit 7 review round-4 regression fixes (2 P1 + 3 P2)", () => {
     sharedLocks,
     storeArrayBufferImpl = null,
     deleteArrayBufferImpl = null,
+    clearAllImpl = null,
     transformTokenImpl = null,
   }) => {
     const pinia = createPinia();
@@ -3117,6 +3118,10 @@ describe("Commit 7 review round-4 regression fixes (2 P1 + 3 P2)", () => {
       error() {},
       verbose() {},
       gameMessage() {},
+      wsMessage() {},
+      wsConnect() {},
+      wsDisconnect() {},
+      connectionLock() {},
     };
     const recoveryTimers = new Map();
     let nextTimer = 0;
@@ -3155,10 +3160,12 @@ describe("Commit 7 review round-4 regression fixes (2 P1 + 3 P2)", () => {
                 sharedIdb.delete(k);
                 return true;
               }),
-            clearAll: async () => {
-              sharedIdb.clear();
-              return true;
-            },
+            clearAll:
+              clearAllImpl ||
+              (async () => {
+                sharedIdb.clear();
+                return true;
+              }),
           }),
         },
         "@/router": {
@@ -3582,7 +3589,7 @@ describe("Commit 7 review round-4 regression fixes (2 P1 + 3 P2)", () => {
       },
     });
     try {
-      const [commitRes] = await Promise.all([
+      const [commitRes, removeRes] = await Promise.all([
         tabB.store.commitCredentialUpdate("acc1", {
           expectedVersion: 0,
           expectedToken: "old-token",
@@ -3591,7 +3598,8 @@ describe("Commit 7 review round-4 regression fixes (2 P1 + 3 P2)", () => {
         }),
         tabB.store.removeToken("acc1"),
       ]);
-      assert.equal(commitRes.committed, false);
+      assert.equal(commitRes.committed, true);
+      assert.equal(removeRes.ok, true);
       assert.equal(JSON.parse(sharedStorageB.get("gameTokens")).length, 0);
       assert.equal(sharedIdbB.has("acc1"), false);
     } finally {
@@ -3767,6 +3775,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     return {
       request(name, optionsOrCb, maybeCb) {
         const cb = typeof optionsOrCb === "function" ? optionsOrCb : maybeCb;
+        const opts = typeof optionsOrCb === "function" ? {} : optionsOrCb;
+        const signal = opts?.signal;
         const prev = tails.get(name) || Promise.resolve();
         let releaseCurrent;
         const held = new Promise((resolve) => {
@@ -3776,12 +3786,32 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
           name,
           prev.then(() => held),
         );
-        return prev.then(async () => {
-          try {
-            return await cb({ name });
-          } finally {
+        return new Promise((resolve, reject) => {
+          let started = false;
+          let aborted = false;
+          const onAbort = () => {
+            if (started || aborted) return;
+            aborted = true;
             releaseCurrent();
+            reject(new Error("AbortError"));
+          };
+          if (signal?.aborted) {
+            onAbort();
+            return;
           }
+          signal?.addEventListener?.("abort", onAbort, { once: true });
+          prev.then(async () => {
+            if (aborted) return;
+            started = true;
+            signal?.removeEventListener?.("abort", onAbort);
+            try {
+              resolve(await cb({ name }));
+            } catch (err) {
+              reject(err);
+            } finally {
+              releaseCurrent();
+            }
+          });
         });
       },
     };
@@ -3795,6 +3825,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     getArrayBufferImpl = null,
     storeArrayBufferImpl = null,
     deleteArrayBufferImpl = null,
+    clearAllImpl = null,
+    onStorageWrite = null,
   }) => {
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -3805,6 +3837,10 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       error() {},
       verbose() {},
       gameMessage() {},
+      wsMessage() {},
+      wsConnect() {},
+      wsDisconnect() {},
+      connectionLock() {},
     };
     const windowListeners = new Map();
     const mockWindow = {
@@ -3822,18 +3858,32 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
         }
       },
     };
-    const storageAdapter = {
-      getItem: (k) => (sharedStorage.has(k) ? sharedStorage.get(k) : null),
-      setItem: (k, v) => {
-        if (shouldFailSetItem(k, String(v))) {
-          const err = new Error("QuotaExceededError");
-          err.name = "QuotaExceededError";
-          throw err;
-        }
-        sharedStorage.set(k, String(v));
+    const storageAdapter = Object.assign(
+      Object.create(globalThis.Storage.prototype),
+      {
+        getItem: (k) => (sharedStorage.has(k) ? sharedStorage.get(k) : null),
+        setItem: (k, v) => {
+          const next = String(v);
+          if (shouldFailSetItem(k, next)) {
+            const err = new Error("QuotaExceededError");
+            err.name = "QuotaExceededError";
+            throw err;
+          }
+          const prev = sharedStorage.has(k) ? sharedStorage.get(k) : null;
+          sharedStorage.set(k, next);
+          if (prev !== next) {
+            onStorageWrite?.(k, prev, next);
+          }
+        },
+        removeItem: (k) => {
+          const prev = sharedStorage.has(k) ? sharedStorage.get(k) : null;
+          sharedStorage.delete(k);
+          if (prev !== null) {
+            onStorageWrite?.(k, prev, null);
+          }
+        },
       },
-      removeItem: (k) => sharedStorage.delete(k),
-    };
+    );
     const recoveryTimers = new Map();
     let nextTimer = 0;
 
@@ -3866,10 +3916,12 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
                 sharedIdb.delete(k);
                 return true;
               }),
-            clearAll: async () => {
-              sharedIdb.clear();
-              return true;
-            },
+            clearAll:
+              clearAllImpl ||
+              (async () => {
+                sharedIdb.clear();
+                return true;
+              }),
           }),
         },
         "@/router": {
@@ -4762,6 +4814,768 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       );
     } finally {
       tab.pinia._e.stop();
+    }
+  });
+
+  test("Round7 P1-1: cleanExpiredTokens re-evaluates expiry on latest locked record so a cross-tab re-login or upgrade is never deleted", async () => {
+    const staleDate = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc-relogin",
+            name: "刚重登号",
+            roleId: "1001",
+            token: "old-manual-token",
+            importMethod: "manual",
+            createdAt: staleDate,
+            lastUsed: staleDate,
+          },
+          {
+            id: "acc-upgraded",
+            name: "刚升级号",
+            roleId: "1002",
+            token: "upgraded-manual-token",
+            importMethod: "manual",
+            createdAt: staleDate,
+            lastUsed: staleDate,
+          },
+          {
+            id: "acc-truly-expired",
+            name: "真过期号",
+            roleId: "1003",
+            token: "expired-manual-token",
+            importMethod: "manual",
+            createdAt: staleDate,
+            lastUsed: staleDate,
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdb = new Map([
+      ["temp-qr-bin", new Uint8Array([9, 9, 9]).buffer],
+    ]);
+    const sharedLocks = createLockManager();
+
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+    const tabB = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+
+    try {
+      // Tab B re-logs in acc-relogin via QR (saves new BIN + wxQrcode + upgradedToPermanent)
+      await upsertImportedRoleTokens({
+        roles: [
+          {
+            id: "temp-qr-bin",
+            roleId: "1001",
+            name: "刚重登号",
+            token: "fresh-qr-relogin-token",
+            importMethod: "wxQrcode",
+          },
+        ],
+        tokenStore: tabB.store,
+        getArrayBuffer: async (k) => sharedIdb.get(k) ?? null,
+        storeArrayBuffer: async (k, buf) => {
+          sharedIdb.set(k, buf);
+          return true;
+        },
+        deleteArrayBuffer: async (k) => sharedIdb.delete(k),
+      });
+      // Tab B upgrades acc-upgraded to permanent
+      assert.equal(tabB.store.upgradeTokenToPermanent("acc-upgraded"), true);
+
+      // Before Tab A receives any storage event, Tab A runs cleanExpiredTokens()
+      const cleaned = await tabA.store.cleanExpiredTokens();
+      assert.equal(cleaned, 1);
+
+      const persisted = JSON.parse(sharedStorage.get("gameTokens"));
+      assert.equal(persisted.length, 2);
+      const keptRelogin = persisted.find((t) => t.id === "acc-relogin");
+      const keptUpgraded = persisted.find((t) => t.id === "acc-upgraded");
+      assert.equal(keptRelogin?.token, "fresh-qr-relogin-token");
+      assert.equal(keptRelogin?.importMethod, "wxQrcode");
+      assert.equal(keptRelogin?.upgradedToPermanent, true);
+      assert.deepEqual(
+        Array.from(new Uint8Array(sharedIdb.get("acc-relogin"))),
+        [9, 9, 9],
+      );
+      assert.equal(keptUpgraded?.upgradedToPermanent, true);
+      assert.equal(
+        persisted.some((t) => t.id === "acc-truly-expired"),
+        false,
+      );
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+  });
+
+  test("Round7 P2-1: cross-tab clearAllTokens or removeToken immediately disconnects removed accounts in other tabs and blocks sends", async () => {
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc1",
+            name: "主号1",
+            roleId: "101",
+            token: "tok-1",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+          {
+            id: "acc2",
+            name: "主号2",
+            roleId: "102",
+            token: "tok-2",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+      ["selectedTokenId", "acc1"],
+    ]);
+    const sharedIdb = new Map([
+      ["acc1", new Uint8Array([1]).buffer],
+      ["acc2", new Uint8Array([2]).buffer],
+    ]);
+    const sharedLocks = createLockManager();
+
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+    const tabB = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+
+    try {
+      tabB.store.initConnectionCoordination();
+      const sentCmds = [];
+      const disconnectedIds = [];
+      const makeMockClient = (id) => ({
+        socket: { readyState: 1 },
+        send(cmd) {
+          sentCmds.push(`${id}:${cmd}`);
+        },
+        sendWithPromise(cmd) {
+          sentCmds.push(`${id}:${cmd}`);
+          return Promise.resolve({ ok: true });
+        },
+        disconnect() {
+          disconnectedIds.push(id);
+          if (this.socket) this.socket.readyState = 3;
+          this.socket = null;
+        },
+      });
+      tabB.store.wsConnections.acc1 = {
+        status: "connected",
+        client: makeMockClient("acc1"),
+        tokenId: "acc1",
+      };
+      tabB.store.wsConnections.acc2 = {
+        status: "connected",
+        client: makeMockClient("acc2"),
+        tokenId: "acc2",
+      };
+
+      // Case 1: Tab A deletes only acc1 -> Tab B receives storage event -> acc1 disconnected & blocked, acc2 stays connected
+      const rmRes = await tabA.store.removeToken("acc1");
+      assert.equal(rmRes.ok, true);
+      tabB.mockWindow.dispatchEvent({
+        type: "storage",
+        key: "gameTokens",
+        newValue: sharedStorage.get("gameTokens"),
+        storageArea: tabB.storageAdapter,
+      });
+
+      assert.deepEqual(disconnectedIds, ["acc1"]);
+      assert.equal(tabB.store.getWebSocketStatus("acc1"), "disconnected");
+      assert.equal(tabB.store.selectedTokenId, "");
+      assert.equal(tabB.store.sendMessage("acc1", "role_getroleinfo"), false);
+      await assert.rejects(
+        tabB.store.sendMessageWithPromise("acc1", "role_getroleinfo"),
+        /WebSocket未连接/,
+      );
+      assert.equal(tabB.store.getWebSocketStatus("acc2"), "connected");
+      assert.equal(tabB.store.sendMessage("acc2", "role_getroleinfo"), true);
+      assert.deepEqual(sentCmds, ["acc2:role_getroleinfo"]);
+
+      // Case 2: Tab A clears all tokens -> Tab B receives storage event -> acc2 also disconnected & blocked, no ws_connection resurrected
+      const clearRes = await tabA.store.clearAllTokens();
+      assert.equal(clearRes.ok, true);
+      tabB.mockWindow.dispatchEvent({
+        type: "storage",
+        key: "gameTokens",
+        newValue: sharedStorage.get("gameTokens"),
+        storageArea: tabB.storageAdapter,
+      });
+
+      assert.deepEqual(disconnectedIds, ["acc1", "acc2"]);
+      assert.equal(tabB.store.getWebSocketStatus("acc2"), "disconnected");
+      assert.equal(tabB.store.sendMessage("acc2", "fight_startlevel"), false);
+      await assert.rejects(
+        tabB.store.sendMessageWithPromise("acc2", "fight_startlevel"),
+        /WebSocket未连接/,
+      );
+      assert.equal(sharedStorage.has("ws_connection_acc2"), false);
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+  });
+
+  test("Round7 P2-2: removeToken and clearAllTokens acquire lock before mutating selection/connections and return structured failure on lock timeout", async () => {
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc1",
+            name: "主号",
+            roleId: "1001",
+            token: "tok-1",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+      ["selectedTokenId", "acc1"],
+    ]);
+    const sharedIdb = new Map([["acc1", new Uint8Array([5, 6]).buffer]]);
+    const sharedLocks = createLockManager();
+
+    const tab = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+
+    try {
+      let disconnectCalls = 0;
+      tab.store.wsConnections.acc1 = {
+        status: "connected",
+        client: {
+          socket: { readyState: 1 },
+          disconnect() {
+            disconnectCalls += 1;
+            if (this.socket) this.socket.readyState = 3;
+            this.socket = null;
+          },
+        },
+        tokenId: "acc1",
+      };
+
+      // Hold the global store lock from another tab
+      let releaseBlocker;
+      const blockerHeld = sharedLocks.request(
+        "xyzw-gameTokens",
+        () =>
+          new Promise((resolve) => {
+            releaseBlocker = resolve;
+          }),
+      );
+
+      // Single-account removeToken times out -> returns structured failure, preserves selectedTokenId, WS, record, and BIN!
+      const delOutcome = await tab.store.removeToken("acc1", {
+        lockWaitTimeoutMs: 25,
+      });
+      assert.equal(delOutcome.ok, false);
+      assert.equal(delOutcome.retryable, true);
+      assert.equal(delOutcome.reason, "lock_timeout");
+      assert.match(delOutcome.message || "", /超时/);
+      assert.equal(tab.store.selectedTokenId, "acc1");
+      assert.equal(tab.store.wsConnections.acc1?.status, "connected");
+      assert.equal(disconnectCalls, 0);
+      assert.equal(tab.store.gameTokens.length, 1);
+      assert.equal(sharedIdb.has("acc1"), true);
+
+      // clearAllTokens times out -> returns structured failure, preserves selectedTokenId, WS, record, and BIN!
+      const clearOutcome = await tab.store.clearAllTokens({
+        lockWaitTimeoutMs: 25,
+      });
+      assert.equal(clearOutcome.ok, false);
+      assert.equal(clearOutcome.retryable, true);
+      assert.equal(clearOutcome.reason, "lock_timeout");
+      assert.match(clearOutcome.message || "", /超时/);
+      assert.equal(tab.store.selectedTokenId, "acc1");
+      assert.equal(tab.store.wsConnections.acc1?.status, "connected");
+      assert.equal(disconnectCalls, 0);
+      assert.equal(tab.store.gameTokens.length, 1);
+      assert.equal(sharedIdb.has("acc1"), true);
+
+      // Release blocker -> retry removeToken succeeds cleanly and closes connection
+      releaseBlocker();
+      await blockerHeld;
+
+      const retryOutcome = await tab.store.removeToken("acc1");
+      assert.equal(retryOutcome.ok, true);
+      assert.equal(tab.store.selectedTokenId, "");
+      assert.equal(disconnectCalls, 1);
+      assert.equal(tab.store.gameTokens.length, 0);
+      assert.equal(sharedIdb.has("acc1"), false);
+    } finally {
+      tab.pinia._e.stop();
+    }
+  });
+
+  test("Self-Audit P1-1 & P1-2: real instanceof Storage same-tab StorageEvent and IndexedDB-blocked deletion preserve selection, groups, gameData, and cross-tab connections", async () => {
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc1",
+            name: "主号",
+            roleId: "1001",
+            token: "tok-1",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+      ["selectedTokenId", "acc1"],
+      [
+        "tokenGroups",
+        JSON.stringify([
+          { id: "g1", name: "主力", color: "#1677ff", tokenIds: ["acc1"] },
+        ]),
+      ],
+    ]);
+    const sharedIdb = new Map([["acc1", new Uint8Array([3, 3]).buffer]]);
+    const sharedLocks = createLockManager();
+    let failIdb = true;
+    const crossTabEventsToB = [];
+    let tabB = null;
+
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+      deleteArrayBufferImpl: async (k) => {
+        if (failIdb) return false;
+        sharedIdb.delete(k);
+        return true;
+      },
+      clearAllImpl: async () => {
+        if (failIdb) return false;
+        sharedIdb.clear();
+        return true;
+      },
+      onStorageWrite: (key, oldValue, newValue) => {
+        if (tabB) {
+          crossTabEventsToB.push({ key, oldValue, newValue });
+          tabB.mockWindow.dispatchEvent(
+            new globalThis.StorageEvent("storage", {
+              key,
+              oldValue,
+              newValue,
+              storageArea: tabB.storageAdapter,
+            }),
+          );
+        }
+      },
+    });
+    tabB = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+
+    try {
+      assert.equal(tabA.storageAdapter instanceof globalThis.Storage, true);
+      tabA.store.initConnectionCoordination();
+      tabB.store.initConnectionCoordination();
+
+      let tabADisconnects = 0;
+      let tabBDisconnects = 0;
+      tabA.store.wsConnections.acc1 = {
+        status: "connected",
+        client: {
+          socket: { readyState: 1 },
+          disconnect() {
+            tabADisconnects += 1;
+            if (this.socket) this.socket.readyState = 3;
+            this.socket = null;
+          },
+        },
+        tokenId: "acc1",
+      };
+      tabB.store.wsConnections.acc1 = {
+        status: "connected",
+        client: {
+          socket: { readyState: 1 },
+          disconnect() {
+            tabBDisconnects += 1;
+            if (this.socket) this.socket.readyState = 3;
+            this.socket = null;
+          },
+        },
+        tokenId: "acc1",
+      };
+      tabA.store.setBattleVersion(42, "acc1");
+      tabB.store.setBattleVersion(42, "acc1");
+
+      // Case A: removeToken with blocked IndexedDB -> ZERO cross-tab events, ALL state preserved in Tab A and Tab B!
+      const rmFail = await tabA.store.removeToken("acc1");
+      assert.equal(rmFail.ok, false);
+      assert.equal(rmFail.reason, "bin_delete_failed");
+      assert.equal(crossTabEventsToB.length, 0);
+      assert.equal(tabA.store.selectedTokenId, "acc1");
+      assert.equal(tabB.store.selectedTokenId, "acc1");
+      assert.equal(tabA.store.wsConnections.acc1?.status, "connected");
+      assert.equal(tabB.store.wsConnections.acc1?.status, "connected");
+      assert.equal(tabADisconnects, 0);
+      assert.equal(tabBDisconnects, 0);
+      assert.equal(
+        tabA.store.getAccountGameData("acc1").value.battleVersion,
+        42,
+      );
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(tabA.store.tokenGroups[0].tokenIds)),
+        ["acc1"],
+      );
+      assert.deepEqual(
+        JSON.parse(sharedStorage.get("tokenGroups"))[0].tokenIds,
+        ["acc1"],
+      );
+
+      // Case B: clearAllTokens with blocked IndexedDB -> ZERO cross-tab events, ALL state preserved in Tab A and Tab B!
+      const clearFail = await tabA.store.clearAllTokens();
+      assert.equal(clearFail.ok, false);
+      assert.equal(clearFail.reason, "bin_delete_failed");
+      assert.equal(crossTabEventsToB.length, 0);
+      assert.equal(tabA.store.selectedTokenId, "acc1");
+      assert.equal(tabB.store.selectedTokenId, "acc1");
+      assert.equal(tabADisconnects, 0);
+      assert.equal(tabBDisconnects, 0);
+      assert.deepEqual(
+        JSON.parse(sharedStorage.get("tokenGroups"))[0].tokenIds,
+        ["acc1"],
+      );
+
+      // Case C: IndexedDB recovers -> removeToken succeeds cleanly, Tab A closes post-lock, Tab B disconnects on real cross-tab event
+      failIdb = false;
+      const rmOk = await tabA.store.removeToken("acc1");
+      assert.equal(rmOk.ok, true);
+      assert.equal(tabADisconnects, 1);
+      assert.equal(tabBDisconnects, 1);
+      assert.equal(tabA.store.getWebSocketStatus("acc1"), "disconnected");
+      assert.equal(tabB.store.getWebSocketStatus("acc1"), "disconnected");
+      assert.equal(tabA.store.selectedTokenId, "");
+      assert.equal(tabB.store.selectedTokenId, "");
+      assert.deepEqual(
+        JSON.parse(sharedStorage.get("tokenGroups"))[0].tokenIds,
+        [],
+      );
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+  });
+
+  test("Self-Audit P2-1 & P2-2: salt bottle recovery sends single non-retrying role query (retryCount=2) and TokenImport upgradeTokenToPermanent uses locked commit", async () => {
+    const { DailyTaskRunner } = await loadModule(
+      new URL("../src/utils/dailyTaskRunner.js", import.meta.url),
+      {
+        "@/utils/dailyTaskState":
+          await import("../src/utils/dailyTaskState.js"),
+        "@/utils/dailyTaskSettings":
+          await import("../src/utils/dailyTaskSettings.js"),
+        "./accountConnection.js":
+          await import("../src/utils/accountConnection.js"),
+        "./accountIdentity.js": accountIdentity,
+        "./daily/arena.js": await import("../src/utils/daily/arena.js"),
+        "./daily/dream.js": await import("../src/utils/daily/dream.js"),
+        "./weeklyQuiz.js": await import("../src/utils/weeklyQuiz.js"),
+      },
+    );
+    const roleInfoRetryCounts = [];
+    let stopSent = false;
+    const makeRole = (helperStopTime) => ({
+      dailyTask: {
+        dailyTime: 1700000000,
+        complete: {
+          1: -1,
+          2: -1,
+          3: -1,
+          4: -1,
+          5: -1,
+          6: -1,
+          7: -1,
+          12: -1,
+          13: -1,
+          14: 0,
+        },
+        dailyPoint: 0,
+        dailyReward: {},
+        weekPoint: 0,
+        weekReward: {},
+      },
+      bottleHelpers: { helperStopTime },
+      statistics: {
+        "artifact:normal:lottery:time": 1700000010,
+        "genie:sweep:buy": 3,
+      },
+      statisticsTime: {
+        "genie:sweep:buy": 1700000010,
+        "legion:sign:in": 1700000010,
+        "genie:daily:free:1": 1700000010,
+        "genie:daily:free:2": 1700000010,
+        "genie:daily:free:3": 1700000010,
+        "genie:daily:free:4": 1700000010,
+      },
+    });
+    const config = {
+      tasks: [
+        [1, 1, 1],
+        [2, 2, 1],
+        [3, 3, 3],
+        [4, 4, 2],
+        [5, 5, 5],
+        [6, 6, 3],
+        [7, 7, 3],
+        [8, 13, 1],
+        [9, 12, 1],
+        [10, 14, 1],
+      ].map(([id, completeCondition, completeValue]) => ({
+        id,
+        completeCondition,
+        completeValue,
+      })),
+      dailyRewards: [],
+      weeklyRewards: [],
+    };
+    const runner = new DailyTaskRunner(
+      {
+        gameTokens: [{ id: "acc1", name: "主号" }],
+        selectedToken: { id: "acc1" },
+        wsConnections: {
+          acc1: {
+            client: {
+              serverTime: 1700000100 * 1000,
+            },
+          },
+        },
+        getWebSocketStatus: () => "connected",
+        sendGetRoleInfo: async (_id, _params, retryCount) => {
+          roleInfoRetryCounts.push(retryCount);
+          return {
+            role: makeRole(stopSent ? 1700000000 : 1700009000),
+          };
+        },
+        sendMessageWithPromise: async (_id, cmd) => {
+          if (cmd === "bottlehelper_stop") {
+            stopSent = true;
+            throw new Error("请求超时");
+          }
+          return {};
+        },
+      },
+      { commandDelay: 0, taskDelay: 0 },
+      {
+        loadConfig: async () => config,
+        sleep: async () => {},
+      },
+    );
+    await assert.rejects(
+      runner.run(
+        "acc1",
+        {},
+        {
+          arenaFormation: 1,
+          bossFormation: 1,
+          bossTimes: 0,
+          claimBottle: true,
+          payRecruit: false,
+          openBox: false,
+          arenaEnable: false,
+          claimHangUp: false,
+          claimLegacy: false,
+          claimEmail: false,
+          weeklyQuizEnabled: false,
+          blackMarketPurchase: false,
+          dreamShopPurchase: false,
+          freeGachaEnable: false,
+        },
+      ),
+      /请求超时/,
+    );
+    // Initial refreshServerRole + recovery probe MUST both pass retryCount === 2 (no unintended retries)
+    assert.ok(roleInfoRetryCounts.length >= 2);
+    assert.ok(
+      roleInfoRetryCounts.every((count) => count === 2),
+      `expected all sendGetRoleInfo calls to pass retryCount=2, got ${JSON.stringify(roleInfoRetryCounts)}`,
+    );
+
+    const tokenImportSrc = await readFile(
+      new URL("../src/views/TokenImport/TokenImport.vue", import.meta.url),
+      "utf8",
+    );
+    assert.match(
+      tokenImportSrc,
+      /const upgradeTokenToPermanent[\s\S]*?commitCredentialUpdate\(token\.id/,
+    );
+    assert.match(
+      tokenImportSrc,
+      /const upgradeTokenToPermanent[\s\S]*?storage_write_failed/,
+    );
+    assert.match(tokenImportSrc, /commitImportBase64Token/);
+  });
+
+  test("Self-Audit Pass2 P1: stalled IndexedDB openDB does not multiply open timeouts across N accounts in clearAllTokens or removeToken", async () => {
+    let openDbCalls = 0;
+    const { default: useIndexedDB } = await loadModule(
+      new URL("../src/hooks/useIndexedDB.ts", import.meta.url),
+      {
+        idb: {
+          openDB: () => {
+            openDbCalls += 1;
+            return new Promise(() => {});
+          },
+        },
+        vue,
+      },
+      { console: { log() {}, error() {} }, setTimeout, clearTimeout },
+    );
+    const stalledIdb = useIndexedDB({ openTimeoutMs: 30 });
+    // Wait for initial startInit() open attempt to settle on timeout
+    await new Promise((r) => setTimeout(r, 45));
+    openDbCalls = 0;
+
+    const fiveAccounts = Array.from({ length: 5 }, (_, idx) => ({
+      id: `acc-${idx + 1}`,
+      name: `账号${idx + 1}`,
+      roleId: String(1000 + idx),
+      token: `tok-${idx + 1}`,
+      importMethod: "bin",
+      createdAt: "2026-11-01T00:00:00.000Z",
+    }));
+    const sharedStorage = new Map([
+      ["gameTokens", JSON.stringify(fiveAccounts)],
+    ]);
+    const sharedLocks = createLockManager();
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const noopLogger = {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+      verbose() {},
+      gameMessage() {},
+      wsMessage() {},
+      wsConnect() {},
+      wsDisconnect() {},
+      connectionLock() {},
+    };
+    const storageAdapter = Object.assign(
+      Object.create(globalThis.Storage.prototype),
+      {
+        getItem: (k) => (sharedStorage.has(k) ? sharedStorage.get(k) : null),
+        setItem: (k, v) => sharedStorage.set(k, String(v)),
+        removeItem: (k) => sharedStorage.delete(k),
+      },
+    );
+    const mod = await loadModule(
+      new URL("../src/stores/tokenStore.ts", import.meta.url),
+      {
+        "@/utils/accountIdentity.js": accountIdentity,
+        "@vueuse/core": {
+          useLocalStorage: (key, initial, opts) =>
+            vueUseCore.useStorage(key, initial, storageAdapter, opts),
+        },
+        pinia: { defineStore },
+        vue,
+        "@/hooks/useIndexedDB": { default: () => stalledIdb },
+        "@/router": {
+          default: { currentRoute: { value: { path: "/tokens" } } },
+        },
+        "@/utils/accountGameData": accountData,
+        "@/utils/bonProtocol": { g_utils: {} },
+        "@/utils/connectionRecovery": {
+          createConnectionRecovery: (opts) =>
+            createConnectionRecovery({
+              ...opts,
+              setTimer: () => 1,
+              clearTimer: () => {},
+            }),
+        },
+        "@/utils/logger": {
+          gameLogger: noopLogger,
+          tokenLogger: noopLogger,
+          wsLogger: noopLogger,
+        },
+        "@/utils/randomSeed": { generateRandomSeed: () => 1 },
+        "@/utils/token": {
+          fetchTokenPayloadFromUrl: async () => ({}),
+          scheduleAuthUserRequest: (fn) => fn(),
+          setAuthUserRateLimiterCallback() {},
+          transformToken: async () => "{}",
+        },
+        "@/utils/wechatForceLogout": {
+          refreshTokenFromCombUser: async () => ({}),
+          roleIndexFromServerId: () => 0,
+        },
+        "@/utils/xyzwWebSocket": { XyzwWebSocketClient: class {} },
+        "./events/index.js": { $emit: { emit() {} }, emitPlus() {} },
+      },
+      {
+        AbortController,
+        WebSocket: { CLOSED: 3 },
+        localStorage: storageAdapter,
+        navigator: { onLine: true, locks: sharedLocks },
+        setTimeout,
+        clearTimeout,
+        setInterval: () => 1,
+        clearInterval() {},
+        window: {
+          location: { href: "http://127.0.0.1/" },
+          addEventListener() {},
+          removeEventListener() {},
+          dispatchEvent() {},
+        },
+        document: {
+          visibilityState: "visible",
+          addEventListener() {},
+          removeEventListener() {},
+        },
+      },
+    );
+    const store = mod.useTokenStore();
+    try {
+      const clearRes = await store.clearAllTokens();
+      assert.equal(clearRes.ok, false);
+      assert.equal(clearRes.reason, "bin_delete_failed");
+      assert.equal(
+        openDbCalls,
+        1,
+        `clearAllTokens(5 accounts) must attempt openDB at most once, got ${openDbCalls}`,
+      );
+
+      openDbCalls = 0;
+      const rmRes = await store.removeToken("acc-1");
+      assert.equal(rmRes.ok, false);
+      assert.equal(rmRes.reason, "bin_delete_failed");
+      assert.equal(
+        openDbCalls,
+        1,
+        `removeToken must attempt openDB at most once, got ${openDbCalls}`,
+      );
+      assert.equal(store.gameTokens.length, 5);
+    } finally {
+      pinia._e.stop();
     }
   });
 });

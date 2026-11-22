@@ -647,7 +647,7 @@ export class DailyTaskRunner {
                       "warning",
                     );
                     const verifyResp = await this.sendRequest(() =>
-                      this.tokenStore.sendGetRoleInfo(tokenId, {}, 0),
+                      this.tokenStore.sendGetRoleInfo(tokenId, {}, 2),
                     );
                     const verifiedRole = verifyResp?.role;
                     if (isConfirmedRunning(verifiedRole)) {

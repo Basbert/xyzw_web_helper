@@ -1113,12 +1113,38 @@ const upgradeTokenToPermanent = (token) => {
     content: `确认要将Token "${token.name}" 升级为长期有效吗？升级后该Token将不会因24小时未使用而被自动清理。`,
     positiveText: "确认升级",
     negativeText: "取消",
-    onPositiveClick: () => {
-      const success = tokenStore.upgradeTokenToPermanent(token.id);
-      if (success) {
-        message.success(`Token "${token.name}" 已升级为长期有效！`);
-      } else {
+    onPositiveClick: async () => {
+      try {
+        if (typeof tokenStore.commitCredentialUpdate === "function") {
+          const commit = await tokenStore.commitCredentialUpdate(token.id, {
+            updates: {
+              upgradedToPermanent: true,
+              upgradedAt: new Date().toISOString(),
+            },
+          });
+          if (commit?.reason === "storage_write_failed") {
+            message.error(
+              "升级失败：浏览器本地存储空间不足或不可写，已保留原状态",
+            );
+            return false;
+          }
+          if (!commit?.committed) {
+            message.error("升级失败，账号不存在或状态已变更，请刷新后重试");
+            return false;
+          }
+          message.success(`Token "${token.name}" 已升级为长期有效！`);
+          return true;
+        }
+        const success = tokenStore.upgradeTokenToPermanent(token.id);
+        if (success) {
+          message.success(`Token "${token.name}" 已升级为长期有效！`);
+          return true;
+        }
         message.error("升级失败，该Token可能已经是长期有效状态");
+        return false;
+      } catch (error) {
+        message.error(error?.message || "升级为长期有效失败，请稍后重试");
+        return false;
       }
     },
   });
@@ -1323,7 +1349,12 @@ const saveEdit = async () => {
 
   try {
     await editFormRef.value.validate();
+  } catch {
+    // 表单校验未通过
+    return;
+  }
 
+  try {
     const snapshot = editingSnapshot.value;
     const tokenId = snapshot?.id || editingToken.value.id;
     const payload = buildTokenEditCommitPayload(snapshot, editForm);
@@ -1375,7 +1406,7 @@ const saveEdit = async () => {
     editingToken.value = null;
     editingSnapshot.value = null;
   } catch (error) {
-    // 验证失败
+    message.error(error?.message || "保存Token信息失败，请稍后重试");
   }
 };
 
@@ -1434,28 +1465,32 @@ const saveCurrentRemark = async () => {
   const editingTokenId = editingRemark.value;
   const remark = tempRemarks.value[editingTokenId] || "";
   editingRemark.value = null;
-  if (typeof tokenStore.commitCredentialUpdate === "function") {
-    const commit = await tokenStore.commitCredentialUpdate(editingTokenId, {
-      updates: { remark },
-    });
-    if (!commit?.committed) {
-      message.error(
-        commit?.reason === "storage_write_failed"
-          ? "保存备注失败：浏览器本地存储空间不足或不可写，已保留原有数据"
-          : "账号不存在或保存备注失败，请刷新后重试",
-      );
-      return;
+  try {
+    if (typeof tokenStore.commitCredentialUpdate === "function") {
+      const commit = await tokenStore.commitCredentialUpdate(editingTokenId, {
+        updates: { remark },
+      });
+      if (!commit?.committed) {
+        message.error(
+          commit?.reason === "storage_write_failed"
+            ? "保存备注失败：浏览器本地存储空间不足或不可写，已保留原有数据"
+            : "账号不存在或保存备注失败，请刷新后重试",
+        );
+        return;
+      }
+    } else {
+      const ok = tokenStore.updateToken(editingTokenId, {
+        remark,
+      });
+      if (!ok) {
+        message.error("保存备注失败，请检查浏览器本地存储后重试");
+        return;
+      }
     }
-  } else {
-    const ok = tokenStore.updateToken(editingTokenId, {
-      remark,
-    });
-    if (!ok) {
-      message.error("保存备注失败，请检查浏览器本地存储后重试");
-      return;
-    }
+    message.success("备注已保存");
+  } catch (error) {
+    message.error(error?.message || "保存备注失败，请稍后重试");
   }
-  message.success("备注已保存");
 };
 
 const saveRemark = () => {
@@ -1473,15 +1508,20 @@ const deleteToken = (token) => {
     positiveText: "确定删除",
     negativeText: "取消",
     onPositiveClick: async () => {
-      const result = await tokenStore.removeToken(token.id);
-      if (result === false || (result && result.ok === false)) {
-        message.error(
-          result?.message || "删除Token失败，请检查浏览器存储状态后重试",
-        );
+      try {
+        const result = await tokenStore.removeToken(token.id);
+        if (result === false || (result && result.ok === false)) {
+          message.error(
+            result?.message || "删除Token失败，请检查浏览器存储状态后重试",
+          );
+          return false;
+        }
+        message.success("Token已删除");
+        return true;
+      } catch (error) {
+        message.error(error?.message || "删除Token失败，请稍后重试");
         return false;
       }
-      message.success("Token已删除");
-      return true;
     },
   });
 };
@@ -1623,8 +1663,14 @@ const importTokenFile = () => {
     if (file) {
       const reader = new FileReader();
       reader.onload = async (e) => {
+        let data;
         try {
-          const data = JSON.parse(e.target.result);
+          data = JSON.parse(e.target.result);
+        } catch {
+          message.error("文件格式错误");
+          return;
+        }
+        try {
           const result =
             typeof tokenStore.commitImportTokens === "function"
               ? await tokenStore.commitImportTokens(data)
@@ -1635,7 +1681,7 @@ const importTokenFile = () => {
             message.error(result.message);
           }
         } catch (error) {
-          message.error("文件格式错误");
+          message.error(error?.message || "导入Token文件失败，请稍后重试");
         }
       };
       reader.readAsText(file);
@@ -1663,15 +1709,20 @@ const clearAllTokens = () => {
     positiveText: "确定清除",
     negativeText: "取消",
     onPositiveClick: async () => {
-      const result = await tokenStore.clearAllTokens();
-      if (result === false || (result && result.ok === false)) {
-        message.error(
-          result?.message || "清除所有Token失败，请关闭其他标签页后重试",
-        );
+      try {
+        const result = await tokenStore.clearAllTokens();
+        if (result === false || (result && result.ok === false)) {
+          message.error(
+            result?.message || "清除所有Token失败，请关闭其他标签页后重试",
+          );
+          return false;
+        }
+        message.success("所有Token已清除");
+        return true;
+      } catch (error) {
+        message.error(error?.message || "清除所有Token失败，请稍后重试");
         return false;
       }
-      message.success("所有Token已清除");
-      return true;
     },
   });
 };
@@ -1867,30 +1918,53 @@ const handleUrlParams = async () => {
         }
 
         // 使用API获取的token
-        tokenResult = tokenStore.importBase64Token(
-          props.name || data.name || "通过API导入的Token",
-          data.token,
-          {
-            server: props.server || data.server,
-            wsUrl: props.wsUrl,
-            sourceUrl: props.api,
-            importMethod: "url",
-          },
-        );
+        tokenResult =
+          typeof tokenStore.commitImportBase64Token === "function"
+            ? await tokenStore.commitImportBase64Token(
+                props.name || data.name || "通过API导入的Token",
+                data.token,
+                {
+                  server: props.server || data.server,
+                  wsUrl: props.wsUrl,
+                  sourceUrl: props.api,
+                  importMethod: "url",
+                },
+              )
+            : tokenStore.importBase64Token(
+                props.name || data.name || "通过API导入的Token",
+                data.token,
+                {
+                  server: props.server || data.server,
+                  wsUrl: props.wsUrl,
+                  sourceUrl: props.api,
+                  importMethod: "url",
+                },
+              );
       } else if (props.token) {
         // 直接使用URL中的token
         // 降噪
         message.info("正在导入token...");
 
-        tokenResult = tokenStore.importBase64Token(
-          props.name || "通过URL导入的Token",
-          props.token,
-          {
-            server: props.server,
-            wsUrl: props.wsUrl,
-            importMethod: "url",
-          },
-        );
+        tokenResult =
+          typeof tokenStore.commitImportBase64Token === "function"
+            ? await tokenStore.commitImportBase64Token(
+                props.name || "通过URL导入的Token",
+                props.token,
+                {
+                  server: props.server,
+                  wsUrl: props.wsUrl,
+                  importMethod: "url",
+                },
+              )
+            : tokenStore.importBase64Token(
+                props.name || "通过URL导入的Token",
+                props.token,
+                {
+                  server: props.server,
+                  wsUrl: props.wsUrl,
+                  importMethod: "url",
+                },
+              );
       }
 
       if (tokenResult && tokenResult.success) {

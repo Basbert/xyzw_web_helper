@@ -25,8 +25,16 @@ import {
 import { XyzwWebSocketClient } from "@/utils/xyzwWebSocket";
 import { $emit, emitPlus } from "./events/index.js";
 
-const { getArrayBuffer, storeArrayBuffer, deleteArrayBuffer, clearAll } =
-  useIndexedDB();
+const {
+  getArrayBuffer,
+  storeArrayBuffer,
+  deleteArrayBuffer,
+  clearAll,
+  isReady: isIdbReady,
+  error: idbError,
+} = useIndexedDB();
+const isIndexedDbUnavailable = () =>
+  isIdbReady?.value === false && Boolean(idbError?.value);
 
 declare interface TokenData {
   id: string;
@@ -140,13 +148,35 @@ const readRawGameTokensJson = (): string | null => {
 const storageBackedGameTokens =
   isVueUseGameTokensStorage || readRawGameTokensJson() !== null;
 let lastKnownPersistedGameTokensJson: string | null = readRawGameTokensJson();
+let localGameTokensWriteDepth = 0;
+const withLocalGameTokensWrite = <T>(fn: () => T): T => {
+  localGameTokensWriteDepth += 1;
+  try {
+    return fn();
+  } finally {
+    localGameTokensWriteDepth -= 1;
+  }
+};
+const gameTokensSyncListeners = new Set<() => void>();
+const notifyGameTokensSynced = () => {
+  gameTokensSyncListeners.forEach((listener) => {
+    try {
+      listener();
+    } catch {
+      // Isolate per-store cross-tab reconciliation callbacks.
+    }
+  });
+};
 
 const syncGameTokensFromStorage = (): boolean => {
   const raw = readRawGameTokensJson();
   if (!raw) {
     if (storageBackedGameTokens && gameTokens.value.length > 0) {
       lastKnownPersistedGameTokensJson = null;
-      gameTokens.value = [];
+      withLocalGameTokensWrite(() => {
+        gameTokens.value = [];
+      });
+      notifyGameTokensSynced();
       return true;
     }
     return false;
@@ -168,7 +198,10 @@ const syncGameTokensFromStorage = (): boolean => {
     }
     lastKnownPersistedGameTokensJson = raw;
     if (currentJson !== raw) {
-      gameTokens.value = parsed;
+      withLocalGameTokensWrite(() => {
+        gameTokens.value = parsed;
+      });
+      notifyGameTokensSynced();
       return true;
     }
     return false;
@@ -185,6 +218,12 @@ if (
   window.addEventListener(
     "storage",
     (event: StorageEvent) => {
+      // VueUse's write() dispatches a synchronous same-tab StorageEvent when
+      // storage instanceof Storage. Ignore synthetic same-tab echoes here so
+      // in-flight local commits/rollbacks are never torn down mid-operation.
+      if (localGameTokensWriteDepth > 0) {
+        return;
+      }
       if (
         event?.storageArea &&
         typeof localStorage !== "undefined" &&
@@ -196,12 +235,45 @@ if (
         return;
       }
       // Read live localStorage rather than trusting a possibly stale
-      // event.newValue from an earlier cross-tab write.
+      // event.newValue from an earlier cross-tab write, then reconcile local
+      // connections for any accounts removed by another tab.
       syncGameTokensFromStorage();
+      notifyGameTokensSynced();
     },
     { passive: true },
   );
 }
+
+const verifyGameTokensStorageWritable = (): {
+  ok: boolean;
+  error?: unknown;
+} => {
+  if (typeof localStorage === "undefined" || !localStorage?.setItem) {
+    return { ok: true };
+  }
+  const shouldPersist =
+    storageBackedGameTokens || readRawGameTokensJson() !== null;
+  if (!shouldPersist) {
+    return { ok: true };
+  }
+  try {
+    // Re-writing the unchanged current JSON probes localStorage writability
+    // without triggering cross-tab storage events (oldValue === newValue).
+    const currentRaw =
+      localStorage.getItem("gameTokens") ?? JSON.stringify(gameTokens.value);
+    localStorage.setItem("gameTokens", currentRaw);
+    const verified = localStorage.getItem("gameTokens");
+    if (verified !== currentRaw) {
+      return {
+        ok: false,
+        error: new Error("本地存储不可写，写入校验不一致"),
+      };
+    }
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
+  }
+};
 
 const persistGameTokensToStorage = (): { ok: boolean; error?: unknown } => {
   if (typeof localStorage === "undefined" || !localStorage?.setItem) {
@@ -397,10 +469,14 @@ export const useTokenStore = defineStore("tokens", () => {
       roleIndex: tokenData.roleIndex ?? null,
     };
 
-    gameTokens.value.push(newToken);
+    withLocalGameTokensWrite(() => {
+      gameTokens.value.push(newToken);
+    });
     const persisted = persistGameTokensToStorage();
     if (!persisted.ok) {
-      gameTokens.value = previousTokens;
+      withLocalGameTokensWrite(() => {
+        gameTokens.value = previousTokens;
+      });
       return {
         ok: false,
         reason: "storage_write_failed",
@@ -731,11 +807,15 @@ export const useTokenStore = defineStore("tokens", () => {
         : {}),
       updatedAt: new Date().toISOString(),
     };
-    gameTokens.value[index] = nextToken;
+    withLocalGameTokensWrite(() => {
+      gameTokens.value[index] = nextToken;
+    });
 
     const persisted = persistGameTokensToStorage();
     if (!persisted.ok) {
-      gameTokens.value[index] = previousExisting;
+      withLocalGameTokensWrite(() => {
+        gameTokens.value[index] = previousExisting;
+      });
       restoreCredentialVersionState(
         tokenId,
         previousMemVersion,
@@ -1127,10 +1207,14 @@ export const useTokenStore = defineStore("tokens", () => {
       for (const remaining of byId.values()) {
         reordered.push(remaining);
       }
-      gameTokens.value = reordered;
+      withLocalGameTokensWrite(() => {
+        gameTokens.value = reordered;
+      });
       const persisted = persistGameTokensToStorage();
       if (!persisted.ok) {
-        gameTokens.value = previousTokens;
+        withLocalGameTokensWrite(() => {
+          gameTokens.value = previousTokens;
+        });
         throw new Error("保存账号顺序失败：浏览器本地存储空间不足或不可写");
       }
       return reordered;
@@ -1162,88 +1246,88 @@ export const useTokenStore = defineStore("tokens", () => {
     listCleared: boolean;
     binCleared: boolean;
     retryable: boolean;
-    reason: "storage_write_failed" | "bin_delete_failed" | null;
+    reason:
+      "storage_write_failed" | "bin_delete_failed" | "lock_timeout" | null;
+    skipped?: boolean;
     message?: string;
+  }
+
+  interface RemoveTokenOptions {
+    shouldDelete?: (latestToken: TokenData) => boolean;
+    lockWaitTimeoutMs?: number;
   }
 
   /**
    * Remove token metadata, its active connection and associated persisted BIN data.
+   * Acquires the store-wide write lock before mutating selection or closing connections
+   * so lock-wait timeouts or skipped predicates leave live state intact.
    * @param {string} tokenId Token to remove.
+   * @param {RemoveTokenOptions} [options] Optional lock-time predicate and wait timeout.
    * @returns {Promise<TokenDeletionResult>} Structured deletion outcome across localStorage and IndexedDB.
    */
-  const removeToken = async (tokenId: string): Promise<TokenDeletionResult> => {
-    const previousSelectedTokenId = selectedTokenId.value;
-    const previousMemVersion = tokenCredentialVersions.get(tokenId);
-    const previousSeed = credentialVersionSeed;
-    const previousStoredVer = readStoredCredentialVersionRaw(tokenId);
-
-    bumpCredentialVersion(tokenId);
-    inFlightBattleVersion.delete(tokenId);
-
-    // 如果删除的是当前选中token，先清除选中状态防止恢复定时器重启连接
-    if (selectedTokenId.value === tokenId) {
-      selectedTokenId.value = "";
-    }
-    desiredConnections.delete(tokenId);
-    connectionRecovery.cancel(tokenId);
-
-    // 关闭对应的WebSocket连接（等待异步释放锁和跨标签页状态）
-    if (wsConnections.value[tokenId]) {
-      await closeWebSocketConnectionAsync(tokenId);
-    }
-
-    const deletionOutcome = await withStoreWriteLease<TokenDeletionResult>(
-      async () => {
-        syncGameTokensFromStorage();
-        const previousTokens = [...gameTokens.value];
-        bumpCredentialVersion(tokenId);
-        gameTokens.value = gameTokens.value.filter(
-          (token) => token.id !== tokenId,
-        );
-        const persisted = persistGameTokensToStorage();
-        if (!persisted.ok) {
-          gameTokens.value = previousTokens;
-          selectedTokenId.value = previousSelectedTokenId;
-          restoreCredentialVersionState(
-            tokenId,
-            previousMemVersion,
-            previousSeed,
-            previousStoredVer,
+  const removeToken = async (
+    tokenId: string,
+    options: RemoveTokenOptions = {},
+  ): Promise<TokenDeletionResult> => {
+    let deletionOutcome: TokenDeletionResult;
+    try {
+      deletionOutcome = await withStoreWriteLease<TokenDeletionResult>(
+        async () => {
+          syncGameTokensFromStorage();
+          const latestToken = gameTokens.value.find(
+            (token) => token.id === tokenId,
           );
-          return {
-            ok: false,
-            listCleared: false,
-            binCleared: false,
-            retryable: true,
-            reason: "storage_write_failed",
-            message:
-              "删除失败：写入浏览器本地存储失败，已保留原账号与 BIN 凭据，请重试",
-          };
-        }
-
-        // 同时删除IndexedDB中的数据（与凭据提交串行执行，避免旧回滚写回已删账号BIN）
-        let binCleared = true;
-        try {
-          const deleted = await deleteArrayBuffer(tokenId);
-          if (deleted === false) {
-            binCleared = false;
+          if (!latestToken) {
+            return {
+              ok: true,
+              listCleared: true,
+              binCleared: true,
+              retryable: false,
+              reason: null,
+              skipped: true,
+            };
           }
-        } catch (idbError) {
-          wsLogger.error(`删除账号 BIN 凭据失败 [${tokenId}]:`, idbError);
-          binCleared = false;
-        }
+          if (options.shouldDelete && !options.shouldDelete(latestToken)) {
+            return {
+              ok: true,
+              listCleared: false,
+              binCleared: false,
+              retryable: false,
+              reason: null,
+              skipped: true,
+            };
+          }
 
-        if (!binCleared) {
-          gameTokens.value = previousTokens;
-          const rolledBack = persistGameTokensToStorage();
-          if (rolledBack.ok) {
-            selectedTokenId.value = previousSelectedTokenId;
-            restoreCredentialVersionState(
-              tokenId,
-              previousMemVersion,
-              previousSeed,
-              previousStoredVer,
-            );
+          const previousMemVersion = tokenCredentialVersions.get(tokenId);
+          const previousSeed = credentialVersionSeed;
+          const previousStoredVer = readStoredCredentialVersionRaw(tokenId);
+
+          // Probe localStorage writability with the unchanged list BEFORE
+          // touching IndexedDB or broadcasting any removal to other tabs.
+          const storageProbe = verifyGameTokensStorageWritable();
+          if (!storageProbe.ok) {
+            return {
+              ok: false,
+              listCleared: false,
+              binCleared: false,
+              retryable: true,
+              reason: "storage_write_failed",
+              message:
+                "删除失败：写入浏览器本地存储失败，已保留原账号与 BIN 凭据，请重试",
+            };
+          }
+
+          // Backup and delete BIN in IndexedDB BEFORE publishing the removed
+          // list to localStorage so an IndexedDB failure never sends a premature
+          // cross-tab removal event that tears down other tabs' live state.
+          let previousBin: ArrayBuffer | null = null;
+          try {
+            previousBin = await getArrayBuffer(tokenId);
+          } catch {
+            previousBin = null;
+          }
+
+          if (isIndexedDbUnavailable()) {
             return {
               ok: false,
               listCleared: false,
@@ -1254,36 +1338,116 @@ export const useTokenStore = defineStore("tokens", () => {
                 "删除失败：清理本地 BIN 凭据失败，已保留原账号以便关闭其他标签页后重试",
             };
           }
-          gameTokens.value = previousTokens.filter(
-            (token) => token.id !== tokenId,
-          );
+
+          let binCleared = true;
+          try {
+            const deleted = await deleteArrayBuffer(tokenId);
+            if (deleted === false) {
+              binCleared = false;
+            }
+          } catch (idbError) {
+            wsLogger.error(`删除账号 BIN 凭据失败 [${tokenId}]:`, idbError);
+            binCleared = false;
+          }
+
+          if (!binCleared) {
+            return {
+              ok: false,
+              listCleared: false,
+              binCleared: false,
+              retryable: true,
+              reason: "bin_delete_failed",
+              message:
+                "删除失败：清理本地 BIN 凭据失败，已保留原账号以便关闭其他标签页后重试",
+            };
+          }
+
+          // Re-sync after async IndexedDB awaits so unrelated account metadata
+          // updated during the await is preserved.
+          syncGameTokensFromStorage();
+          const latestBeforeRemove = [...gameTokens.value];
+          bumpCredentialVersion(tokenId);
+          withLocalGameTokensWrite(() => {
+            gameTokens.value = gameTokens.value.filter(
+              (token) => token.id !== tokenId,
+            );
+          });
+          const persisted = persistGameTokensToStorage();
+          if (!persisted.ok) {
+            withLocalGameTokensWrite(() => {
+              gameTokens.value = latestBeforeRemove;
+            });
+            restoreCredentialVersionState(
+              tokenId,
+              previousMemVersion,
+              previousSeed,
+              previousStoredVer,
+            );
+            let binRestored = true;
+            if (previousBin) {
+              try {
+                binRestored = Boolean(
+                  await storeArrayBuffer(tokenId, previousBin),
+                );
+              } catch {
+                binRestored = false;
+              }
+            }
+            return {
+              ok: false,
+              listCleared: false,
+              binCleared: !binRestored,
+              retryable: true,
+              reason: "storage_write_failed",
+              message: binRestored
+                ? "删除失败：写入浏览器本地存储失败，已保留原账号与 BIN 凭据，请重试"
+                : "删除失败：写入浏览器本地存储失败，且恢复原账号 BIN 凭据失败，请重试删除或重新登录",
+            };
+          }
+
+          if (selectedTokenId.value === tokenId) {
+            selectedTokenId.value = "";
+          }
+          inFlightBattleVersion.delete(tokenId);
+          desiredConnections.delete(tokenId);
+          connectionRecovery.cancel(tokenId);
           accountGameData.remove(tokenId);
           cleanupInvalidTokens();
           return {
-            ok: false,
+            ok: true,
             listCleared: true,
-            binCleared: false,
-            retryable: true,
-            reason: "bin_delete_failed",
-            message:
-              "账号已从列表移除，但本地 BIN 凭据清理失败，请关闭其他标签页后点击「清除所有Token」重试",
+            binCleared: true,
+            retryable: false,
+            reason: null,
           };
-        }
+        },
+        options.lockWaitTimeoutMs,
+      );
+    } catch (error) {
+      const msg = getErrorMessage(error, "等待跨标签页锁超时");
+      wsLogger.warn(`删除账号等待锁失败 [${tokenId}]:`, error);
+      return {
+        ok: false,
+        listCleared: false,
+        binCleared: false,
+        retryable: true,
+        reason: "lock_timeout",
+        message: msg.includes("超时")
+          ? "删除失败：等待其他标签页完成账号保存超时，请稍后重试"
+          : `删除失败：${msg}`,
+      };
+    }
 
-        accountGameData.remove(tokenId);
-        cleanupInvalidTokens();
-        return {
-          ok: true,
-          listCleared: true,
-          binCleared: true,
-          retryable: false,
-          reason: null,
-        };
-      },
-    );
-
-    if (!deletionOutcome.ok) {
+    if (!deletionOutcome.ok || deletionOutcome.skipped) {
+      if (deletionOutcome.listCleared && wsConnections.value[tokenId]) {
+        await closeWebSocketConnectionAsync(tokenId);
+      }
       return deletionOutcome;
+    }
+
+    // 在释放整表写锁后关闭对应WebSocket连接，避免嵌套连接锁死锁
+    if (wsConnections.value[tokenId]) {
+      await closeWebSocketConnectionAsync(tokenId);
     }
 
     delete activeConnections.value[tokenId];
@@ -1866,6 +2030,16 @@ export const useTokenStore = defineStore("tokens", () => {
     }
   };
 
+  const commitImportBase64Token = async (
+    name: string,
+    base64String: string,
+    additionalInfo = {},
+  ) => {
+    return withStoreWriteLease(async () =>
+      importBase64Token(name, base64String, additionalInfo),
+    );
+  };
+
   // 连接管理辅助函数
   const generateSessionId = () =>
     `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -2044,6 +2218,46 @@ export const useTokenStore = defineStore("tokens", () => {
       else connectionRecoveryStatus.value[tokenId] = state;
     },
   });
+
+  const reconcileRemovedAccountConnections = () => {
+    const validIds = new Set(gameTokens.value.map((token) => token.id));
+    if (selectedTokenId.value && !validIds.has(selectedTokenId.value)) {
+      selectedTokenId.value = "";
+    }
+    const trackedIds = new Set<string>([
+      ...Object.keys(wsConnections.value),
+      ...Array.from(desiredConnections),
+      ...Object.keys(connectionRecoveryStatus.value),
+    ]);
+    for (const tokenId of trackedIds) {
+      if (validIds.has(tokenId)) continue;
+      inFlightBattleVersion.delete(tokenId);
+      connectionGeneration.set(
+        tokenId,
+        (connectionGeneration.get(tokenId) || 0) + 1,
+      );
+      desiredConnections.delete(tokenId);
+      connectionRecovery.cancel(tokenId);
+      accountGameData.remove(tokenId);
+      const conn = wsConnections.value[tokenId];
+      if (conn) {
+        conn.status = "disconnecting";
+        try {
+          conn.client?.disconnect?.();
+        } catch (error) {
+          wsLogger.warn(`跨标签页断开已删除账号连接失败 [${tokenId}]:`, error);
+        }
+        delete wsConnections.value[tokenId];
+      }
+      delete activeConnections.value[tokenId];
+      Object.keys(connectionLocks.value).forEach((lockKey) => {
+        if (lockKey.startsWith(`${tokenId}_`)) {
+          delete connectionLocks.value[lockKey];
+        }
+      });
+    }
+  };
+  gameTokensSyncListeners.add(reconcileRemovedAccountConnections);
   watch(
     selectedTokenId,
     (current, previous) => {
@@ -2094,6 +2308,7 @@ export const useTokenStore = defineStore("tokens", () => {
     }
     connectionMonitor.stopMonitoring();
     connectionRecovery.dispose();
+    gameTokensSyncListeners.delete(reconcileRemovedAccountConnections);
     tokenStoreInitialized = false;
     rateLimiterCallbackRegistered = false;
   });
@@ -2873,10 +3088,14 @@ export const useTokenStore = defineStore("tokens", () => {
         syncGameTokensFromStorage();
         const previousTokens = [...gameTokens.value];
         const previousIds = previousTokens.map((token) => token.id);
-        gameTokens.value = data.tokens;
+        withLocalGameTokensWrite(() => {
+          gameTokens.value = data.tokens;
+        });
         const persisted = persistGameTokensToStorage();
         if (!persisted.ok) {
-          gameTokens.value = previousTokens;
+          withLocalGameTokensWrite(() => {
+            gameTokens.value = previousTokens;
+          });
           return {
             success: false,
             message: "导入失败：浏览器本地存储空间不足或不可写",
@@ -2886,6 +3105,8 @@ export const useTokenStore = defineStore("tokens", () => {
         data.tokens.forEach((token: any) => {
           if (token?.id) bumpCredentialVersion(token.id);
         });
+        cleanupInvalidTokens();
+        notifyGameTokensSynced();
         return {
           success: true,
           message: `成功导入 ${data.tokens.length} 个Token`,
@@ -2902,117 +3123,91 @@ export const useTokenStore = defineStore("tokens", () => {
     return withStoreWriteLease(async () => importTokens(data));
   };
 
-  const clearAllTokens = async (): Promise<TokenDeletionResult> => {
-    const previousSelectedTokenId = selectedTokenId.value;
-    const initialTokenIds = Array.from(
-      new Set([
-        ...Object.keys(wsConnections.value),
-        ...gameTokens.value.map((token) => token.id),
-      ]),
-    );
-    const previousSeed = credentialVersionSeed;
-    const previousVersionSnapshots = new Map<
-      string,
-      { mem: number | undefined; stored: string | null }
-    >();
-    initialTokenIds.forEach((tokenId) => {
-      previousVersionSnapshots.set(tokenId, {
-        mem: tokenCredentialVersions.get(tokenId),
-        stored: readStoredCredentialVersionRaw(tokenId),
-      });
-    });
+  const clearAllTokens = async (
+    options: { lockWaitTimeoutMs?: number } = {},
+  ): Promise<TokenDeletionResult> => {
+    let tokenIdsToCleanup: string[] = [];
+    let openConnectionIds: string[] = [];
+    let clearOutcome: TokenDeletionResult;
 
-    desiredConnections.clear();
-    inFlightBattleVersion.clear();
-    initialTokenIds.forEach((tokenId) => {
-      bumpCredentialVersion(tokenId);
-    });
-    Object.keys(connectionRecoveryStatus.value).forEach((tokenId) => {
-      connectionRecovery.cancel(tokenId);
-    });
-    initialTokenIds.forEach((tokenId) => {
-      connectionRecovery.cancel(tokenId);
-    });
+    try {
+      clearOutcome = await withStoreWriteLease<TokenDeletionResult>(
+        async () => {
+          syncGameTokensFromStorage();
+          const previousTokens = [...gameTokens.value];
+          const previousGroups = tokenGroups.value.map((group) => ({
+            ...group,
+            tokenIds: [...group.tokenIds],
+          }));
+          const previousSeed = credentialVersionSeed;
+          const previousVersionSnapshots = new Map<
+            string,
+            { mem: number | undefined; stored: string | null }
+          >();
 
-    selectedTokenId.value = "";
-    await Promise.all(
-      Object.keys(wsConnections.value).map((tokenId) =>
-        closeWebSocketConnectionAsync(tokenId),
-      ),
-    );
+          tokenIdsToCleanup = Array.from(
+            new Set([
+              ...Object.keys(wsConnections.value),
+              ...previousTokens.map((token) => token.id),
+            ]),
+          );
 
-    let tokenIds = initialTokenIds;
-    const clearOutcome = await withStoreWriteLease<TokenDeletionResult>(
-      async () => {
-        syncGameTokensFromStorage();
-        const previousTokens = [...gameTokens.value];
-        const previousGroups = tokenGroups.value.map((group) => ({
-          ...group,
-          tokenIds: [...group.tokenIds],
-        }));
-        tokenIds = Array.from(
-          new Set([
-            ...initialTokenIds,
-            ...gameTokens.value.map((token) => token.id),
-          ]),
-        );
-        tokenIds.forEach((tokenId) => {
-          if (!previousVersionSnapshots.has(tokenId)) {
-            previousVersionSnapshots.set(tokenId, {
-              mem: tokenCredentialVersions.get(tokenId),
-              stored: readStoredCredentialVersionRaw(tokenId),
-            });
+          // Probe localStorage writability with the unchanged list BEFORE
+          // clearing IndexedDB or publishing any removal to other tabs.
+          const storageProbe = verifyGameTokensStorageWritable();
+          if (!storageProbe.ok) {
+            return {
+              ok: false,
+              listCleared: false,
+              binCleared: false,
+              retryable: true,
+              reason: "storage_write_failed",
+              message:
+                "清除失败：写入浏览器本地存储失败，已保留原有账号与 BIN 凭据，请重试",
+            };
           }
-          bumpCredentialVersion(tokenId);
-        });
-        const restoreAllVersions = () => {
-          previousVersionSnapshots.forEach((snap, tokenId) => {
-            restoreCredentialVersionState(
-              tokenId,
-              snap.mem,
-              previousSeed,
-              snap.stored,
+
+          // Backup known BIN keys concurrently so all reads share a single
+          // in-flight IndexedDB open attempt instead of multiplying open timeouts.
+          const backedUpBins = new Map<string, ArrayBuffer>();
+          if (previousTokens.length > 0) {
+            await Promise.all(
+              previousTokens.map(async (token) => {
+                try {
+                  const buf = await getArrayBuffer(token.id);
+                  if (buf) backedUpBins.set(token.id, buf);
+                } catch {
+                  // Ignore individual backup read failures; DB health checked below.
+                }
+              }),
             );
-          });
-        };
+            if (isIndexedDbUnavailable()) {
+              return {
+                ok: false,
+                listCleared: false,
+                binCleared: false,
+                retryable: true,
+                reason: "bin_delete_failed",
+                message:
+                  "清除失败：清空本地 BIN 凭据失败，已保留原有账号列表，请关闭其他标签页后重试",
+              };
+            }
+          }
 
-        gameTokens.value = [];
-        const persisted = persistGameTokensToStorage();
-        if (!persisted.ok) {
-          gameTokens.value = previousTokens;
-          tokenGroups.value = previousGroups;
-          selectedTokenId.value = previousSelectedTokenId;
-          restoreAllVersions();
-          return {
-            ok: false,
-            listCleared: false,
-            binCleared: false,
-            retryable: true,
-            reason: "storage_write_failed",
-            message:
-              "清除失败：写入浏览器本地存储失败，已保留原有账号与 BIN 凭据，请重试",
-          };
-        }
-
-        // 清空IndexedDB（与凭据提交串行执行，且仅在账号列表成功清空后执行）
-        let binCleared = true;
-        try {
-          const cleared = await clearAll();
-          if (cleared === false) {
+          // Clear IndexedDB BEFORE publishing [] to localStorage so a blocked
+          // IndexedDB never broadcasts a premature removal event to other tabs.
+          let binCleared = true;
+          try {
+            const cleared = await clearAll();
+            if (cleared === false) {
+              binCleared = false;
+            }
+          } catch (idbError) {
+            wsLogger.error("清空 IndexedDB BIN 凭据失败:", idbError);
             binCleared = false;
           }
-        } catch (idbError) {
-          wsLogger.error("清空 IndexedDB BIN 凭据失败:", idbError);
-          binCleared = false;
-        }
 
-        if (!binCleared) {
-          gameTokens.value = previousTokens;
-          const rolledBack = persistGameTokensToStorage();
-          if (rolledBack.ok) {
-            tokenGroups.value = previousGroups;
-            selectedTokenId.value = previousSelectedTokenId;
-            restoreAllVersions();
+          if (!binCleared) {
             return {
               ok: false,
               listCleared: false,
@@ -3023,42 +3218,114 @@ export const useTokenStore = defineStore("tokens", () => {
                 "清除失败：清空本地 BIN 凭据失败，已保留原有账号列表，请关闭其他标签页后重试",
             };
           }
-          gameTokens.value = [];
+
+          tokenIdsToCleanup.forEach((tokenId) => {
+            previousVersionSnapshots.set(tokenId, {
+              mem: tokenCredentialVersions.get(tokenId),
+              stored: readStoredCredentialVersionRaw(tokenId),
+            });
+            bumpCredentialVersion(tokenId);
+          });
+          const restoreAllVersions = () => {
+            previousVersionSnapshots.forEach((snap, tokenId) => {
+              restoreCredentialVersionState(
+                tokenId,
+                snap.mem,
+                previousSeed,
+                snap.stored,
+              );
+            });
+          };
+
+          withLocalGameTokensWrite(() => {
+            gameTokens.value = [];
+          });
+          const persisted = persistGameTokensToStorage();
+          if (!persisted.ok) {
+            withLocalGameTokensWrite(() => {
+              gameTokens.value = previousTokens;
+            });
+            tokenGroups.value = previousGroups;
+            restoreAllVersions();
+            let allBinsRestored = true;
+            for (const [key, buf] of backedUpBins.entries()) {
+              try {
+                const ok = await storeArrayBuffer(key, buf);
+                if (!ok) allBinsRestored = false;
+              } catch {
+                allBinsRestored = false;
+              }
+            }
+            return {
+              ok: false,
+              listCleared: false,
+              binCleared: !allBinsRestored,
+              retryable: true,
+              reason: "storage_write_failed",
+              message: allBinsRestored
+                ? "清除失败：写入浏览器本地存储失败，已保留原有账号与 BIN 凭据，请重试"
+                : "清除失败：写入浏览器本地存储失败，且恢复原账号 BIN 凭据失败，请重试清除或重新登录",
+            };
+          }
+
+          selectedTokenId.value = "";
+          desiredConnections.clear();
+          inFlightBattleVersion.clear();
+          Object.keys(connectionRecoveryStatus.value).forEach((tokenId) => {
+            connectionRecovery.cancel(tokenId);
+          });
+          tokenIdsToCleanup.forEach((tokenId) => {
+            connectionRecovery.cancel(tokenId);
+          });
+          openConnectionIds = Object.keys(wsConnections.value);
           tokenGroups.value = [];
-          connectionLocks.value = {};
-          activeConnections.value = {};
           accountGameData.clear();
           return {
-            ok: false,
+            ok: true,
             listCleared: true,
-            binCleared: false,
-            retryable: true,
-            reason: "bin_delete_failed",
-            message:
-              "账号列表已清空，但本地 BIN 凭据清理失败，请关闭其他标签页后重新点击「清除所有Token」重试",
+            binCleared: true,
+            retryable: false,
+            reason: null,
           };
-        }
+        },
+        options.lockWaitTimeoutMs,
+      );
+    } catch (error) {
+      const msg = getErrorMessage(error, "等待跨标签页锁超时");
+      wsLogger.warn("清除所有账号等待锁失败:", error);
+      return {
+        ok: false,
+        listCleared: false,
+        binCleared: false,
+        retryable: true,
+        reason: "lock_timeout",
+        message: msg.includes("超时")
+          ? "清除失败：等待其他标签页完成账号保存超时，请稍后重试"
+          : `清除失败：${msg}`,
+      };
+    }
 
-        tokenGroups.value = [];
-        connectionLocks.value = {};
-        activeConnections.value = {};
-        accountGameData.clear();
-        return {
-          ok: true,
-          listCleared: true,
-          binCleared: true,
-          retryable: false,
-          reason: null,
-        };
-      },
-    );
+    if (openConnectionIds.length > 0) {
+      await Promise.all(
+        openConnectionIds.map((tokenId) =>
+          closeWebSocketConnectionAsync(tokenId),
+        ),
+      );
+    }
 
     if (!clearOutcome.ok) {
+      if (clearOutcome.listCleared) {
+        connectionLocks.value = {};
+        activeConnections.value = {};
+      }
       return clearOutcome;
     }
 
+    connectionLocks.value = {};
+    activeConnections.value = {};
+
     if (typeof localStorage !== "undefined") {
-      tokenIds.forEach((tokenId) => {
+      tokenIdsToCleanup.forEach((tokenId) => {
         localStorage.removeItem(`ws_connection_${tokenId}`);
       });
       Object.keys(localStorage).forEach((key) => {
@@ -3071,35 +3338,45 @@ export const useTokenStore = defineStore("tokens", () => {
     return clearOutcome;
   };
 
-  const cleanExpiredTokens = async () => {
-    const now = new Date();
-    const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const isTokenExpired = (token: TokenData, cutoffMs: number): boolean => {
+    // URL和bin/扫码/手机导入的token设为长期有效，不会过期；升级为长期有效的token也不会过期
+    if (
+      token.importMethod === "url" ||
+      token.importMethod === "bin" ||
+      token.importMethod === "wxQrcode" ||
+      token.importMethod === "mobile" ||
+      token.importMethod === "wxForceLogout" ||
+      token.upgradedToPermanent
+    ) {
+      return false;
+    }
+    // 手动导入的token按原逻辑处理（24小时过期）
+    const lastUsedMs = new Date(
+      token.lastUsed || token.createdAt || 0,
+    ).getTime();
+    return Number.isFinite(lastUsedMs) && lastUsedMs <= cutoffMs;
+  };
 
-    // 找出需要清理的token
-    const tokensToRemove = gameTokens.value.filter((token) => {
-      // URL和bin文件导入的token设为长期有效，不会过期
-      // 升级为长期有效的token也不会过期
-      if (
-        token.importMethod === "url" ||
-        token.importMethod === "bin" ||
-        token.importMethod === "wxQrcode" ||
-        token.importMethod === "mobile" ||
-        token.importMethod === "wxForceLogout" ||
-        token.upgradedToPermanent
-      ) {
-        return false;
-      }
-      // 手动导入的token按原逻辑处理（24小时过期）
-      const lastUsed = new Date(token.lastUsed || token.createdAt || 0);
-      return lastUsed <= oneDayAgo;
-    });
+  const cleanExpiredTokens = async (
+    options: { lockWaitTimeoutMs?: number } = {},
+  ) => {
+    syncGameTokensFromStorage();
+    const cutoffMs = Date.now() - 24 * 60 * 60 * 1000;
+
+    // 仅先筛选候选 ID；进入整表写锁后会按最新持久化记录重新判断是否仍过期
+    const candidateIds = gameTokens.value
+      .filter((token) => isTokenExpired(token, cutoffMs))
+      .map((token) => token.id);
 
     let cleanedCount = 0;
 
-    // 逐个删除，触发清理逻辑（WebSocket断开、IndexedDB删除等）
-    for (const token of tokensToRemove) {
-      const outcome = await removeToken(token.id);
-      if (outcome.ok) {
+    // 逐个在锁内复核过期条件后删除，防止删除另一标签页刚重登或升级的账号
+    for (const tokenId of candidateIds) {
+      const outcome = await removeToken(tokenId, {
+        shouldDelete: (latestToken) => isTokenExpired(latestToken, cutoffMs),
+        lockWaitTimeoutMs: options.lockWaitTimeoutMs,
+      });
+      if (outcome.ok && !outcome.skipped) {
         cleanedCount += 1;
       }
     }
@@ -3109,6 +3386,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
   // 将现有token升级为长期有效
   const upgradeTokenToPermanent = (tokenId: string) => {
+    syncGameTokensFromStorage();
     const token = gameTokens.value.find((t) => t.id === tokenId);
     if (
       token &&
@@ -3119,11 +3397,10 @@ export const useTokenStore = defineStore("tokens", () => {
       token.importMethod !== "mobile" &&
       token.importMethod !== "wxForceLogout"
     ) {
-      updateToken(tokenId, {
+      return updateToken(tokenId, {
         upgradedToPermanent: true,
         upgradedAt: new Date().toISOString(),
       });
-      return true;
     }
     return false;
   };
@@ -3303,6 +3580,21 @@ export const useTokenStore = defineStore("tokens", () => {
       return;
     }
     storageListener = (event: StorageEvent) => {
+      if (event.key === "gameTokens" || event.key === null) {
+        if (localGameTokensWriteDepth > 0) {
+          return;
+        }
+        if (
+          event?.storageArea &&
+          typeof localStorage !== "undefined" &&
+          event.storageArea !== localStorage
+        ) {
+          return;
+        }
+        syncGameTokensFromStorage();
+        reconcileRemovedAccountConnections();
+        return;
+      }
       if (event.key?.startsWith("ws_connection_")) {
         const tokenId = event.key.replace("ws_connection_", "");
         wsLogger.debug(
@@ -3619,6 +3911,7 @@ export const useTokenStore = defineStore("tokens", () => {
     // Base64解析方法
     parseBase64Token,
     importBase64Token,
+    commitImportBase64Token,
 
     // WebSocket方法
     createWebSocketConnection,
