@@ -241,6 +241,9 @@ export async function upsertImportedRoleTokens({
   deleteArrayBuffer,
   allowPartial = false,
 }) {
+  // Snapshot the list before async awaits so mutating the caller's array
+  // mid-import can never shift indices and silently skip roles.
+  const roleSnapshot = Array.isArray(roles) ? [...roles] : [];
   let addedCount = 0;
   let updatedCount = 0;
   const tokenIds = [];
@@ -248,8 +251,8 @@ export async function upsertImportedRoleTokens({
   const failedRoles = [];
   const results = [];
 
-  for (let index = 0; index < roles.length; index++) {
-    const role = roles[index];
+  for (let index = 0; index < roleSnapshot.length; index++) {
+    const role = roleSnapshot[index];
     try {
       const outcome = await upsertSingleRole({
         role,

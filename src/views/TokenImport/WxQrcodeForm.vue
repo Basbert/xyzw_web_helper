@@ -104,7 +104,12 @@
             <strong>服务器:</strong> {{ role.server || "未指定" }}<br />
             <strong>角色序号:</strong> {{ role.roleIndex }}
           </div>
-          <NButton type="error" size="small" @click="removeRole(roleIndex)">
+          <NButton
+            type="error"
+            size="small"
+            :disabled="isImporting"
+            @click="removeRole(roleIndex)"
+          >
             删除
           </NButton>
         </div>
@@ -182,6 +187,7 @@ const importForm = reactive({
 });
 
 const removeRole = (index: number) => {
+  if (isImporting.value) return;
   roleList.value.splice(index, 1);
 };
 
@@ -234,6 +240,7 @@ const handleDownload = (roleInfo: any) => {
 };
 
 const addSelectedRole = async (roleInfo: any) => {
+  if (isImporting.value) return;
   if (!originalBinData.value) {
     message.error("Bin数据丢失，请重新上传");
     return;
@@ -615,14 +622,16 @@ const saveAccount = async (arrBuf: ArrayBuffer) => {
 };
 
 const handleImport = async () => {
+  if (isImporting.value) return;
   if (roleList.value.length === 0) {
     message.error("请先扫码并选择需要添加的角色！");
     return;
   }
+  const rolesToImport = [...roleList.value];
   isImporting.value = true;
   try {
     const result = await upsertImportedRoleTokens({
-      roles: roleList.value,
+      roles: rolesToImport,
       tokenStore,
       getArrayBuffer,
       storeArrayBuffer,

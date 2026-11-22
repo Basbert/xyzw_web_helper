@@ -52,6 +52,7 @@ declare interface TokenData {
   serverId?: string | number | null;
   roleId?: string | number | null;
   roleIndex?: number | null;
+  credentialVersion?: number;
 }
 
 declare interface WebSocketConnection {
@@ -289,6 +290,7 @@ export const useTokenStore = defineStore("tokens", () => {
     "serverId",
     "roleIndex",
   ]);
+  const CRED_VERSION_KEY_PREFIX = "xyzw_cred_ver_";
   let credentialVersionSeed = 0;
   const tokenCredentialVersions = new Map<string, number>();
   const credentialOperationQueues = new Map<string, Promise<unknown>>();
@@ -296,13 +298,90 @@ export const useTokenStore = defineStore("tokens", () => {
     string,
     { client: unknown; socket: unknown; promise: Promise<number | null> }
   >();
-  const getCredentialVersion = (tokenId: string) =>
-    tokenCredentialVersions.get(tokenId) || 0;
+
+  const readPersistedTokenState = (
+    tokenId: string,
+  ): { hasList: boolean; token: TokenData | null } => {
+    if (typeof localStorage === "undefined" || !localStorage?.getItem) {
+      return { hasList: false, token: null };
+    }
+    try {
+      const raw = localStorage.getItem("gameTokens");
+      if (!raw) return { hasList: false, token: null };
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return { hasList: false, token: null };
+      const token =
+        parsed.find((entry): entry is TokenData =>
+          Boolean(entry && typeof entry === "object" && entry.id === tokenId),
+        ) || null;
+      return { hasList: true, token };
+    } catch {
+      return { hasList: false, token: null };
+    }
+  };
+
+  const getCredentialVersion = (tokenId: string): number => {
+    let version = tokenCredentialVersions.get(tokenId) || 0;
+    const inMem = gameTokens.value.find((t) => t.id === tokenId);
+    if (
+      typeof inMem?.credentialVersion === "number" &&
+      Number.isFinite(inMem.credentialVersion)
+    ) {
+      version = Math.max(version, inMem.credentialVersion);
+    }
+    const { token: persisted } = readPersistedTokenState(tokenId);
+    if (
+      typeof persisted?.credentialVersion === "number" &&
+      Number.isFinite(persisted.credentialVersion)
+    ) {
+      version = Math.max(version, persisted.credentialVersion);
+    }
+    if (typeof localStorage !== "undefined" && localStorage?.getItem) {
+      try {
+        const rawVer = localStorage.getItem(
+          `${CRED_VERSION_KEY_PREFIX}${tokenId}`,
+        );
+        const numeric = Number(rawVer);
+        if (Number.isFinite(numeric) && numeric > 0) {
+          version = Math.max(version, numeric);
+        }
+      } catch {
+        // Ignore storage read errors.
+      }
+    }
+    return version;
+  };
+
   const bumpCredentialVersion = (tokenId: string) => {
-    const next = ++credentialVersionSeed;
+    const current = getCredentialVersion(tokenId);
+    const next = Math.max(current, credentialVersionSeed) + 1;
+    credentialVersionSeed = next;
     tokenCredentialVersions.set(tokenId, next);
+    if (typeof localStorage !== "undefined" && localStorage?.setItem) {
+      try {
+        localStorage.setItem(
+          `${CRED_VERSION_KEY_PREFIX}${tokenId}`,
+          String(next),
+        );
+      } catch {
+        // Ignore storage write errors.
+      }
+    }
     return next;
   };
+
+  const extractRoleIdFromSessionToken = (
+    sessionToken: string,
+  ): string | null => {
+    if (typeof sessionToken !== "string" || !sessionToken.trim()) return null;
+    try {
+      const parsed = JSON.parse(sessionToken);
+      return normalizeRoleId(parsed?.roleId ?? parsed?.role?.roleId);
+    } catch {
+      return null;
+    }
+  };
+
   const runWithCredentialLock = <T>(
     tokenId: string,
     task: () => Promise<T>,
@@ -321,6 +400,48 @@ export const useTokenStore = defineStore("tokens", () => {
       }
     });
     return next;
+  };
+
+  const withCredentialLease = async <T>(
+    tokenId: string,
+    operation: (isActive: () => boolean) => Promise<T>,
+  ): Promise<T> => {
+    return runWithCredentialLock(tokenId, async () => {
+      if (typeof navigator === "undefined" || !navigator.locks?.request) {
+        return operation(() => true);
+      }
+      let active = true;
+      let timedOut = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const abort = new AbortController();
+      const deadline = new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          active = false;
+          timedOut = true;
+          reject(new Error("等待跨标签页凭据提交锁超时"));
+          abort.abort();
+        }, 10000);
+      });
+      try {
+        return await Promise.race([
+          navigator.locks.request(
+            `xyzw-credential:${tokenId}`,
+            { signal: abort.signal },
+            () => {
+              if (!active) throw new Error("等待跨标签页凭据提交锁超时");
+              return operation(() => active);
+            },
+          ),
+          deadline,
+        ]);
+      } catch (error) {
+        if (timedOut) throw new Error("等待跨标签页凭据提交锁超时");
+        throw error;
+      } finally {
+        active = false;
+        clearTimeout(timer);
+      }
+    });
   };
 
   interface CredentialBinStorage {
@@ -342,34 +463,66 @@ export const useTokenStore = defineStore("tokens", () => {
 
   /**
    * Atomically serialize per-account BIN writes and token metadata updates
-   * under a credential lock with optional optimistic version verification.
+   * across tabs (Web Locks + persistent credentialVersion) and within the
+   * current page, re-checking version before and after async IndexedDB writes.
    */
   const commitCredentialUpdate = async (
     tokenId: string,
     options: CommitCredentialOptions,
   ) => {
-    return runWithCredentialLock(tokenId, async () => {
-      const latest = gameTokens.value.find((t) => t.id === tokenId);
-      if (!latest) {
+    return withCredentialLease(tokenId, async (isActive) => {
+      const checkCommitValidity = () => {
+        if (!isActive()) {
+          return { ok: false as const, stale: true, reason: "stale" as const };
+        }
+        const latest = gameTokens.value.find((t) => t.id === tokenId);
+        if (!latest) {
+          return {
+            ok: false as const,
+            stale: false,
+            reason: "token_missing" as const,
+          };
+        }
+        if (options.expectedVersion !== undefined) {
+          const { hasList, token: persisted } =
+            readPersistedTokenState(tokenId);
+          if (hasList && !persisted) {
+            return {
+              ok: false as const,
+              stale: true,
+              reason: "token_missing" as const,
+            };
+          }
+          const versionMismatch =
+            getCredentialVersion(tokenId) !== options.expectedVersion;
+          const tokenMismatch =
+            options.expectedToken !== undefined &&
+            (latest.token !== options.expectedToken ||
+              (persisted !== null &&
+                persisted.token !== options.expectedToken));
+          const createdAtMismatch =
+            Boolean(options.expectedCreatedAt) &&
+            (latest.createdAt !== options.expectedCreatedAt ||
+              (persisted !== null &&
+                persisted.createdAt !== options.expectedCreatedAt));
+          if (versionMismatch || tokenMismatch || createdAtMismatch) {
+            return {
+              ok: false as const,
+              stale: true,
+              reason: "stale" as const,
+            };
+          }
+        }
+        return { ok: true as const };
+      };
+
+      const initialCheck = checkCommitValidity();
+      if (!initialCheck.ok) {
         return {
           committed: false,
-          stale: false,
-          reason: "token_missing" as const,
+          stale: initialCheck.stale,
+          reason: initialCheck.reason,
         };
-      }
-
-      if (options.expectedVersion !== undefined) {
-        const versionMismatch =
-          getCredentialVersion(tokenId) !== options.expectedVersion;
-        const tokenMismatch =
-          options.expectedToken !== undefined &&
-          latest.token !== options.expectedToken;
-        const createdAtMismatch =
-          Boolean(options.expectedCreatedAt) &&
-          latest.createdAt !== options.expectedCreatedAt;
-        if (versionMismatch || tokenMismatch || createdAtMismatch) {
-          return { committed: false, stale: true, reason: "stale" as const };
-        }
       }
 
       const storage: CredentialBinStorage = options.binStorage || {
@@ -380,8 +533,25 @@ export const useTokenStore = defineStore("tokens", () => {
       let binWritten = false;
       let previousBin: ArrayBuffer | null = null;
 
+      const rollbackBin = async () => {
+        if (!binWritten) return;
+        if (previousBin) {
+          await storage.storeArrayBuffer(tokenId, previousBin);
+        } else if (typeof storage.deleteArrayBuffer === "function") {
+          await storage.deleteArrayBuffer(tokenId);
+        }
+      };
+
       if (options.binData) {
         previousBin = await storage.getArrayBuffer(tokenId);
+        const beforeWriteCheck = checkCommitValidity();
+        if (!beforeWriteCheck.ok) {
+          return {
+            committed: false,
+            stale: beforeWriteCheck.stale,
+            reason: beforeWriteCheck.reason,
+          };
+        }
         const saved = await storage.storeArrayBuffer(tokenId, options.binData);
         if (!saved) {
           return {
@@ -391,17 +561,23 @@ export const useTokenStore = defineStore("tokens", () => {
           };
         }
         binWritten = true;
+
+        // Re-verify credential version right before committing token metadata
+        // in case a concurrent non-locked write updated the token during IndexedDB I/O.
+        const afterWriteCheck = checkCommitValidity();
+        if (!afterWriteCheck.ok) {
+          await rollbackBin();
+          return {
+            committed: false,
+            stale: afterWriteCheck.stale,
+            reason: afterWriteCheck.reason,
+          };
+        }
       }
 
       const updated = updateToken(tokenId, options.updates);
       if (!updated) {
-        if (binWritten) {
-          if (previousBin) {
-            await storage.storeArrayBuffer(tokenId, previousBin);
-          } else if (typeof storage.deleteArrayBuffer === "function") {
-            await storage.deleteArrayBuffer(tokenId);
-          }
-        }
+        await rollbackBin();
         return {
           committed: false,
           stale: false,
@@ -443,14 +619,20 @@ export const useTokenStore = defineStore("tokens", () => {
     const index = gameTokens.value.findIndex((token) => token.id === tokenId);
     const existing = gameTokens.value[index];
     if (index !== -1 && existing) {
+      const touchesCredential = Object.keys(updates).some((key) =>
+        CREDENTIAL_UPDATE_KEYS.has(key),
+      );
+      const nextCredentialVersion = touchesCredential
+        ? bumpCredentialVersion(tokenId)
+        : existing.credentialVersion;
       gameTokens.value[index] = {
         ...existing,
         ...updates,
+        ...(nextCredentialVersion !== undefined
+          ? { credentialVersion: nextCredentialVersion }
+          : {}),
         updatedAt: new Date().toISOString(),
       };
-      if (Object.keys(updates).some((key) => CREDENTIAL_UPDATE_KEYS.has(key))) {
-        bumpCredentialVersion(tokenId);
-      }
       return true;
     }
     return false;
@@ -629,6 +811,13 @@ export const useTokenStore = defineStore("tokens", () => {
       if (getCredentialVersion(tokenId) !== startVersion) return false;
       if (latest.token !== startToken) return false;
       if (startCreatedAt && latest.createdAt !== startCreatedAt) return false;
+      const { hasList, token: persisted } = readPersistedTokenState(tokenId);
+      if (hasList && !persisted) return false;
+      if (persisted) {
+        if (persisted.token !== startToken) return false;
+        if (startCreatedAt && persisted.createdAt !== startCreatedAt)
+          return false;
+      }
       return true;
     };
 
@@ -723,6 +912,36 @@ export const useTokenStore = defineStore("tokens", () => {
         const token = await transformToken(userToken);
         if (!isRefreshStillCurrent()) {
           return { status: "stale" };
+        }
+        const expectedRoleId = normalizeRoleId(refreshInput.roleId);
+        const authenticatedRoleId = extractRoleIdFromSessionToken(token);
+        if (usedOldKey) {
+          if (
+            !expectedRoleId ||
+            !authenticatedRoleId ||
+            authenticatedRoleId !== expectedRoleId
+          ) {
+            wsLogger.error(
+              `旧名称 BIN 角色身份核验失败 [${tokenId}] expected=${expectedRoleId ?? "unknown"} actual=${authenticatedRoleId ?? "unknown"}`,
+            );
+            return {
+              status: "failed",
+              message:
+                "旧名称 BIN 与当前账号角色身份不一致或无法确认，已保留原数据，请重新登录",
+            };
+          }
+        } else if (
+          expectedRoleId &&
+          authenticatedRoleId &&
+          authenticatedRoleId !== expectedRoleId
+        ) {
+          wsLogger.error(
+            `BIN 角色身份冲突 [${tokenId}] expected=${expectedRoleId} actual=${authenticatedRoleId}`,
+          );
+          return {
+            status: "failed",
+            message: "BIN 认证角色与当前账号不一致，已保留原数据，请重新登录",
+          };
         }
         method = "bin";
         updates = { token, lastRefreshed: Date.now() };

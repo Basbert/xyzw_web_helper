@@ -165,6 +165,7 @@ const initName = (fileName: string) => {
 };
 
 const handleBeforeUpload = (data: { file: { file?: File | null } }) => {
+  if (isImporting.value) return false;
   if (data.file.file) {
     uploadBin(data.file.file);
   }
@@ -261,14 +262,16 @@ const uploadBin = (binFile: File) => {
 };
 
 const handleImport = async () => {
+  if (isImporting.value) return;
   if (roleList.value.length === 0) {
     message.error("请先上传bin文件！");
     return;
   }
+  const rolesToImport = [...roleList.value];
   isImporting.value = true;
   try {
     const result = await upsertImportedRoleTokens({
-      roles: roleList.value,
+      roles: rolesToImport,
       tokenStore,
       getArrayBuffer,
       storeArrayBuffer,

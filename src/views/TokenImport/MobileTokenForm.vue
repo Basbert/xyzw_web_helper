@@ -90,7 +90,11 @@
             <strong>服务器:</strong> {{ role.server }}<br />
             <strong>角色序号:</strong> {{ role.roleIndex }}
           </div>
-          <NButton type="error" size="small" @click="removeRole(roleIndex)"
+          <NButton
+            type="error"
+            size="small"
+            :disabled="isImporting"
+            @click="removeRole(roleIndex)"
             >删除</NButton
           >
         </div>
@@ -430,6 +434,7 @@ const getServerInfo = (serverId: string | number) => {
 };
 
 const addSelectedRole = async (roleInfo: any) => {
+  if (isImporting.value) return;
   if (!originalBinData.value) {
     message.error("请先完成手机号登录");
     return;
@@ -496,17 +501,22 @@ const handleDownload = (roleInfo: any) => {
   }
 };
 
-const removeRole = (index: number) => roleList.value.splice(index, 1);
+const removeRole = (index: number) => {
+  if (isImporting.value) return;
+  roleList.value.splice(index, 1);
+};
 
 const handleImport = async () => {
+  if (isImporting.value) return;
   if (roleList.value.length === 0) {
     message.error("请先登录并选择角色");
     return;
   }
+  const rolesToImport = [...roleList.value];
   isImporting.value = true;
   try {
     const result = await upsertImportedRoleTokens({
-      roles: roleList.value,
+      roles: rolesToImport,
       tokenStore,
       getArrayBuffer,
       storeArrayBuffer,

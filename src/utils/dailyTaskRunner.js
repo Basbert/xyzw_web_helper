@@ -592,7 +592,8 @@ export class DailyTaskRunner {
           };
           const confirmedStopped = isConfirmedStopped(freshRole);
 
-          let stoppedThisStep = false;
+          let stopAttempted = false;
+          let stopConfirmed = false;
           let startAttempted = false;
           let startConfirmed = false;
           try {
@@ -600,13 +601,14 @@ export class DailyTaskRunner {
               this.throwIfInterrupted();
               this.log("执行: 停止盐罐计时");
               this.roleStateDirty = true;
+              stopAttempted = true;
               await this.tokenStore.sendMessageWithPromise(
                 tokenId,
                 "bottlehelper_stop",
                 {},
                 8000,
               );
-              stoppedThisStep = true;
+              stopConfirmed = true;
               await this.waitInterruptible(this.delaySettings.commandDelay);
               this.throwIfInterrupted();
             }
@@ -625,19 +627,23 @@ export class DailyTaskRunner {
             await this.waitInterruptible(this.delaySettings.commandDelay);
             this.throwIfInterrupted();
           } finally {
-            if (stoppedThisStep && !startConfirmed) {
+            if (stopAttempted && !startConfirmed) {
               if (!this.connection?.isIntact()) {
                 this.log(
-                  "原连接已断开，盐罐已停止且无法确认重启状态，请重新连接或在游戏内手动检查盐罐",
+                  stopConfirmed
+                    ? "原连接已断开，盐罐已停止且无法确认重启状态，请重新连接或在游戏内手动检查盐罐"
+                    : "原连接已断开，盐罐可能已停止且无法确认重启状态，请重新连接或在游戏内手动检查盐罐",
                   "error",
                 );
               } else {
                 this.finishingCriticalStep = true;
                 try {
-                  let shouldSendRestart = !startAttempted;
-                  if (startAttempted) {
+                  let shouldSendRestart = stopConfirmed && !startAttempted;
+                  if (!shouldSendRestart) {
                     this.log(
-                      "盐罐启动请求已发出但结果未确认，正在原连接查询盐罐状态...",
+                      startAttempted
+                        ? "盐罐启动请求已发出但结果未确认，正在原连接查询盐罐状态..."
+                        : "盐罐停止请求已发出但结果未确认，正在原连接查询盐罐状态...",
                       "warning",
                     );
                     const verifyResp = await this.sendRequest(() =>

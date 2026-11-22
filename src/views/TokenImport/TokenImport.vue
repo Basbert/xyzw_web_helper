@@ -1296,13 +1296,25 @@ const saveEdit = async () => {
   try {
     await editFormRef.value.validate();
 
-    tokenStore.updateToken(editingToken.value.id, {
+    const tokenId = editingToken.value.id;
+    const updates = {
       name: editForm.name,
       token: editForm.token,
       server: editForm.server,
       wsUrl: editForm.wsUrl,
       remark: editForm.remark,
-    });
+    };
+    if (typeof tokenStore.commitCredentialUpdate === "function") {
+      const commit = await tokenStore.commitCredentialUpdate(tokenId, {
+        updates,
+      });
+      if (!commit?.committed) {
+        message.error("账号不存在或更新失败，请刷新后重试");
+        return;
+      }
+    } else {
+      tokenStore.updateToken(tokenId, updates);
+    }
 
     message.success("Token信息已更新");
     showEditModal.value = false;
