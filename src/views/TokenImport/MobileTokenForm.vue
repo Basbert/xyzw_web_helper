@@ -107,6 +107,7 @@
         size="large"
         block
         :loading="isImporting"
+        :disabled="isImporting || pendingAddCount > 0"
         @click="handleImport"
       >
         <template #icon
@@ -157,6 +158,7 @@ import { encodeHortorLoginPayload } from "@/utils/hortorMobileLogin";
 import { getServerList, getTokenId, transformToken } from "@/utils/token";
 import {
   formatUpsertImportMessage,
+  pruneSucceededImportRoles,
   upsertImportedRoleTokens,
 } from "@/utils/tokenImportUpsert";
 import { encodeCombUserBin } from "@/utils/xyzwRuntime";
@@ -203,6 +205,7 @@ const importForm = reactive({ nameTemplate: "{name}-{index}-{id}", wsUrl: "" });
 const isSendingCode = ref(false);
 const isLoggingIn = ref(false);
 const isImporting = ref(false);
+const pendingAddCount = ref(0);
 const cooldownSeconds = ref(0);
 const serverListData = ref<any[]>([]);
 const roleList = ref<PendingRole[]>([]);
@@ -439,6 +442,7 @@ const addSelectedRole = async (roleInfo: any) => {
     message.error("请先完成手机号登录");
     return;
   }
+  pendingAddCount.value += 1;
   try {
     const buffer = buildRoleBin(originalBinData.value, roleInfo.serverId);
     const tokenId = getTokenId(buffer);
@@ -484,6 +488,8 @@ const addSelectedRole = async (roleInfo: any) => {
   } catch (error: any) {
     console.error("Failed to add selected role", error);
     message.error(`添加角色失败：${error.message || error}`);
+  } finally {
+    pendingAddCount.value = Math.max(0, pendingAddCount.value - 1);
   }
 };
 
@@ -508,6 +514,10 @@ const removeRole = (index: number) => {
 
 const handleImport = async () => {
   if (isImporting.value) return;
+  if (pendingAddCount.value > 0) {
+    message.info("仍有角色正在准备中，请稍后再提交");
+    return;
+  }
   if (roleList.value.length === 0) {
     message.error("请先登录并选择角色");
     return;
@@ -523,8 +533,12 @@ const handleImport = async () => {
       deleteArrayBuffer,
       allowPartial: true,
     });
+    roleList.value = pruneSucceededImportRoles(
+      roleList.value,
+      rolesToImport,
+      result.succeededIndices,
+    );
     if (result.failedRoles.length > 0) {
-      roleList.value = result.failedRoles.map((item) => item.role);
       const firstError =
         result.failedRoles[0]?.error?.message || "导入失败，请重试";
       const succeededTotal = result.addedCount + result.updatedCount;
@@ -535,7 +549,12 @@ const handleImport = async () => {
       );
       return;
     }
-    roleList.value = [];
+    if (roleList.value.length > 0) {
+      message.success(
+        `${formatUpsertImportMessage(result)}，待添加列表中仍有 ${roleList.value.length} 个角色未导入`,
+      );
+      return;
+    }
     message.success(formatUpsertImportMessage(result));
     emit("ok");
   } catch (error: any) {

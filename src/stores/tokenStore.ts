@@ -109,7 +109,66 @@ declare interface TokenGroup {
   updatedAt?: string;
 }
 
-export const gameTokens = useLocalStorage<TokenData[]>("gameTokens", []);
+export const gameTokens = useLocalStorage<TokenData[]>("gameTokens", [], {
+  flush: "sync",
+});
+const readRawGameTokensJson = (): string | null => {
+  if (typeof localStorage === "undefined" || !localStorage?.getItem) {
+    return null;
+  }
+  try {
+    return localStorage.getItem("gameTokens");
+  } catch {
+    return null;
+  }
+};
+const storageBackedGameTokens = readRawGameTokensJson() !== null;
+let lastKnownPersistedGameTokensJson: string | null = readRawGameTokensJson();
+
+const syncGameTokensFromStorage = (): boolean => {
+  const raw = readRawGameTokensJson();
+  if (!raw || raw === lastKnownPersistedGameTokensJson) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return false;
+    let currentJson = "";
+    try {
+      currentJson = JSON.stringify(gameTokens.value);
+    } catch {
+      currentJson = "";
+    }
+    lastKnownPersistedGameTokensJson = raw;
+    if (currentJson !== raw) {
+      gameTokens.value = parsed;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const persistGameTokensToStorage = () => {
+  if (typeof localStorage === "undefined" || !localStorage?.setItem) {
+    return;
+  }
+  const shouldPersist =
+    storageBackedGameTokens || readRawGameTokensJson() !== null;
+  if (!shouldPersist) {
+    return;
+  }
+  try {
+    const serialized = JSON.stringify(gameTokens.value);
+    if (localStorage.getItem("gameTokens") !== serialized) {
+      localStorage.setItem("gameTokens", serialized);
+    }
+    lastKnownPersistedGameTokensJson = serialized;
+  } catch {
+    // Ignore storage write errors (e.g. quota exceeded).
+  }
+};
+
 export const hasTokens = computed(() => gameTokens.value.length > 0);
 export const selectedTokenId = useLocalStorage("selectedTokenId", "");
 export const selectedToken = computed(() => {
@@ -252,6 +311,7 @@ export const useTokenStore = defineStore("tokens", () => {
   const addToken = (
     tokenData: Partial<TokenData> & Pick<TokenData, "name" | "token">,
   ) => {
+    syncGameTokensFromStorage();
     const id =
       tokenData.id ||
       `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -278,6 +338,7 @@ export const useTokenStore = defineStore("tokens", () => {
     };
 
     gameTokens.value.push(newToken);
+    persistGameTokensToStorage();
     return newToken;
   };
 
@@ -291,9 +352,11 @@ export const useTokenStore = defineStore("tokens", () => {
     "roleIndex",
   ]);
   const CRED_VERSION_KEY_PREFIX = "xyzw_cred_ver_";
+  const STORE_WRITE_LOCK_NAME = "xyzw-gameTokens";
+  const STORE_WRITE_LOCK_WAIT_MS = 10000;
   let credentialVersionSeed = 0;
   const tokenCredentialVersions = new Map<string, number>();
-  const credentialOperationQueues = new Map<string, Promise<unknown>>();
+  let storeWriteQueue: Promise<unknown> = Promise.resolve();
   const inFlightBattleVersion = new Map<
     string,
     { client: unknown; socket: unknown; promise: Promise<number | null> }
@@ -382,65 +445,77 @@ export const useTokenStore = defineStore("tokens", () => {
     }
   };
 
-  const runWithCredentialLock = <T>(
-    tokenId: string,
-    task: () => Promise<T>,
-  ): Promise<T> => {
-    const previous =
-      credentialOperationQueues.get(tokenId) || Promise.resolve();
+  const runWithStoreWriteLock = <T>(task: () => Promise<T>): Promise<T> => {
+    const previous = storeWriteQueue;
     const next = previous.then(task, task);
-    const tail = next.then(
+    storeWriteQueue = next.then(
       () => {},
       () => {},
     );
-    credentialOperationQueues.set(tokenId, tail);
-    tail.finally(() => {
-      if (credentialOperationQueues.get(tokenId) === tail) {
-        credentialOperationQueues.delete(tokenId);
-      }
-    });
     return next;
   };
 
-  const withCredentialLease = async <T>(
-    tokenId: string,
+  const withStoreWriteLease = async <T>(
     operation: (isActive: () => boolean) => Promise<T>,
+    waitTimeoutMs = STORE_WRITE_LOCK_WAIT_MS,
   ): Promise<T> => {
-    return runWithCredentialLock(tokenId, async () => {
+    return runWithStoreWriteLock(async () => {
       if (typeof navigator === "undefined" || !navigator.locks?.request) {
         return operation(() => true);
       }
-      let active = true;
+      let granted = false;
       let timedOut = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
       const abort = new AbortController();
-      const deadline = new Promise<never>((_resolve, reject) => {
+
+      return await new Promise<T>((resolve, reject) => {
+        let settled = false;
+        const finishResolve = (value: T) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(value);
+        };
+        const finishReject = (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        };
+
         timer = setTimeout(() => {
-          active = false;
+          if (granted) return;
           timedOut = true;
-          reject(new Error("等待跨标签页凭据提交锁超时"));
           abort.abort();
-        }, 10000);
+          finishReject(new Error("等待跨标签页凭据提交锁超时"));
+        }, waitTimeoutMs);
+
+        Promise.resolve()
+          .then(
+            () =>
+              navigator.locks.request(
+                STORE_WRITE_LOCK_NAME,
+                { signal: abort.signal },
+                async () => {
+                  if (timedOut) {
+                    throw new Error("等待跨标签页凭据提交锁超时");
+                  }
+                  // Stop lock-wait timer immediately upon lock grant so slow I/O
+                  // or post-commit BIN cleanup never falsely reports a wait timeout.
+                  granted = true;
+                  clearTimeout(timer);
+                  return await operation(() => !timedOut);
+                },
+              ) as Promise<T>,
+          )
+          .then(finishResolve, (error) => {
+            if (timedOut) {
+              finishReject(new Error("等待跨标签页凭据提交锁超时"));
+              return;
+            }
+            finishReject(error);
+          });
       });
-      try {
-        return await Promise.race([
-          navigator.locks.request(
-            `xyzw-credential:${tokenId}`,
-            { signal: abort.signal },
-            () => {
-              if (!active) throw new Error("等待跨标签页凭据提交锁超时");
-              return operation(() => active);
-            },
-          ),
-          deadline,
-        ]);
-      } catch (error) {
-        if (timedOut) throw new Error("等待跨标签页凭据提交锁超时");
-        throw error;
-      } finally {
-        active = false;
-        clearTimeout(timer);
-      }
     });
   };
 
@@ -459,22 +534,25 @@ export const useTokenStore = defineStore("tokens", () => {
     binStorage?: CredentialBinStorage;
     deleteOldBinKey?: string | null;
     closeActiveConnection?: boolean;
+    lockWaitTimeoutMs?: number;
   }
 
   /**
-   * Atomically serialize per-account BIN writes and token metadata updates
-   * across tabs (Web Locks + persistent credentialVersion) and within the
-   * current page, re-checking version before and after async IndexedDB writes.
+   * Atomically serialize BIN writes and whole-list token persistence across
+   * tabs (store-wide Web Lock + sync-from-storage merge + persistent
+   * credentialVersion), re-checking version before and after async IndexedDB
+   * writes.
    */
   const commitCredentialUpdate = async (
     tokenId: string,
     options: CommitCredentialOptions,
   ) => {
-    return withCredentialLease(tokenId, async (isActive) => {
+    return withStoreWriteLease(async (isActive) => {
       const checkCommitValidity = () => {
         if (!isActive()) {
           return { ok: false as const, stale: true, reason: "stale" as const };
         }
+        syncGameTokensFromStorage();
         const latest = gameTokens.value.find((t) => t.id === tokenId);
         if (!latest) {
           return {
@@ -535,6 +613,17 @@ export const useTokenStore = defineStore("tokens", () => {
 
       const rollbackBin = async () => {
         if (!binWritten) return;
+        syncGameTokensFromStorage();
+        const { hasList, token: persisted } = readPersistedTokenState(tokenId);
+        const stillExistsInMem = gameTokens.value.some((t) => t.id === tokenId);
+        const stillExists =
+          stillExistsInMem && (!hasList || persisted !== null);
+        if (!stillExists) {
+          if (typeof storage.deleteArrayBuffer === "function") {
+            await storage.deleteArrayBuffer(tokenId);
+          }
+          return;
+        }
         if (previousBin) {
           await storage.storeArrayBuffer(tokenId, previousBin);
         } else if (typeof storage.deleteArrayBuffer === "function") {
@@ -563,7 +652,7 @@ export const useTokenStore = defineStore("tokens", () => {
         binWritten = true;
 
         // Re-verify credential version right before committing token metadata
-        // in case a concurrent non-locked write updated the token during IndexedDB I/O.
+        // in case a concurrent write updated or deleted the token during IndexedDB I/O.
         const afterWriteCheck = checkCommitValidity();
         if (!afterWriteCheck.ok) {
           await rollbackBin();
@@ -584,13 +673,21 @@ export const useTokenStore = defineStore("tokens", () => {
           reason: "token_missing" as const,
         };
       }
+      persistGameTokensToStorage();
 
       if (
         options.deleteOldBinKey &&
         options.deleteOldBinKey !== tokenId &&
         typeof storage.deleteArrayBuffer === "function"
       ) {
-        await storage.deleteArrayBuffer(options.deleteOldBinKey);
+        try {
+          await storage.deleteArrayBuffer(options.deleteOldBinKey);
+        } catch (cleanupError) {
+          wsLogger.warn(
+            `清理旧 BIN 键失败 [${options.deleteOldBinKey}]:`,
+            cleanupError,
+          );
+        }
       }
 
       if (options.closeActiveConnection) {
@@ -606,6 +703,38 @@ export const useTokenStore = defineStore("tokens", () => {
         reason: null,
         token: gameTokens.value.find((t) => t.id === tokenId) || null,
       };
+    }, options.lockWaitTimeoutMs);
+  };
+
+  const commitNewToken = async (
+    tokenData: Partial<TokenData> & Pick<TokenData, "name" | "token">,
+  ) => {
+    return withStoreWriteLease(async () => {
+      syncGameTokensFromStorage();
+      const created = addToken(tokenData);
+      persistGameTokensToStorage();
+      return created;
+    });
+  };
+
+  const reorderTokens = async (orderedIds: string[]) => {
+    return withStoreWriteLease(async () => {
+      syncGameTokensFromStorage();
+      const byId = new Map(gameTokens.value.map((token) => [token.id, token]));
+      const reordered: TokenData[] = [];
+      for (const id of orderedIds) {
+        const found = byId.get(id);
+        if (found) {
+          reordered.push(found);
+          byId.delete(id);
+        }
+      }
+      for (const remaining of byId.values()) {
+        reordered.push(remaining);
+      }
+      gameTokens.value = reordered;
+      persistGameTokensToStorage();
+      return reordered;
     });
   };
 
@@ -616,6 +745,7 @@ export const useTokenStore = defineStore("tokens", () => {
    * @returns {boolean} Whether the token was found and updated.
    */
   const updateToken = (tokenId: string, updates: Partial<TokenData>) => {
+    syncGameTokensFromStorage();
     const index = gameTokens.value.findIndex((token) => token.id === tokenId);
     const existing = gameTokens.value[index];
     if (index !== -1 && existing) {
@@ -633,6 +763,7 @@ export const useTokenStore = defineStore("tokens", () => {
           : {}),
         updatedAt: new Date().toISOString(),
       };
+      persistGameTokensToStorage();
       return true;
     }
     return false;
@@ -656,7 +787,6 @@ export const useTokenStore = defineStore("tokens", () => {
   const removeToken = async (tokenId: string) => {
     bumpCredentialVersion(tokenId);
     inFlightBattleVersion.delete(tokenId);
-    gameTokens.value = gameTokens.value.filter((token) => token.id !== tokenId);
 
     // 如果删除的是当前选中token，先清除选中状态防止恢复定时器重启连接
     if (selectedTokenId.value === tokenId) {
@@ -670,11 +800,20 @@ export const useTokenStore = defineStore("tokens", () => {
       await closeWebSocketConnectionAsync(tokenId);
     }
 
-    accountGameData.remove(tokenId);
-    cleanupInvalidTokens();
+    await withStoreWriteLease(async () => {
+      syncGameTokensFromStorage();
+      bumpCredentialVersion(tokenId);
+      gameTokens.value = gameTokens.value.filter(
+        (token) => token.id !== tokenId,
+      );
+      persistGameTokensToStorage();
 
-    // 同时删除IndexedDB中的数据
-    await deleteArrayBuffer(tokenId);
+      accountGameData.remove(tokenId);
+      cleanupInvalidTokens();
+
+      // 同时删除IndexedDB中的数据（与凭据提交串行执行，避免旧回滚写回已删账号BIN）
+      await deleteArrayBuffer(tokenId);
+    });
 
     delete activeConnections.value[tokenId];
     Object.keys(connectionLocks.value).forEach((lockKey) => {
@@ -2249,7 +2388,14 @@ export const useTokenStore = defineStore("tokens", () => {
   const importTokens = (data: any) => {
     try {
       if (data.tokens && Array.isArray(data.tokens)) {
+        syncGameTokensFromStorage();
+        const previousIds = gameTokens.value.map((token) => token.id);
         gameTokens.value = data.tokens;
+        previousIds.forEach((id) => bumpCredentialVersion(id));
+        data.tokens.forEach((token: any) => {
+          if (token?.id) bumpCredentialVersion(token.id);
+        });
+        persistGameTokensToStorage();
         return {
           success: true,
           message: `成功导入 ${data.tokens.length} 个Token`,
@@ -2262,8 +2408,12 @@ export const useTokenStore = defineStore("tokens", () => {
     }
   };
 
+  const commitImportTokens = async (data: any) => {
+    return withStoreWriteLease(async () => importTokens(data));
+  };
+
   const clearAllTokens = async () => {
-    const tokenIds = Array.from(
+    const initialTokenIds = Array.from(
       new Set([
         ...Object.keys(wsConnections.value),
         ...gameTokens.value.map((token) => token.id),
@@ -2272,13 +2422,13 @@ export const useTokenStore = defineStore("tokens", () => {
 
     desiredConnections.clear();
     inFlightBattleVersion.clear();
-    tokenIds.forEach((tokenId) => {
+    initialTokenIds.forEach((tokenId) => {
       bumpCredentialVersion(tokenId);
     });
     Object.keys(connectionRecoveryStatus.value).forEach((tokenId) => {
       connectionRecovery.cancel(tokenId);
     });
-    tokenIds.forEach((tokenId) => {
+    initialTokenIds.forEach((tokenId) => {
       connectionRecovery.cancel(tokenId);
     });
 
@@ -2289,11 +2439,28 @@ export const useTokenStore = defineStore("tokens", () => {
       ),
     );
 
-    gameTokens.value = [];
-    tokenGroups.value = [];
-    connectionLocks.value = {};
-    activeConnections.value = {};
-    accountGameData.clear();
+    let tokenIds = initialTokenIds;
+    await withStoreWriteLease(async () => {
+      syncGameTokensFromStorage();
+      tokenIds = Array.from(
+        new Set([
+          ...initialTokenIds,
+          ...gameTokens.value.map((token) => token.id),
+        ]),
+      );
+      tokenIds.forEach((tokenId) => {
+        bumpCredentialVersion(tokenId);
+      });
+      gameTokens.value = [];
+      persistGameTokensToStorage();
+      tokenGroups.value = [];
+      connectionLocks.value = {};
+      activeConnections.value = {};
+      accountGameData.clear();
+
+      // 清空IndexedDB（与凭据提交串行执行）
+      await clearAll();
+    });
 
     if (typeof localStorage !== "undefined") {
       tokenIds.forEach((tokenId) => {
@@ -2305,9 +2472,6 @@ export const useTokenStore = defineStore("tokens", () => {
         }
       });
     }
-
-    // 清空IndexedDB
-    await clearAll();
   };
 
   const cleanExpiredTokens = async () => {
@@ -2841,8 +3005,12 @@ export const useTokenStore = defineStore("tokens", () => {
 
     // Token管理方法
     addToken,
+    commitNewToken,
     updateToken,
     commitCredentialUpdate,
+    getCredentialVersion,
+    syncGameTokensFromStorage,
+    reorderTokens,
     refreshTokenManually,
     removeToken,
     selectToken,
@@ -2873,6 +3041,7 @@ export const useTokenStore = defineStore("tokens", () => {
     // 工具方法
     exportTokens,
     importTokens,
+    commitImportTokens,
     clearAllTokens,
     cleanExpiredTokens,
     upgradeTokenToPermanent,

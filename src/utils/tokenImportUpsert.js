@@ -107,6 +107,7 @@ async function upsertSingleRole({
   deleteArrayBuffer,
 }) {
   const needsBin = requiresBinRefreshSource(role);
+  tokenStore.syncGameTokensFromStorage?.();
   const existing = findExistingTokenForRole(
     tokenStore.gameTokens || [],
     role,
@@ -223,7 +224,10 @@ async function upsertSingleRole({
       throw new Error("导入失败：未找到新的 BIN 凭据数据，请重新选择角色");
     }
   }
-  const added = tokenStore.addToken({ ...role });
+  const added =
+    typeof tokenStore.commitNewToken === "function"
+      ? await tokenStore.commitNewToken({ ...role })
+      : tokenStore.addToken({ ...role });
   return { status: "added", tokenId: added?.id || role.id };
 }
 
@@ -304,4 +308,57 @@ export function formatUpsertImportMessage({
     return `已原地更新 ${updatedCount} 个已有账号的登录凭据（保留原有设置与分组）`;
   }
   return "Token添加成功";
+}
+
+/**
+ * Compute minimal diff updates from an edit-modal snapshot so editing
+ * non-credential fields (like remark) never overwrites a freshly refreshed
+ * Token, while explicit Token edits include credential-version guards.
+ */
+export function buildTokenEditCommitPayload(snapshot, form) {
+  const editableFields = ["name", "token", "server", "wsUrl", "remark"];
+  const updates = {};
+  for (const field of editableFields) {
+    const nextVal = form?.[field] ?? "";
+    const prevVal = snapshot ? (snapshot[field] ?? "") : undefined;
+    if (!snapshot || nextVal !== prevVal) {
+      updates[field] = form?.[field];
+    }
+  }
+  const hasChanges = Object.keys(updates).length > 0;
+  const editsCredential = Object.prototype.hasOwnProperty.call(
+    updates,
+    "token",
+  );
+  return {
+    hasChanges,
+    editsCredential,
+    updates,
+    ...(editsCredential && snapshot
+      ? {
+          expectedVersion: snapshot.credentialVersion,
+          expectedToken: snapshot.token,
+          expectedCreatedAt: snapshot.createdAt,
+        }
+      : {}),
+  };
+}
+
+/**
+ * Remove only the role entries that succeeded in the imported batch snapshot,
+ * preserving both failed roles from this batch and any roles appended to the
+ * list outside the snapshot while the import was running.
+ */
+export function pruneSucceededImportRoles(
+  currentRoles = [],
+  batchSnapshot = [],
+  succeededIndices = [],
+) {
+  const succeededRefs = new Set();
+  for (const index of succeededIndices) {
+    if (index >= 0 && index < batchSnapshot.length) {
+      succeededRefs.add(batchSnapshot[index]);
+    }
+  }
+  return currentRoles.filter((role) => !succeededRefs.has(role));
 }

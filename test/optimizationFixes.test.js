@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { describe, test } from "node:test";
 import vm from "node:vm";
+import * as vueUseCore from "@vueuse/core";
 import { createPinia, defineStore, setActivePinia } from "pinia";
 import ts from "typescript";
 import * as vue from "vue";
@@ -16,8 +17,10 @@ import {
   updateServerTimeSample,
 } from "../src/utils/serverClock.js";
 import {
+  buildTokenEditCommitPayload,
   extractAuthenticatedRoleId,
   formatUpsertImportMessage,
+  pruneSucceededImportRoles,
   upsertImportedRoleTokens,
 } from "../src/utils/tokenImportUpsert.js";
 import { loadModule } from "./helpers/loadModule.js";
@@ -1684,7 +1687,10 @@ describe("Commit 4 review regression fixes (P1 & P2)", () => {
       gameFeaturesSrc,
       /connectionRecoveryStatus\?\.\[tokenId\] !== "waiting"/,
     );
-    assert.match(singleBinSrc, /reader\.onload = async \(e\) => \{\s*try \{/);
+    assert.match(
+      singleBinSrc,
+      /tQueue\.add\(async \(\) => \{\s*try \{[\s\S]*?reader\.onerror = \(\) => reject/,
+    );
     assert.match(singleBinSrc, /upsertImportedRoleTokens/);
   });
 
@@ -3043,5 +3049,661 @@ describe("Commit 6 review round-3 regression fixes (3 P1 + 1 P2)", () => {
       tokens.map((t) => t.name),
       ["A", "B", "C"],
     );
+  });
+});
+
+describe("Commit 7 review round-4 regression fixes (2 P1 + 3 P2)", () => {
+  const createSharedLockManager = (recordedNames = []) => {
+    const tails = new Map();
+    return {
+      request(name, optionsOrCb, maybeCb) {
+        recordedNames.push(name);
+        const cb = typeof optionsOrCb === "function" ? optionsOrCb : maybeCb;
+        const opts = typeof optionsOrCb === "function" ? {} : optionsOrCb;
+        const signal = opts?.signal;
+        const prev = tails.get(name) || Promise.resolve();
+        let releaseCurrent;
+        const currentHeld = new Promise((resolve) => {
+          releaseCurrent = resolve;
+        });
+        const nextTail = prev.then(() => currentHeld);
+        tails.set(name, nextTail);
+
+        return new Promise((resolve, reject) => {
+          let started = false;
+          let aborted = false;
+          const onAbort = () => {
+            if (started || aborted) return;
+            aborted = true;
+            releaseCurrent();
+            reject(new Error("AbortError"));
+          };
+          if (signal?.aborted) {
+            onAbort();
+            return;
+          }
+          signal?.addEventListener?.("abort", onAbort, { once: true });
+          prev.then(async () => {
+            if (aborted) return;
+            started = true;
+            signal?.removeEventListener?.("abort", onAbort);
+            try {
+              resolve(await cb({ name }));
+            } catch (err) {
+              reject(err);
+            } finally {
+              releaseCurrent();
+            }
+          });
+        });
+      },
+    };
+  };
+
+  const loadVueUseTokenTab = async ({
+    sharedStorage,
+    sharedIdb,
+    sharedLocks,
+    storeArrayBufferImpl = null,
+    deleteArrayBufferImpl = null,
+    transformTokenImpl = null,
+  }) => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const logger = {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+      verbose() {},
+      gameMessage() {},
+    };
+    const recoveryTimers = new Map();
+    let nextTimer = 0;
+
+    const storageAdapter = {
+      getItem: (k) => (sharedStorage.has(k) ? sharedStorage.get(k) : null),
+      setItem: (k, v) => sharedStorage.set(k, String(v)),
+      removeItem: (k) => sharedStorage.delete(k),
+    };
+
+    const mod = await loadModule(
+      new URL("../src/stores/tokenStore.ts", import.meta.url),
+      {
+        "@/utils/accountIdentity.js": accountIdentity,
+        "@vueuse/core": {
+          useLocalStorage: (key, initial, opts) =>
+            vueUseCore.useStorage(key, initial, storageAdapter, {
+              ...opts,
+              listenToStorageChanges: false,
+            }),
+        },
+        pinia: { defineStore },
+        vue,
+        "@/hooks/useIndexedDB": {
+          default: () => ({
+            getArrayBuffer: async (k) => sharedIdb.get(k) ?? null,
+            storeArrayBuffer:
+              storeArrayBufferImpl ||
+              (async (k, buf) => {
+                sharedIdb.set(k, buf);
+                return true;
+              }),
+            deleteArrayBuffer:
+              deleteArrayBufferImpl ||
+              (async (k) => {
+                sharedIdb.delete(k);
+                return true;
+              }),
+            clearAll: async () => {
+              sharedIdb.clear();
+              return true;
+            },
+          }),
+        },
+        "@/router": {
+          default: { currentRoute: { value: { path: "/tokens" } } },
+        },
+        "@/utils/accountGameData": accountData,
+        "@/utils/bonProtocol": { g_utils: {} },
+        "@/utils/connectionRecovery": {
+          createConnectionRecovery: (opts) =>
+            createConnectionRecovery({
+              ...opts,
+              setTimer: (fn, delay) => {
+                const id = ++nextTimer;
+                recoveryTimers.set(id, { fn, delay });
+                return id;
+              },
+              clearTimer: (id) => recoveryTimers.delete(id),
+            }),
+        },
+        "@/utils/logger": {
+          gameLogger: logger,
+          tokenLogger: logger,
+          wsLogger: logger,
+        },
+        "@/utils/randomSeed": { generateRandomSeed: () => 1 },
+        "@/utils/token": {
+          fetchTokenPayloadFromUrl: async () => ({}),
+          scheduleAuthUserRequest: (fn) => fn(),
+          setAuthUserRateLimiterCallback() {},
+          transformToken:
+            transformTokenImpl ||
+            (async () =>
+              JSON.stringify({ roleId: "1001", roleToken: "default-tok" })),
+        },
+        "@/utils/wechatForceLogout": {
+          refreshTokenFromCombUser: async () => ({}),
+          roleIndexFromServerId: () => 0,
+        },
+        "@/utils/xyzwWebSocket": {
+          XyzwWebSocketClient: class {
+            constructor() {
+              this.socket = { readyState: 1 };
+            }
+            setMessageListener() {}
+            init() {
+              this.onConnect();
+            }
+            disconnect() {
+              if (this.socket) this.socket.readyState = 3;
+              this.socket = null;
+            }
+            send() {}
+            sendHeartbeat() {}
+          },
+        },
+        "./events/index.js": { $emit: { emit() {} }, emitPlus() {} },
+      },
+      {
+        AbortController,
+        WebSocket: { CLOSED: 3 },
+        localStorage: storageAdapter,
+        navigator: { onLine: true, locks: sharedLocks },
+        setTimeout,
+        clearTimeout,
+        setInterval: () => 1,
+        clearInterval() {},
+        window: {
+          location: { href: "http://127.0.0.1/" },
+          addEventListener() {},
+          removeEventListener() {},
+          dispatchEvent() {},
+        },
+        document: {
+          visibilityState: "visible",
+          addEventListener() {},
+          removeEventListener() {},
+        },
+      },
+    );
+    return { pinia, mod, store: mod.useTokenStore() };
+  };
+
+  test("Round4 P1-1: stale edit modal changing only remark preserves re-logged-in Token, while explicit Token edit rejects stale version", async () => {
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc1",
+            name: "主号",
+            roleId: "1001",
+            token: "old-token-before-relogin",
+            server: "10服",
+            wsUrl: "",
+            remark: "旧备注",
+            importMethod: "wxQrcode",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdb = new Map([
+      ["acc1", new Uint8Array([1, 2]).buffer],
+      ["temp-qr-new", new Uint8Array([9, 8, 7]).buffer],
+    ]);
+    const sharedLocks = createSharedLockManager();
+    const tab = await loadVueUseTokenTab({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+
+    try {
+      // Step 1: Open edit modal snapshot BEFORE QR re-login
+      const openedToken = tab.store.gameTokens[0];
+      const snapshot = {
+        id: openedToken.id,
+        name: openedToken.name || "",
+        token: openedToken.token || "",
+        server: openedToken.server || "",
+        wsUrl: openedToken.wsUrl || "",
+        remark: openedToken.remark || "",
+        credentialVersion: tab.store.getCredentialVersion(openedToken.id),
+        createdAt: openedToken.createdAt,
+      };
+
+      // Step 2: QR re-login updates acc1 Token + BIN in place
+      await upsertImportedRoleTokens({
+        roles: [
+          {
+            id: "temp-qr-new",
+            roleId: "1001",
+            name: "主号",
+            token: "fresh-qr-relogin-token",
+            importMethod: "wxQrcode",
+          },
+        ],
+        tokenStore: tab.store,
+        getArrayBuffer: async (k) => sharedIdb.get(k) ?? null,
+        storeArrayBuffer: async (k, buf) => {
+          sharedIdb.set(k, buf);
+          return true;
+        },
+        deleteArrayBuffer: async (k) => sharedIdb.delete(k),
+      });
+      assert.equal(tab.store.gameTokens[0].token, "fresh-qr-relogin-token");
+
+      // Step 3A: Return to stale edit modal and edit ONLY remark -> preserves fresh QR Token & BIN!
+      const remarkOnlyPayload = buildTokenEditCommitPayload(snapshot, {
+        name: snapshot.name,
+        token: snapshot.token, // untouched in stale modal!
+        server: snapshot.server,
+        wsUrl: snapshot.wsUrl,
+        remark: "新备注-不覆盖Token",
+      });
+      assert.equal(remarkOnlyPayload.hasChanges, true);
+      assert.equal(remarkOnlyPayload.editsCredential, false);
+      assert.deepEqual(remarkOnlyPayload.updates, {
+        remark: "新备注-不覆盖Token",
+      });
+
+      const remarkCommit = await tab.store.commitCredentialUpdate("acc1", {
+        updates: remarkOnlyPayload.updates,
+      });
+      assert.equal(remarkCommit.committed, true);
+      assert.equal(tab.store.gameTokens[0].remark, "新备注-不覆盖Token");
+      assert.equal(tab.store.gameTokens[0].token, "fresh-qr-relogin-token");
+      assert.deepEqual(
+        Array.from(new Uint8Array(sharedIdb.get("acc1"))),
+        [9, 8, 7],
+      );
+
+      // Step 3B: Explicit Token edit from stale modal carries expectedVersion -> rejected as stale!
+      const staleTokenPayload = buildTokenEditCommitPayload(snapshot, {
+        name: snapshot.name,
+        token: "stale-manual-override-token",
+        server: snapshot.server,
+        wsUrl: snapshot.wsUrl,
+        remark: "新备注2",
+      });
+      assert.equal(staleTokenPayload.editsCredential, true);
+      assert.equal(staleTokenPayload.expectedVersion, 0);
+      assert.equal(staleTokenPayload.expectedToken, "old-token-before-relogin");
+
+      const staleTokenCommit = await tab.store.commitCredentialUpdate("acc1", {
+        updates: staleTokenPayload.updates,
+        expectedVersion: staleTokenPayload.expectedVersion,
+        expectedToken: staleTokenPayload.expectedToken,
+        expectedCreatedAt: staleTokenPayload.expectedCreatedAt,
+      });
+      assert.equal(staleTokenCommit.committed, false);
+      assert.equal(staleTokenCommit.stale, true);
+      assert.equal(tab.store.gameTokens[0].token, "fresh-qr-relogin-token");
+      assert.equal(tab.store.gameTokens[0].remark, "新备注-不覆盖Token");
+
+      // Step 3C: Freshly reopened modal explicitly editing Token succeeds
+      const freshSnapshot = {
+        id: "acc1",
+        name: tab.store.gameTokens[0].name,
+        token: tab.store.gameTokens[0].token,
+        server: tab.store.gameTokens[0].server,
+        wsUrl: tab.store.gameTokens[0].wsUrl || "",
+        remark: tab.store.gameTokens[0].remark || "",
+        credentialVersion: tab.store.getCredentialVersion("acc1"),
+        createdAt: tab.store.gameTokens[0].createdAt,
+      };
+      const validTokenPayload = buildTokenEditCommitPayload(freshSnapshot, {
+        ...freshSnapshot,
+        token: "explicit-new-manual-token",
+      });
+      const validCommit = await tab.store.commitCredentialUpdate("acc1", {
+        updates: validTokenPayload.updates,
+        expectedVersion: validTokenPayload.expectedVersion,
+        expectedToken: validTokenPayload.expectedToken,
+        expectedCreatedAt: validTokenPayload.expectedCreatedAt,
+      });
+      assert.equal(validCommit.committed, true);
+      assert.equal(tab.store.gameTokens[0].token, "explicit-new-manual-token");
+    } finally {
+      tab.pinia._e.stop();
+    }
+
+    // Verify TokenImport.vue wires snapshot + buildTokenEditCommitPayload + stale warning
+    const tokenImportSrc = await readFile(
+      new URL("../src/views/TokenImport/TokenImport.vue", import.meta.url),
+      "utf8",
+    );
+    assert.match(tokenImportSrc, /editingSnapshot/);
+    assert.match(tokenImportSrc, /getCredentialVersion/);
+    assert.match(tokenImportSrc, /buildTokenEditCommitPayload/);
+    assert.match(tokenImportSrc, /if \(commit\?\.stale\)/);
+  });
+
+  test("Round4 P1-2: two tabs using real VueUse persistence updating different accounts without storage events preserve both updates under one store-wide lock", async () => {
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "accA",
+            name: "账号A",
+            roleId: "101",
+            token: "old-token-A",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+          {
+            id: "accB",
+            name: "账号B",
+            roleId: "102",
+            token: "old-token-B",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdb = new Map();
+    const lockNames = [];
+    const sharedLocks = createSharedLockManager(lockNames);
+
+    const tabA = await loadVueUseTokenTab({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+    const tabB = await loadVueUseTokenTab({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+
+    try {
+      // Tab A updates accA while Tab B concurrently updates accB, with ZERO storage events delivered between them!
+      const [resA, resB] = await Promise.all([
+        tabA.store.commitCredentialUpdate("accA", {
+          updates: { token: "fresh-token-A" },
+          binData: new Uint8Array([10, 10]).buffer,
+        }),
+        tabB.store.commitCredentialUpdate("accB", {
+          updates: { token: "fresh-token-B" },
+          binData: new Uint8Array([20, 20]).buffer,
+        }),
+      ]);
+      assert.equal(resA.committed, true);
+      assert.equal(resB.committed, true);
+
+      // Wait a tick to ensure no deferred async VueUse watcher flushes stale data after lock release!
+      await new Promise((r) => setTimeout(r, 15));
+
+      // All commits must share the single whole-list lock "xyzw-gameTokens"
+      assert.ok(lockNames.length >= 2);
+      assert.ok(
+        lockNames.every((name) => name === "xyzw-gameTokens"),
+        `expected only xyzw-gameTokens locks, got ${JSON.stringify(lockNames)}`,
+      );
+
+      const persisted = JSON.parse(sharedStorage.get("gameTokens"));
+      const savedA = persisted.find((t) => t.id === "accA");
+      const savedB = persisted.find((t) => t.id === "accB");
+      assert.equal(savedA?.token, "fresh-token-A");
+      assert.equal(savedB?.token, "fresh-token-B");
+
+      // Tab A adding a new account C without receiving Tab B's storage event also preserves B's fresh token
+      await tabA.store.commitNewToken({
+        id: "accC",
+        name: "账号C",
+        token: "fresh-token-C",
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      const persistedAfterAdd = JSON.parse(sharedStorage.get("gameTokens"));
+      assert.equal(persistedAfterAdd.length, 3);
+      assert.equal(
+        persistedAfterAdd.find((t) => t.id === "accA")?.token,
+        "fresh-token-A",
+      );
+      assert.equal(
+        persistedAfterAdd.find((t) => t.id === "accB")?.token,
+        "fresh-token-B",
+      );
+      assert.equal(
+        persistedAfterAdd.find((t) => t.id === "accC")?.token,
+        "fresh-token-C",
+      );
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+  });
+
+  test("Round4 P2-1: deleting an account serializes with credential commits and rollback never resurrects deleted BIN", async () => {
+    // Subcase A: Even if account is deleted while storeArrayBuffer is in flight, rollback deletes BIN instead of restoring old BIN!
+    const sharedStorageA = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc1",
+            name: "主号",
+            roleId: "1001",
+            token: "old-token",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdbA = new Map([["acc1", new Uint8Array([5, 5]).buffer]]);
+    const sharedLocksA = createSharedLockManager();
+    let enteredStore;
+    const storeStarted = new Promise((r) => {
+      enteredStore = r;
+    });
+    let releaseStore;
+    const tabA = await loadVueUseTokenTab({
+      sharedStorage: sharedStorageA,
+      sharedIdb: sharedIdbA,
+      sharedLocks: sharedLocksA,
+      storeArrayBufferImpl: async (k, buf) => {
+        if (k === "acc1" && !releaseStore) {
+          enteredStore();
+          await new Promise((r) => {
+            releaseStore = r;
+          });
+        }
+        sharedIdbA.set(k, buf);
+        return true;
+      },
+    });
+    try {
+      const pendingCommit = tabA.store.commitCredentialUpdate("acc1", {
+        expectedVersion: 0,
+        expectedToken: "old-token",
+        updates: { token: "new-token" },
+        binData: new Uint8Array([9, 9]).buffer,
+      });
+      await storeStarted;
+      // Simulate external deletion of acc1 from storage & IDB while commit is mid-write
+      sharedStorageA.set("gameTokens", JSON.stringify([]));
+      sharedIdbA.delete("acc1");
+      releaseStore();
+
+      const commitOutcome = await pendingCommit;
+      assert.equal(commitOutcome.committed, false);
+      assert.equal(commitOutcome.reason, "token_missing");
+      assert.equal(
+        sharedIdbA.has("acc1"),
+        false,
+        "rollback must delete BIN instead of resurrecting deleted account BIN",
+      );
+    } finally {
+      tabA.pinia._e.stop();
+    }
+
+    // Subcase B: Concurrent commitCredentialUpdate + removeToken serialize cleanly and leave zero BIN in IndexedDB
+    const sharedStorageB = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc1",
+            name: "主号",
+            roleId: "1001",
+            token: "old-token",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdbB = new Map([["acc1", new Uint8Array([5, 5]).buffer]]);
+    const sharedLocksB = createSharedLockManager();
+    const tabB = await loadVueUseTokenTab({
+      sharedStorage: sharedStorageB,
+      sharedIdb: sharedIdbB,
+      sharedLocks: sharedLocksB,
+      storeArrayBufferImpl: async (k, buf) => {
+        await new Promise((r) => setTimeout(r, 20));
+        sharedIdbB.set(k, buf);
+        return true;
+      },
+    });
+    try {
+      const [commitRes] = await Promise.all([
+        tabB.store.commitCredentialUpdate("acc1", {
+          expectedVersion: 0,
+          expectedToken: "old-token",
+          updates: { token: "new-token" },
+          binData: new Uint8Array([7, 7]).buffer,
+        }),
+        tabB.store.removeToken("acc1"),
+      ]);
+      assert.equal(commitRes.committed, false);
+      assert.equal(JSON.parse(sharedStorageB.get("gameTokens")).length, 0);
+      assert.equal(sharedIdbB.has("acc1"), false);
+    } finally {
+      tabB.pinia._e.stop();
+    }
+  });
+
+  test("Round4 P2-2: lock-wait timeout stops once Web Lock is granted so slow post-commit BIN cleanup never reports false timeout", async () => {
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc1",
+            name: "主号",
+            roleId: "1001",
+            token: "old-token",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdb = new Map([["主号", new Uint8Array([3, 3]).buffer]]);
+    const sharedLocks = createSharedLockManager();
+    const tab = await loadVueUseTokenTab({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+      deleteArrayBufferImpl: async (k) => {
+        // Deliberately exceed lockWaitTimeoutMs (30ms) AFTER lock grant & commit
+        await new Promise((r) => setTimeout(r, 80));
+        sharedIdb.delete(k);
+        return true;
+      },
+    });
+
+    try {
+      const outcome = await tab.store.commitCredentialUpdate("acc1", {
+        expectedVersion: 0,
+        expectedToken: "old-token",
+        updates: { token: "committed-token" },
+        binData: new Uint8Array([8, 8]).buffer,
+        deleteOldBinKey: "主号",
+        lockWaitTimeoutMs: 30,
+      });
+      assert.equal(outcome.committed, true);
+      assert.equal(tab.store.gameTokens[0].token, "committed-token");
+      assert.equal(sharedIdb.has("主号"), false);
+      assert.deepEqual(
+        Array.from(new Uint8Array(sharedIdb.get("acc1"))),
+        [8, 8],
+      );
+
+      // Subcase B: Waiting BEFORE lock acquisition still times out properly
+      let releaseBlocker;
+      const blockerHeld = sharedLocks.request(
+        "xyzw-gameTokens",
+        () =>
+          new Promise((resolve) => {
+            releaseBlocker = resolve;
+          }),
+      );
+      await assert.rejects(
+        tab.store.commitCredentialUpdate("acc1", {
+          updates: { token: "blocked-token" },
+          lockWaitTimeoutMs: 25,
+        }),
+        /等待跨标签页凭据提交锁超时/,
+      );
+      releaseBlocker();
+      await blockerHeld;
+      assert.equal(tab.store.gameTokens[0].token, "committed-token");
+    } finally {
+      tab.pinia._e.stop();
+    }
+  });
+
+  test("Round4 P2-3: forms disable submit while roles are authenticating and preserve out-of-batch roles appended during import", async () => {
+    const roleA = { id: "a", name: "角色A" };
+    const roleB = { id: "b", name: "角色B" };
+    const roleC = { id: "c", name: "角色C" };
+
+    // Case 1: B finishes auth and joins roleList while batch [A] is importing -> A succeeds, B is preserved!
+    const afterBatchA = pruneSucceededImportRoles([roleA, roleB], [roleA], [0]);
+    assert.deepEqual(afterBatchA, [roleB]);
+
+    // Case 2: Batch [A, C] where A succeeds, C fails, and B joins mid-import -> both failed C and new B remain!
+    const afterPartial = pruneSucceededImportRoles(
+      [roleA, roleC, roleB],
+      [roleA, roleC],
+      [0],
+    );
+    assert.deepEqual(afterPartial, [roleC, roleB]);
+
+    // Verify all 4 role-list import forms implement BOTH guards (pendingAddCount + pruneSucceededImportRoles)
+    for (const file of [
+      "../src/views/TokenImport/MobileTokenForm.vue",
+      "../src/views/TokenImport/WxQrcodeForm.vue",
+      "../src/views/TokenImport/BinTokenForm.vue",
+      "../src/views/TokenImport/SingleBinTokenForm.vue",
+    ]) {
+      const src = await readFile(new URL(file, import.meta.url), "utf8");
+      assert.match(src, /const pendingAddCount = ref\(0\)/, file);
+      assert.match(
+        src,
+        /:disabled="isImporting \|\| pendingAddCount > 0"/,
+        file,
+      );
+      assert.match(src, /if \(pendingAddCount\.value > 0\)/, file);
+      assert.match(src, /pruneSucceededImportRoles\(/, file);
+      assert.match(src, /if \(roleList\.value\.length > 0\)/, file);
+    }
   });
 });

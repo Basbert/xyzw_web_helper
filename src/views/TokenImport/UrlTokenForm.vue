@@ -178,7 +178,11 @@ const handleUrlImport = async () => {
         sourceUrl: validatedUrl,
         importMethod: "url",
       };
-      tokenStore.addToken(newToken);
+      if (typeof tokenStore.commitNewToken === "function") {
+        await tokenStore.commitNewToken(newToken);
+      } else {
+        tokenStore.addToken(newToken);
+      }
       message.success("Token添加成功");
       // 重置表单
       urlForm.name = "";

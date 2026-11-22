@@ -128,15 +128,21 @@ const importRules = {
     { min: 20, message: "Token字符串长度应至少20个字符", trigger: "blur" },
   ],
 };
-const handleImport = () => {
+const handleImport = async () => {
+  if (isImporting.value) return;
   isImporting.value = true;
   try {
-    tokenStore.addToken({
+    const tokenData = {
       name: importForm.name,
       token: importForm.base64Token,
       server: importForm.server,
       wsUrl: importForm.wsUrl,
-    });
+    };
+    if (typeof tokenStore.commitNewToken === "function") {
+      await tokenStore.commitNewToken(tokenData);
+    } else {
+      tokenStore.addToken(tokenData);
+    }
     message.success("Token添加成功");
     importForm.name = "";
     importForm.base64Token = "";

@@ -775,6 +775,7 @@ import {
   toggleTokenSelection,
 } from "@/utils/gameSelection";
 import { fetchTokenPayloadFromUrl } from "@/utils/token";
+import { buildTokenEditCommitPayload } from "@/utils/tokenImportUpsert";
 import { generateBinFromCombUser } from "@/utils/wechatForceLogout";
 import BinTokenForm from "./BinTokenForm.vue";
 import ManualTokenForm from "./ManualTokenForm.vue";
@@ -808,6 +809,7 @@ const showEditModal = ref(false);
 
 const editFormRef = ref(null);
 const editingToken = ref(null);
+const editingSnapshot = ref(null);
 const importMethod = ref("manual");
 const refreshingTokens = ref(new Set());
 const connectingTokens = ref(new Set());
@@ -950,7 +952,7 @@ const handleDragOver = (event) => {
   event.dataTransfer.dropEffect = "move";
 };
 
-const handleDrop = (index, event) => {
+const handleDrop = async (index, event) => {
   event.preventDefault();
   if (dragIndex.value === null || dragIndex.value === index) return;
 
@@ -963,8 +965,12 @@ const handleDrop = (index, event) => {
   currentTokens.splice(dragIndex.value, 1);
   currentTokens.splice(index, 0, draggedItem);
 
-  // 更新 store
-  tokenStore.gameTokens = currentTokens;
+  // 更新 store（在跨标签页锁内读取最新列表按顺序重排，避免覆盖其他标签页的新凭据）
+  if (typeof tokenStore.reorderTokens === "function") {
+    await tokenStore.reorderTokens(currentTokens.map((item) => item.id));
+  } else {
+    tokenStore.gameTokens = currentTokens;
+  }
 
   // 切换到手动排序模式，防止自动排序打乱顺序
   sortConfig.value.field = "manual";
@@ -1280,12 +1286,26 @@ const handleTokenAction = async (key, token) => {
 
 const editToken = (token) => {
   editingToken.value = token;
-  Object.assign(editForm, {
-    name: token.name,
-    token: token.token,
+  const snapshot = {
+    id: token.id,
+    name: token.name || "",
+    token: token.token || "",
     server: token.server || "",
     wsUrl: token.wsUrl || "",
     remark: token.remark || "",
+    credentialVersion:
+      typeof tokenStore.getCredentialVersion === "function"
+        ? tokenStore.getCredentialVersion(token.id)
+        : (token.credentialVersion ?? 0),
+    createdAt: token.createdAt,
+  };
+  editingSnapshot.value = snapshot;
+  Object.assign(editForm, {
+    name: snapshot.name,
+    token: snapshot.token,
+    server: snapshot.server,
+    wsUrl: snapshot.wsUrl,
+    remark: snapshot.remark,
   });
   showEditModal.value = true;
 };
@@ -1296,29 +1316,46 @@ const saveEdit = async () => {
   try {
     await editFormRef.value.validate();
 
-    const tokenId = editingToken.value.id;
-    const updates = {
-      name: editForm.name,
-      token: editForm.token,
-      server: editForm.server,
-      wsUrl: editForm.wsUrl,
-      remark: editForm.remark,
-    };
+    const snapshot = editingSnapshot.value;
+    const tokenId = snapshot?.id || editingToken.value.id;
+    const payload = buildTokenEditCommitPayload(snapshot, editForm);
+
+    if (!payload.hasChanges) {
+      showEditModal.value = false;
+      editingToken.value = null;
+      editingSnapshot.value = null;
+      return;
+    }
+
     if (typeof tokenStore.commitCredentialUpdate === "function") {
       const commit = await tokenStore.commitCredentialUpdate(tokenId, {
-        updates,
+        updates: payload.updates,
+        ...(payload.editsCredential
+          ? {
+              expectedVersion: payload.expectedVersion,
+              expectedToken: payload.expectedToken,
+              expectedCreatedAt: payload.expectedCreatedAt,
+            }
+          : {}),
       });
+      if (commit?.stale) {
+        message.warning(
+          "该账号在编辑期间已更新过登录凭据，已保留最新凭据，请重新打开编辑框确认",
+        );
+        return;
+      }
       if (!commit?.committed) {
         message.error("账号不存在或更新失败，请刷新后重试");
         return;
       }
     } else {
-      tokenStore.updateToken(tokenId, updates);
+      tokenStore.updateToken(tokenId, payload.updates);
     }
 
     message.success("Token信息已更新");
     showEditModal.value = false;
     editingToken.value = null;
+    editingSnapshot.value = null;
   } catch (error) {
     // 验证失败
   }
@@ -1373,15 +1410,25 @@ const startEditRemark = (token) => {
 };
 
 // 保存备注的通用函数
-const saveCurrentRemark = () => {
+const saveCurrentRemark = async () => {
   if (!editingRemark.value) return;
 
   const editingTokenId = editingRemark.value;
   const remark = tempRemarks.value[editingTokenId] || "";
-  tokenStore.updateToken(editingTokenId, {
-    remark,
-  });
   editingRemark.value = null;
+  if (typeof tokenStore.commitCredentialUpdate === "function") {
+    const commit = await tokenStore.commitCredentialUpdate(editingTokenId, {
+      updates: { remark },
+    });
+    if (!commit?.committed) {
+      message.error("账号不存在或保存备注失败，请刷新后重试");
+      return;
+    }
+  } else {
+    tokenStore.updateToken(editingTokenId, {
+      remark,
+    });
+  }
   message.success("备注已保存");
 };
 
@@ -1542,10 +1589,13 @@ const importTokenFile = () => {
     const file = e.target.files[0];
     if (file) {
       const reader = new FileReader();
-      reader.onload = (e) => {
+      reader.onload = async (e) => {
         try {
           const data = JSON.parse(e.target.result);
-          const result = tokenStore.importTokens(data);
+          const result =
+            typeof tokenStore.commitImportTokens === "function"
+              ? await tokenStore.commitImportTokens(data)
+              : tokenStore.importTokens(data);
           if (result.success) {
             message.success(result.message);
           } else {
