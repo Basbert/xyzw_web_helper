@@ -1,25 +1,6 @@
 import { campClock, getCampSnapshot } from "./campChallenge.js";
-
-const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
-
-function isLegionWarReminderTime(now = Date.now()) {
-  const shifted = new Date(Number(now) + SHANGHAI_OFFSET_MS);
-  const year = shifted.getUTCFullYear();
-  const month = shifted.getUTCMonth();
-  const date = shifted.getUTCDate();
-  const weekday = shifted.getUTCDay();
-  const minutes = shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
-
-  if (weekday === 6 && minutes >= 1195 && minutes <= 1260) {
-    return true;
-  }
-  if (weekday === 0 && minutes >= 1195 && minutes <= 1290) {
-    const firstDayWeekday = new Date(Date.UTC(year, month, 1)).getUTCDay();
-    const firstSundayDate = 1 + ((7 - firstDayWeekday) % 7);
-    return date === firstSundayDate + 21;
-  }
-  return false;
-}
+import { isLegionWarAccessible } from "./legionWarTime.js";
+import { getWeeklyQuizProgress } from "./weeklyQuiz.js";
 
 /** The game's activity days follow China time, independent of device timezone. */
 export function getReminderDays(now = Date.now()) {
@@ -28,8 +9,50 @@ export function getReminderDays(now = Date.now()) {
     dayKey: clock.dayKey,
     dream: [0, 1, 3, 4].includes(clock.weekday),
     camp: [2, 3, 4].includes(clock.weekday),
-    legionWar: isLegionWarReminderTime(now),
+    legionWar: isLegionWarAccessible(now),
   };
+}
+
+/**
+ * Describe weekly quiz reminder using the same official quiz config, progress
+ * evaluator, and account toggle as DailyTaskRunner.
+ */
+export function describeWeeklyQuizReminder({
+  role,
+  config,
+  nowMs = Date.now(),
+  weeklyQuizEnabled = true,
+} = {}) {
+  if (!role || !config) return "";
+  const progress = getWeeklyQuizProgress(role, config);
+  if (!progress || progress.complete) return "";
+
+  const nowSec = Math.floor(Number(nowMs) / 1000);
+  if (
+    Number.isFinite(nowSec) &&
+    (nowSec < config.startsAt || nowSec > config.endsAt)
+  ) {
+    return "";
+  }
+
+  const autoEnabled = weeklyQuizEnabled !== false;
+  if (progress.claimable.length > 0) {
+    return autoEnabled
+      ? "本周咸鱼大冲关有待领取奖励，执行每日任务时可自动领取。"
+      : "本周咸鱼大冲关有待领取奖励（当前已关闭日常自动答题，可手动领取或开启开关）。";
+  }
+
+  if (progress.correct < config.target && !progress.attemptedToday) {
+    if (!autoEnabled) {
+      return `本周咸鱼大冲关最高答对 ${progress.correct}/${config.target} 题（当前已关闭日常自动答题，如需自动完成请前往日常设置开启）。`;
+    }
+    if (progress.correct === 0) {
+      return `本周尚未完成咸鱼大冲关（目标 ${config.target} 题），执行每日任务时可自动答题。`;
+    }
+    return `本周最高答对 ${progress.correct}/${config.target} 题，今日可继续参与冲关。`;
+  }
+
+  return "";
 }
 
 /** Counts are informative; paid privileges can raise the ordinary limits. */

@@ -249,6 +249,11 @@ import {
   readDailyTaskSettingsForExecution,
 } from "@/utils/dailyTaskSettings";
 import { convertBinToLx } from "@/utils/gameLauncher";
+import {
+  createServerTimeSample,
+  getEstimatedServerNowSec,
+  updateServerTimeSample,
+} from "@/utils/serverClock";
 
 const router = useRouter();
 const openDailyTarget = (daily) => {
@@ -368,28 +373,9 @@ const isConnecting = computed(() => {
   );
 });
 
-const pendingBattleVersionIds = new Set();
 const ensureDashboardBattleVersion = async (tokenId) => {
-  if (!tokenId || pendingBattleVersionIds.has(tokenId)) return;
-  if (tokenStore.connectionRecoveryStatus?.[tokenId] === "restored") return;
-  const accountData = tokenStore.getAccountGameData?.(tokenId)?.value;
-  if (accountData?.battleVersion) return;
-
-  pendingBattleVersionIds.add(tokenId);
-  try {
-    const response = await tokenStore.sendMessageWithPromise(
-      tokenId,
-      "fight_startlevel",
-    );
-    const version = response?.battleData?.version;
-    if (version && tokenStore.getWebSocketStatus(tokenId) === "connected") {
-      tokenStore.setBattleVersion(version, tokenId);
-    }
-  } catch {
-    // 战斗版本号初始化失败不阻断首页使用
-  } finally {
-    pendingBattleVersionIds.delete(tokenId);
-  }
+  if (!tokenId) return;
+  await tokenStore.ensureBattleVersion?.(tokenId);
 };
 
 watch(
@@ -398,6 +384,30 @@ watch(
     if (tokenId && connected) {
       ensureDashboardBattleVersion(tokenId);
     }
+  },
+  { immediate: true },
+);
+
+const serverTimeSample = ref(null);
+watch(
+  [
+    () => tokenStore.selectedToken?.id,
+    isConnected,
+    () => {
+      const id = tokenStore.selectedToken?.id;
+      return id ? tokenStore.wsConnections?.[id]?.client?.serverTime : null;
+    },
+    () => tokenStore.gameData?.roleInfo,
+  ],
+  ([tokenId, connected, clientServerTime], [prevTokenId]) => {
+    if (!tokenId || !connected) {
+      serverTimeSample.value = null;
+      return;
+    }
+    serverTimeSample.value =
+      tokenId === prevTokenId
+        ? updateServerTimeSample(serverTimeSample.value, clientServerTime)
+        : createServerTimeSample(clientServerTime);
   },
   { immediate: true },
 );
@@ -461,15 +471,12 @@ const formatCompactDuration = (seconds) => {
 };
 
 const maintenanceSummary = computed(() => {
+  const tickMs = secondTickMs.value;
   if (!isConnected.value) return "未连接";
   const role = tokenStore.gameData?.roleInfo?.role;
   const tokenId = tokenStore.selectedToken?.id;
   if (!role || !tokenId) return "等待更新";
-  const client = tokenStore.wsConnections?.[tokenId]?.client;
-  const nowSec =
-    Number.isFinite(client?.serverTime) && client.serverTime > 0
-      ? client.serverTime / 1000
-      : secondTickMs.value / 1000;
+  const nowSec = getEstimatedServerNowSec(serverTimeSample.value, tickMs);
 
   const parts = [];
   const bottleStop = role.bottleHelpers?.helperStopTime;
@@ -559,6 +566,12 @@ const formatTime = (timestamp) => {
 };
 */
 
+const handleVisibilityTick = () => {
+  if (document.visibilityState === "visible") {
+    secondTickMs.value = Date.now();
+  }
+};
+
 // 生命周期
 onMounted(async () => {
   // 确保有Token
@@ -575,11 +588,13 @@ onMounted(async () => {
   if (
     selected &&
     tokenStore.getWebSocketStatus(selected.id) === "disconnected" &&
+    tokenStore.connectionRecoveryStatus?.[selected.id] !== "waiting" &&
     !tokenStore.isConnectionActiveInAnotherTab?.(selected.id)
   ) {
     connectSelectedAccount();
   }
 
+  document.addEventListener("visibilitychange", handleVisibilityTick);
   secondTimer = window.setInterval(() => {
     if (isConnected.value && document.visibilityState === "visible") {
       secondTickMs.value = Date.now();
@@ -588,6 +603,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  document.removeEventListener("visibilitychange", handleVisibilityTick);
   if (secondTimer) {
     window.clearInterval(secondTimer);
     secondTimer = null;

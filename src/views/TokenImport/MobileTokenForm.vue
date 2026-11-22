@@ -454,7 +454,12 @@ const addSelectedRole = async (roleInfo: any) => {
       return;
     }
     if (!saveCombUser.value) {
-      await storeArrayBuffer(tokenId, buffer);
+      const saved = await storeArrayBuffer(tokenId, buffer);
+      if (!saved) {
+        throw new Error(
+          "保存BIN数据到IndexedDB失败，请检查浏览器存储空间或权限",
+        );
+      }
     }
     roleList.value.push({
       id: tokenId,
@@ -510,6 +515,9 @@ const handleImport = async () => {
     roleList.value = [];
     message.success(formatUpsertImportMessage(result));
     emit("ok");
+  } catch (error: any) {
+    console.error("导入角色失败", error);
+    message.error(error?.message || "导入失败，请重试");
   } finally {
     isImporting.value = false;
   }

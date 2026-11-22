@@ -103,10 +103,14 @@ import { reactive, ref } from "vue";
 import useIndexedDB from "@/hooks/useIndexedDB";
 import { useTokenStore } from "@/stores/tokenStore";
 import { getTokenId, transformToken } from "@/utils/token";
+import {
+  formatUpsertImportMessage,
+  upsertImportedRoleTokens,
+} from "@/utils/tokenImportUpsert";
 
 const $emit = defineEmits(["cancel", "ok"]);
 
-const { storeArrayBuffer } = useIndexedDB();
+const { storeArrayBuffer, getArrayBuffer, deleteArrayBuffer } = useIndexedDB();
 
 const cancel = () => {
   roleList.value = [];
@@ -125,6 +129,7 @@ const importForm = reactive({
 const roleList = ref<
   Array<{
     id: string;
+    roleId?: string;
     name: string;
     token: string;
     server: string;
@@ -168,37 +173,53 @@ const uploadBin = (binFile: File) => {
     const roleMeta = initName(binFile.name) as any;
     const reader = new FileReader();
     reader.onload = async (e) => {
-      const userToken = e.target?.result as ArrayBuffer;
-      // console.log('转换Token:', userToken);
-      const tokenId = getTokenId(userToken);
-      const roleToken = await transformToken(userToken);
-      const roleName = roleMeta.roleName || binFile.name.split(".")?.[0] || "";
-      // 刷新indexDB数据库token数据
-      const saved = await storeArrayBuffer(tokenId, userToken);
-      if (!saved) {
-        message.error("保存BIN数据到IndexedDB失败");
-        return;
-      }
+      try {
+        const userToken = e.target?.result as ArrayBuffer;
+        if (!userToken || userToken.byteLength === 0) {
+          throw new Error("文件内容为空，请检查 BIN 文件是否正确");
+        }
+        const tokenId = getTokenId(userToken);
+        const roleToken = await transformToken(userToken);
+        const roleName =
+          roleMeta.roleName || binFile.name.split(".")?.[0] || "";
+        // 刷新indexDB数据库token数据
+        const saved = await storeArrayBuffer(tokenId, userToken);
+        if (!saved) {
+          message.error("保存BIN数据到IndexedDB失败");
+          return;
+        }
 
-      // 上传列表中发现已存在的重复名称，提示消息
-      if (roleList.value.some((role) => role.id === tokenId)) {
-        message.error("上传列表中已存在同名角色! ");
-        return;
+        // 上传列表中发现已存在的重复名称，提示消息
+        if (roleList.value.some((role) => role.id === tokenId)) {
+          message.error("上传列表中已存在同名角色! ");
+          return;
+        }
+        // 检查待上传的角色是否已在tokenStore中存在
+        const existingToken = tokenStore.gameTokens.find(
+          (t) =>
+            t.id === tokenId ||
+            (roleMeta.roleId &&
+              String(t.roleId ?? "") === String(roleMeta.roleId)),
+        );
+        if (existingToken) {
+          message.warning(`角色"${roleName}"已存在，将更新该角色的Token`);
+        }
+        message.success("Token读取成功，请检查角色名称等信息后提交");
+        roleList.value.push({
+          id: tokenId,
+          ...(roleMeta.roleId ? { roleId: roleMeta.roleId } : {}),
+          token: roleToken,
+          name: roleName,
+          server: `${roleMeta.server}${roleMeta.roleIndex}` || "",
+          wsUrl: importForm.wsUrl || "",
+          importMethod: "bin",
+        });
+      } catch (error: any) {
+        console.error("读取单 BIN 文件失败", error);
+        message.error(
+          error?.message || "解析 BIN 文件或校验凭据失败，请重新导出后重试",
+        );
       }
-      // 检查待上传的角色是否已在tokenStore中存在
-      const existingToken = tokenStore.gameTokens.find((t) => t.id === tokenId);
-      if (existingToken) {
-        message.warning(`角色"${roleName}"已存在，将更新该角色的Token`);
-      }
-      message.success("Token读取成功，请检查角色名称等信息后提交");
-      roleList.value.push({
-        id: tokenId,
-        token: roleToken,
-        name: roleName,
-        server: `${roleMeta.server}${roleMeta.roleIndex}` || "",
-        wsUrl: importForm.wsUrl || "",
-        importMethod: "bin",
-      });
     };
     reader.onerror = () => {
       message.error("读取文件失败，请重试");
@@ -213,23 +234,24 @@ const handleImport = async () => {
     message.error("请先上传bin文件！");
     return;
   }
-  roleList.value.forEach((role) => {
-    // tokenStore.gameTokens中发现已存在的重复名称，则移出token后重新添加
-    const gameToken = tokenStore.gameTokens.find((t) => t.id === role.id);
-    if (gameToken) {
-      // tokenStore.removeToken(gameToken.id);
-      tokenStore.updateToken(gameToken.id, {
-        ...role,
-      });
-    } else {
-      tokenStore.addToken({
-        ...role,
-      });
-    }
-  });
-  message.success("Token添加成功");
-  roleList.value = [];
-  $emit("ok");
+  isImporting.value = true;
+  try {
+    const result = await upsertImportedRoleTokens({
+      roles: roleList.value,
+      tokenStore,
+      getArrayBuffer,
+      storeArrayBuffer,
+      deleteArrayBuffer,
+    });
+    message.success(formatUpsertImportMessage(result));
+    roleList.value = [];
+    $emit("ok");
+  } catch (error: any) {
+    console.error("导入单 BIN 角色失败", error);
+    message.error(error?.message || "导入失败，请重试");
+  } finally {
+    isImporting.value = false;
+  }
 };
 </script>
 

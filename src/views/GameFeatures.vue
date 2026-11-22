@@ -209,8 +209,13 @@ onMounted(() => {
   tokenStore.initConnectionCoordination();
   // 检查是否需要连接 WebSocket
   if (tokenStore.selectedToken) {
-    const status = tokenStore.getWebSocketStatus(tokenStore.selectedToken.id);
-    if (status !== "connected" && status !== "connecting") {
+    const tokenId = tokenStore.selectedToken.id;
+    const status = tokenStore.getWebSocketStatus(tokenId);
+    if (
+      status !== "connected" &&
+      status !== "connecting" &&
+      tokenStore.connectionRecoveryStatus?.[tokenId] !== "waiting"
+    ) {
       connectWebSocket();
     } else if (status === "connected") {
       // 如果已连接，立即获取初始数据
@@ -291,6 +296,10 @@ const initializeGameData = async ({ readOnly = false } = {}) => {
       tokenStore.connectionRecoveryStatus?.[tokenId] === "restored"
     )
       return;
+    if (typeof tokenStore.ensureBattleVersion === "function") {
+      await tokenStore.ensureBattleVersion(tokenId);
+      return;
+    }
     const res = await tokenStore.sendMessageWithPromise(
       tokenId,
       "fight_startlevel",

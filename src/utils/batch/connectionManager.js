@@ -567,7 +567,7 @@ export async function runBatchForAccounts(
   });
 
   try {
-    await Promise.all(
+    await Promise.allSettled(
       tokenIds.map(async (tokenId) => {
         if (shouldStop.value) {
           tokenStatus.value[tokenId] = "stopped";
@@ -577,14 +577,25 @@ export async function runBatchForAccounts(
         const token = tokens.value.find((item) => item.id === tokenId);
         if (!token) {
           tokenStatus.value[tokenId] = "failed";
-          addLog({
+          addLog?.({
             time: new Date().toLocaleTimeString(),
             message: `账号已不存在，跳过${label}`,
             type: "error",
           });
           return;
         }
-        await runAccount({ tokenId, token });
+        try {
+          await runAccount({ tokenId, token });
+        } catch (error) {
+          tokenStatus.value[tokenId] = error?.interrupted
+            ? "stopped"
+            : "failed";
+          addLog?.({
+            time: new Date().toLocaleTimeString(),
+            message: `[${token.name || tokenId}] ${label}异常: ${error?.message || "未知错误"}`,
+            type: error?.interrupted ? "warning" : "error",
+          });
+        }
       }),
     );
   } finally {

@@ -39,6 +39,11 @@
 import { useMessage } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import {
+  createServerTimeSample,
+  getEstimatedServerNowSec,
+  updateServerTimeSample,
+} from "@/utils/serverClock";
 import { runStandaloneDailyAction } from "@/utils/standaloneDailyActions";
 import MyCard from "../Common/MyCard.vue";
 
@@ -78,7 +83,16 @@ const formatTime = (seconds) => {
   return `${h}:${m}:${s}`;
 };
 
-let serverOffsetMs = 0;
+let serverTimeSample = null;
+let sampledTokenId = null;
+
+const resetState = () => {
+  serverTimeSample = null;
+  sampledTokenId = null;
+  state.value.stopTime = 0;
+  state.value.remainingTime = 0;
+  state.value.isRunning = false;
+};
 
 const recomputeFromTimestamp = () => {
   if (!Number.isFinite(state.value.stopTime) || state.value.stopTime <= 0) {
@@ -86,23 +100,26 @@ const recomputeFromTimestamp = () => {
     state.value.remainingTime = 0;
     return;
   }
-  const nowSec = (Date.now() + serverOffsetMs) / 1000;
+  const nowSec = getEstimatedServerNowSec(serverTimeSample);
   const remaining = Math.max(0, Math.floor(state.value.stopTime - nowSec));
   state.value.remainingTime = remaining;
   state.value.isRunning = remaining > 0;
 };
 
 const syncFromRole = () => {
-  const stopTime = roleInfo.value?.role?.bottleHelpers?.helperStopTime;
-  if (!Number.isFinite(stopTime)) return;
   const tokenId = tokenStore.selectedToken?.id;
-  const clientServerTime = tokenId
-    ? tokenStore.wsConnections?.[tokenId]?.client?.serverTime
-    : null;
-  serverOffsetMs =
-    Number.isFinite(clientServerTime) && clientServerTime > 0
-      ? clientServerTime - Date.now()
-      : 0;
+  const stopTime = roleInfo.value?.role?.bottleHelpers?.helperStopTime;
+  if (!tokenId || !Number.isFinite(stopTime)) {
+    resetState();
+    return;
+  }
+  const clientServerTime =
+    tokenStore.wsConnections?.[tokenId]?.client?.serverTime;
+  serverTimeSample =
+    sampledTokenId === tokenId
+      ? updateServerTimeSample(serverTimeSample, clientServerTime)
+      : createServerTimeSample(clientServerTime);
+  sampledTokenId = tokenId;
   state.value.stopTime = stopTime;
   recomputeFromTimestamp();
 };
@@ -111,6 +128,10 @@ watch(
   () => [
     tokenStore.selectedToken?.id,
     roleInfo.value?.role?.bottleHelpers?.helperStopTime,
+    tokenStore.selectedToken?.id
+      ? tokenStore.wsConnections?.[tokenStore.selectedToken.id]?.client
+          ?.serverTime
+      : null,
   ],
   () => syncFromRole(),
   { immediate: true },

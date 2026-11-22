@@ -62,8 +62,15 @@ export class DailyTaskRunner {
     }
     const deadline = Date.now() + duration;
     while (true) {
-      if (this.restoringFormation) this.assertRunConnection();
-      else this.throwIfInterrupted();
+      if (this.restoringFormation || this.finishingCriticalStep) {
+        this.assertRunConnection(
+          this.finishingCriticalStep
+            ? "原连接已变化，无法确认盐罐重启，请在游戏中检查盐罐状态"
+            : undefined,
+        );
+      } else {
+        this.throwIfInterrupted();
+      }
       const remaining = deadline - Date.now();
       if (remaining <= 0) return;
       await this.sleep(Math.min(remaining, 250));
@@ -86,17 +93,55 @@ export class DailyTaskRunner {
    * @returns {Promise<*>} Server response.
    */
   async sendRequest(request) {
-    if (this.restoringFormation) this.assertRunConnection();
-    else this.throwIfInterrupted();
+    if (this.restoringFormation || this.finishingCriticalStep) {
+      this.assertRunConnection(
+        this.finishingCriticalStep
+          ? "原连接已变化，无法确认盐罐重启，请在游戏中检查盐罐状态"
+          : undefined,
+      );
+    } else {
+      this.throwIfInterrupted();
+    }
     const response = await request();
-    if (this.restoringFormation) this.assertRunConnection();
-    else this.throwIfInterrupted();
+    if (this.restoringFormation || this.finishingCriticalStep) {
+      this.assertRunConnection(
+        this.finishingCriticalStep
+          ? "原连接已变化，无法确认盐罐重启，请在游戏中检查盐罐状态"
+          : undefined,
+      );
+    } else {
+      this.throwIfInterrupted();
+    }
     return response;
   }
 
-  assertRunConnection() {
-    if (!this.connection?.isIntact())
-      throw new Error("原连接已变化，未恢复阵容，请在游戏中检查");
+  assertRunConnection(message = "原连接已变化，未恢复阵容，请在游戏中检查") {
+    if (!this.connection?.isIntact()) throw new Error(message);
+  }
+
+  async ensureBattleVersionForCombat(tokenId) {
+    if (typeof this.tokenStore.getAccountGameData !== "function") {
+      return true;
+    }
+    const readVersion = () =>
+      this.tokenStore.getAccountGameData(tokenId)?.value?.battleVersion;
+    const isValid = (value) =>
+      typeof value === "number" && Number.isFinite(value) && value > 0;
+    if (isValid(readVersion())) return true;
+
+    if (typeof this.tokenStore.ensureBattleVersion === "function") {
+      const ensured = await this.tokenStore.ensureBattleVersion(tokenId);
+      if (isValid(ensured) || isValid(readVersion())) return true;
+    }
+
+    if (!this.battleVersionWarningLogged) {
+      this.battleVersionWarningLogged = true;
+      this.log(
+        "战斗版本号未确认，跳过依赖版本号的战斗步骤并标记为待处理，请重新连接后再执行",
+        "warning",
+      );
+    }
+    return false;
   }
 
   async executeGameCommand(
@@ -325,6 +370,8 @@ export class DailyTaskRunner {
     this.activeCondition = undefined;
     this.originalFormation = undefined;
     this.formationChanged = false;
+    this.finishingCriticalStep = false;
+    this.battleVersionWarningLogged = false;
     this.roleStateDirty = true;
     this.reportedProgress = undefined;
     this.loggedTaskStates = new Map();
@@ -516,50 +563,86 @@ export class DailyTaskRunner {
     }
 
     if (!isTaskCompleted(14) && settings.claimBottle) {
-      const bottleStopTime = roleData.bottleHelpers?.helperStopTime;
-      const serverTimeMs =
-        this.tokenStore.wsConnections?.[tokenId]?.client?.serverTime;
-      const nowSec =
-        Number.isFinite(serverTimeMs) && serverTimeMs > 0
-          ? serverTimeMs / 1000
-          : Date.now() / 1000;
-      const shouldStopBottleFirst =
-        !Number.isFinite(bottleStopTime) || bottleStopTime > nowSec;
-      if (shouldStopBottleFirst) {
-        taskList.push({
-          name: "停止盐罐计时",
-          condition: 14,
-          execute: () =>
-            this.executeGameCommand(
-              tokenId,
-              "bottlehelper_stop",
-              {},
-              "停止盐罐计时",
-            ),
-        });
-      }
       taskList.push({
-        name: "开始盐罐计时",
+        name: "处理盐罐（重启并领奖）",
         condition: 14,
-        execute: () =>
-          this.executeGameCommand(
-            tokenId,
-            "bottlehelper_start",
-            {},
-            "开始盐罐计时",
-          ),
-      });
+        execute: async () => {
+          const freshRole = await this.refreshServerRole(tokenId);
+          const bottleStopTime = freshRole?.bottleHelpers?.helperStopTime;
+          const serverTimeMs =
+            this.tokenStore.wsConnections?.[tokenId]?.client?.serverTime;
+          const confirmedStopped =
+            Number.isFinite(bottleStopTime) &&
+            Number.isFinite(serverTimeMs) &&
+            serverTimeMs > 0 &&
+            bottleStopTime <= serverTimeMs / 1000;
 
-      taskList.push({
-        name: "领取盐罐奖励",
-        condition: 14,
-        execute: () =>
-          this.executeGameCommand(
+          let stoppedThisStep = false;
+          let startedThisStep = false;
+          try {
+            if (!confirmedStopped) {
+              this.throwIfInterrupted();
+              this.log("执行: 停止盐罐计时");
+              this.roleStateDirty = true;
+              await this.tokenStore.sendMessageWithPromise(
+                tokenId,
+                "bottlehelper_stop",
+                {},
+                8000,
+              );
+              stoppedThisStep = true;
+              await this.waitInterruptible(this.delaySettings.commandDelay);
+              this.throwIfInterrupted();
+            }
+
+            await this.executeGameCommand(
+              tokenId,
+              "bottlehelper_start",
+              {},
+              "开始盐罐计时",
+            );
+            startedThisStep = true;
+          } finally {
+            if (stoppedThisStep && !startedThisStep) {
+              if (this.connection?.isIntact()) {
+                this.finishingCriticalStep = true;
+                try {
+                  this.log(
+                    "盐罐已停止，正在原连接上完成盐罐重启收尾...",
+                    "warning",
+                  );
+                  await this.executeGameCommand(
+                    tokenId,
+                    "bottlehelper_start",
+                    {},
+                    "重启盐罐收尾",
+                  );
+                  startedThisStep = true;
+                } catch (restartError) {
+                  this.log(
+                    `盐罐已停止但重启未确认，请在游戏内手动检查盐罐状态: ${restartError.message}`,
+                    "error",
+                  );
+                } finally {
+                  this.finishingCriticalStep = false;
+                }
+              } else {
+                this.log(
+                  "原连接已断开，盐罐已停止且无法自动重启，请重新连接或在游戏内手动开启盐罐",
+                  "error",
+                );
+              }
+            }
+          }
+
+          this.throwIfInterrupted();
+          await this.executeGameCommand(
             tokenId,
             "bottlehelper_claim",
             {},
             "领取盐罐奖励",
-          ),
+          );
+        },
       });
     }
 
@@ -571,22 +654,27 @@ export class DailyTaskRunner {
       );
     }
     if (!isTaskCompleted(13) && settings.arenaEnable) {
-      taskList.push(
-        dailyArenaTask({
-          getCurrentHour: this.getCurrentHour,
-          log: (text, type) => this.log(text, type),
-          refreshRole: () => this.refreshServerRole(tokenId),
-          goalReached: () => isTaskCompleted(13),
-          switchFormation: () =>
-            this.switchToFormationIfNeeded(
-              tokenId,
-              settings.arenaFormation,
-              "竞技场阵容",
-            ),
-          execute: (...args) => this.executeGameCommand(tokenId, ...args),
-          sleep: this.sleep,
-        }),
-      );
+      const arenaTask = dailyArenaTask({
+        getCurrentHour: this.getCurrentHour,
+        log: (text, type) => this.log(text, type),
+        refreshRole: () => this.refreshServerRole(tokenId),
+        goalReached: () => isTaskCompleted(13),
+        switchFormation: () =>
+          this.switchToFormationIfNeeded(
+            tokenId,
+            settings.arenaFormation,
+            "竞技场阵容",
+          ),
+        execute: (...args) => this.executeGameCommand(tokenId, ...args),
+        sleep: this.sleep,
+      });
+      taskList.push({
+        ...arenaTask,
+        execute: async () => {
+          if (!(await this.ensureBattleVersionForCombat(tokenId))) return false;
+          return arenaTask.execute();
+        },
+      });
     }
 
     // 3. BOSS
@@ -604,24 +692,30 @@ export class DailyTaskRunner {
         taskList.push({
           name: "军团BOSS阵容检查",
           checkOnly: true,
-          execute: () =>
-            this.switchToFormationIfNeeded(
+          execute: async () => {
+            if (!(await this.ensureBattleVersionForCombat(tokenId)))
+              return false;
+            return this.switchToFormationIfNeeded(
               tokenId,
               settings.bossFormation,
               "BOSS阵容",
-            ),
+            );
+          },
         });
         for (let i = 0; i < remainingLegionBoss; i++) {
           taskList.push({
             name: `军团BOSS ${i + 1}/${remainingLegionBoss}`,
-            execute: () =>
-              this.executeGameCommand(
+            execute: async () => {
+              if (!(await this.ensureBattleVersionForCombat(tokenId)))
+                return false;
+              return this.executeGameCommand(
                 tokenId,
                 "fight_startlegionboss",
                 {},
                 `军团BOSS ${i + 1}`,
                 12000,
-              ),
+              );
+            },
           });
         }
       }
@@ -631,24 +725,28 @@ export class DailyTaskRunner {
     taskList.push({
       name: "每日BOSS阵容检查",
       checkOnly: true,
-      execute: () =>
-        this.switchToFormationIfNeeded(
+      execute: async () => {
+        if (!(await this.ensureBattleVersionForCombat(tokenId))) return false;
+        return this.switchToFormationIfNeeded(
           tokenId,
           settings.bossFormation,
           "BOSS阵容",
-        ),
+        );
+      },
     });
     for (let i = 0; i < 3; i++) {
       taskList.push({
         name: `每日BOSS ${i + 1}/3`,
-        execute: () =>
-          this.executeGameCommand(
+        execute: async () => {
+          if (!(await this.ensureBattleVersionForCombat(tokenId))) return false;
+          return this.executeGameCommand(
             tokenId,
             "fight_startboss",
             { bossId: todayBossId },
             `每日BOSS ${i + 1}`,
             12000,
-          ),
+          );
+        },
       });
     }
 

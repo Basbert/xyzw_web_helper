@@ -48,6 +48,11 @@ const emit = defineEmits([
 
 const templateNameDraft = ref(props.currentTemplateName);
 const templateDraft = reactive({ ...props.currentTemplate });
+const optionalSwitchOptions = [
+  { label: "保留账号原设置", value: "inherit" },
+  { label: "开启", value: true },
+  { label: "关闭", value: false },
+];
 
 watch(
   () => props.showTaskTemplateModal,
@@ -139,7 +144,12 @@ const handleSelectGroupForApply = (groupId) => {
           </div>
           <div class="switch-row">
             <span class="switch-label">领功法残卷</span>
-            <n-switch v-model:value="templateDraft.claimLegacy" />
+            <n-select
+              v-model:value="templateDraft.claimLegacy"
+              :options="optionalSwitchOptions"
+              size="small"
+              style="width: 140px"
+            />
           </div>
           <div class="switch-row">
             <span class="switch-label">竞技场</span>
@@ -155,7 +165,12 @@ const handleSelectGroupForApply = (groupId) => {
           </div>
           <div class="switch-row">
             <span class="switch-label">咸鱼大冲关（每周答题）</span>
-            <n-switch v-model:value="templateDraft.weeklyQuizEnabled" />
+            <n-select
+              v-model:value="templateDraft.weeklyQuizEnabled"
+              :options="optionalSwitchOptions"
+              size="small"
+              style="width: 140px"
+            />
           </div>
           <div class="switch-row">
             <span class="switch-label">黑市购买物品</span>
@@ -167,7 +182,12 @@ const handleSelectGroupForApply = (groupId) => {
           </div>
           <div class="switch-row">
             <span class="switch-label">梦境金币商品及高级商人黄金鱼竿</span>
-            <n-switch v-model:value="templateDraft.dreamShopPurchase" />
+            <n-select
+              v-model:value="templateDraft.dreamShopPurchase"
+              :options="optionalSwitchOptions"
+              size="small"
+              style="width: 140px"
+            />
           </div>
         </div>
       </div>

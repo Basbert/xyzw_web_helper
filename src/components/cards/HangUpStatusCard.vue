@@ -53,6 +53,11 @@
 import { useMessage } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
+import {
+  createServerTimeSample,
+  getEstimatedServerNowSec,
+  updateServerTimeSample,
+} from "@/utils/serverClock";
 import { runStandaloneDailyAction } from "@/utils/standaloneDailyActions";
 import MyCard from "../Common/MyCard.vue";
 
@@ -98,7 +103,18 @@ const formatTime = (seconds) => {
   return `${h}:${m}:${s}`;
 };
 
-let serverOffsetMs = 0;
+let serverTimeSample = null;
+let sampledTokenId = null;
+
+const resetState = () => {
+  serverTimeSample = null;
+  sampledTokenId = null;
+  hangUp.value.lastTime = 0;
+  hangUp.value.hangUpTime = 0;
+  hangUp.value.remainingTime = 0;
+  hangUp.value.elapsedTime = 0;
+  hangUp.value.isActive = false;
+};
 
 const recomputeFromTimestamp = () => {
   const { lastTime, hangUpTime } = hangUp.value;
@@ -112,7 +128,7 @@ const recomputeFromTimestamp = () => {
     hangUp.value.isActive = false;
     return;
   }
-  const nowSec = (Date.now() + serverOffsetMs) / 1000;
+  const nowSec = getEstimatedServerNowSec(serverTimeSample);
   const elapsed = Math.max(0, nowSec - lastTime);
   if (elapsed < hangUpTime) {
     hangUp.value.remainingTime = Math.floor(hangUpTime - elapsed);
@@ -128,18 +144,23 @@ const recomputeFromTimestamp = () => {
 };
 
 const syncFromRole = () => {
+  const tokenId = tokenStore.selectedToken?.id;
   const data = roleInfo.value?.role?.hangUp;
-  if (!Number.isFinite(data?.lastTime) || !Number.isFinite(data?.hangUpTime)) {
+  if (
+    !tokenId ||
+    !Number.isFinite(data?.lastTime) ||
+    !Number.isFinite(data?.hangUpTime)
+  ) {
+    resetState();
     return;
   }
-  const tokenId = tokenStore.selectedToken?.id;
-  const clientServerTime = tokenId
-    ? tokenStore.wsConnections?.[tokenId]?.client?.serverTime
-    : null;
-  serverOffsetMs =
-    Number.isFinite(clientServerTime) && clientServerTime > 0
-      ? clientServerTime - Date.now()
-      : 0;
+  const clientServerTime =
+    tokenStore.wsConnections?.[tokenId]?.client?.serverTime;
+  serverTimeSample =
+    sampledTokenId === tokenId
+      ? updateServerTimeSample(serverTimeSample, clientServerTime)
+      : createServerTimeSample(clientServerTime);
+  sampledTokenId = tokenId;
   hangUp.value.lastTime = data.lastTime;
   hangUp.value.hangUpTime = data.hangUpTime;
   recomputeFromTimestamp();
@@ -150,6 +171,10 @@ watch(
     tokenStore.selectedToken?.id,
     roleInfo.value?.role?.hangUp?.lastTime,
     roleInfo.value?.role?.hangUp?.hangUpTime,
+    tokenStore.selectedToken?.id
+      ? tokenStore.wsConnections?.[tokenStore.selectedToken.id]?.client
+          ?.serverTime
+      : null,
   ],
   () => syncFromRole(),
   { immediate: true },

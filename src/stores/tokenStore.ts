@@ -280,6 +280,29 @@ export const useTokenStore = defineStore("tokens", () => {
     return newToken;
   };
 
+  const CREDENTIAL_UPDATE_KEYS = new Set([
+    "token",
+    "combUser",
+    "importMethod",
+    "sourceUrl",
+    "lastRefreshed",
+    "serverId",
+    "roleIndex",
+  ]);
+  let credentialVersionSeed = 0;
+  const tokenCredentialVersions = new Map<string, number>();
+  const inFlightBattleVersion = new Map<
+    string,
+    { client: unknown; socket: unknown; promise: Promise<number | null> }
+  >();
+  const getCredentialVersion = (tokenId: string) =>
+    tokenCredentialVersions.get(tokenId) || 0;
+  const bumpCredentialVersion = (tokenId: string) => {
+    const next = ++credentialVersionSeed;
+    tokenCredentialVersions.set(tokenId, next);
+    return next;
+  };
+
   /**
    * Merge token metadata without replacing unrelated stored fields.
    * @param {string} tokenId Existing token identity.
@@ -295,6 +318,9 @@ export const useTokenStore = defineStore("tokens", () => {
         ...updates,
         updatedAt: new Date().toISOString(),
       };
+      if (Object.keys(updates).some((key) => CREDENTIAL_UPDATE_KEYS.has(key))) {
+        bumpCredentialVersion(tokenId);
+      }
       return true;
     }
     return false;
@@ -316,6 +342,8 @@ export const useTokenStore = defineStore("tokens", () => {
    * @returns {Promise<boolean>} Resolves to true when token cleanup finishes.
    */
   const removeToken = async (tokenId: string) => {
+    bumpCredentialVersion(tokenId);
+    inFlightBattleVersion.delete(tokenId);
     gameTokens.value = gameTokens.value.filter((token) => token.id !== tokenId);
 
     // 如果删除的是当前选中token，先清除选中状态防止恢复定时器重启连接
@@ -440,14 +468,35 @@ export const useTokenStore = defineStore("tokens", () => {
     const gameToken = gameTokens.value.find((t) => t.id === tokenId);
     if (!gameToken) return false;
 
+    const startVersion = getCredentialVersion(tokenId);
+    const startToken = gameToken.token;
+    const startCreatedAt = gameToken.createdAt;
+    const refreshInput = {
+      name: gameToken.name,
+      importMethod: gameToken.importMethod,
+      sourceUrl: gameToken.sourceUrl,
+      combUser: gameToken.combUser,
+      serverId: gameToken.serverId,
+      roleIndex: gameToken.roleIndex,
+      roleId: gameToken.roleId,
+    };
+    const isRefreshStillCurrent = () => {
+      const latest = gameTokens.value.find((t) => t.id === tokenId);
+      if (!latest) return false;
+      if (getCredentialVersion(tokenId) !== startVersion) return false;
+      if (latest.token !== startToken) return false;
+      if (startCreatedAt && latest.createdAt !== startCreatedAt) return false;
+      return true;
+    };
+
     wsLogger.info(`尝试自动刷新Token [${tokenId}]`);
     let refreshSuccess = false;
 
     try {
-      if (gameToken.importMethod === "url" && gameToken.sourceUrl) {
+      if (refreshInput.importMethod === "url" && refreshInput.sourceUrl) {
         // URL形式token刷新
         const token = await scheduleAuthUserRequest(async () => {
-          const data = await fetchTokenPayloadFromUrl(gameToken.sourceUrl!, {
+          const data = await fetchTokenPayloadFromUrl(refreshInput.sourceUrl!, {
             timeoutMs: 10000,
           });
           if (typeof data.token === "string" && data.token.trim()) {
@@ -455,22 +504,35 @@ export const useTokenStore = defineStore("tokens", () => {
           }
           return null;
         });
+        if (!isRefreshStillCurrent()) {
+          wsLogger.info(
+            `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
+          );
+          return false;
+        }
         if (token) {
-          updateToken(tokenId, { ...gameToken, token });
-          wsLogger.info(`从URL获取token成功: ${gameToken.name}`);
+          updateToken(tokenId, { token, lastRefreshed: Date.now() });
+          wsLogger.info(`从URL获取token成功: ${refreshInput.name}`);
           refreshSuccess = true;
         }
-      } else if (gameToken.combUser) {
+      } else if (refreshInput.combUser) {
         const refreshed = await refreshTokenFromCombUser(
-          gameToken.combUser as Parameters<typeof refreshTokenFromCombUser>[0],
+          refreshInput.combUser as Parameters<
+            typeof refreshTokenFromCombUser
+          >[0],
           {
-            serverId: gameToken.serverId ?? undefined,
-            roleIndex: gameToken.roleIndex ?? undefined,
-            roleId: gameToken.roleId ?? undefined,
+            serverId: refreshInput.serverId ?? undefined,
+            roleIndex: refreshInput.roleIndex ?? undefined,
+            roleId: refreshInput.roleId ?? undefined,
           },
         );
+        if (!isRefreshStillCurrent()) {
+          wsLogger.info(
+            `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
+          );
+          return false;
+        }
         updateToken(tokenId, {
-          ...gameToken,
           token: refreshed.token,
           serverId: refreshed.role.serverId,
           roleId: refreshed.role.roleId,
@@ -478,19 +540,19 @@ export const useTokenStore = defineStore("tokens", () => {
           lastRefreshed: Date.now(),
         });
         refreshSuccess = true;
-      } else if (gameToken.importMethod === "wxForceLogout") {
+      } else if (refreshInput.importMethod === "wxForceLogout") {
         wsLogger.error(`Token刷新失败: 未保存 combUser [${tokenId}]`);
       } else if (
-        gameToken.importMethod === "bin" ||
-        gameToken.importMethod === "wxQrcode" ||
-        gameToken.importMethod === "mobile"
+        refreshInput.importMethod === "bin" ||
+        refreshInput.importMethod === "wxQrcode" ||
+        refreshInput.importMethod === "mobile"
       ) {
         // Bin形式token刷新
         let userToken: ArrayBuffer | null = await getArrayBuffer(tokenId);
         let usedOldKey = false;
 
         if (!userToken) {
-          const tokenByName = await getArrayBuffer(gameToken.name);
+          const tokenByName = await getArrayBuffer(refreshInput.name);
           if (tokenByName) {
             userToken = tokenByName;
             usedOldKey = true;
@@ -499,13 +561,31 @@ export const useTokenStore = defineStore("tokens", () => {
 
         if (userToken) {
           const token = await transformToken(userToken);
-          updateToken(tokenId, { ...gameToken, token });
+          if (!isRefreshStillCurrent()) {
+            wsLogger.info(
+              `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
+            );
+            return false;
+          }
           if (usedOldKey) {
             const saved = await storeArrayBuffer(tokenId, userToken);
+            if (!isRefreshStillCurrent()) {
+              wsLogger.info(
+                `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
+              );
+              return false;
+            }
             if (saved) {
-              await deleteArrayBuffer(gameToken.name);
+              await deleteArrayBuffer(refreshInput.name);
             }
           }
+          if (!isRefreshStillCurrent()) {
+            wsLogger.info(
+              `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
+            );
+            return false;
+          }
+          updateToken(tokenId, { token, lastRefreshed: Date.now() });
           refreshSuccess = true;
         } else {
           wsLogger.error(`Token刷新失败: 未找到BIN数据 [${tokenId}]`);
@@ -528,7 +608,8 @@ export const useTokenStore = defineStore("tokens", () => {
         shouldReconnect &&
         !deferReconnect &&
         selectedTokenId.value === tokenId &&
-        desiredConnections.has(tokenId)
+        desiredConnections.has(tokenId) &&
+        gameTokens.value.some((t) => t.id === tokenId)
       ) {
         wsLogger.info(`触发自动重连 [${tokenId}]`);
         // 重置重连状态以允许立即重连
@@ -539,6 +620,10 @@ export const useTokenStore = defineStore("tokens", () => {
       }
       return true;
     } else {
+      if (!isRefreshStillCurrent()) {
+        wsLogger.info(`Token刷新失败但账号凭据已更新，忽略旧错误 [${tokenId}]`);
+        return false;
+      }
       if (wsConnections.value[tokenId]) {
         wsConnections.value[tokenId].lastError = {
           timestamp: new Date().toISOString(),
@@ -1419,6 +1504,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
         if (wsConnections.value[tokenId] === connection) {
           delete wsConnections.value[tokenId];
+          inFlightBattleVersion.delete(tokenId);
           updateCrossTabConnectionState(tokenId, "disconnected");
         }
         wsLogger.info(`连接已优雅关闭: ${tokenId}`);
@@ -1772,6 +1858,10 @@ export const useTokenStore = defineStore("tokens", () => {
     );
 
     desiredConnections.clear();
+    inFlightBattleVersion.clear();
+    tokenIds.forEach((tokenId) => {
+      bumpCredentialVersion(tokenId);
+    });
     Object.keys(connectionRecoveryStatus.value).forEach((tokenId) => {
       connectionRecovery.cancel(tokenId);
     });
@@ -2120,6 +2210,9 @@ export const useTokenStore = defineStore("tokens", () => {
 
     tokenLogger.info("Token Store 初始化完成，连接监控已启动");
   };
+  const hasValidBattleVersion = (value: unknown): value is number =>
+    typeof value === "number" && Number.isFinite(value) && value > 0;
+
   const setBattleVersion = (
     version: number | null,
     tokenId: string | null = selectedTokenId.value,
@@ -2132,6 +2225,90 @@ export const useTokenStore = defineStore("tokens", () => {
 
   const getBattleVersion = () => {
     return gameData.value.battleVersion;
+  };
+
+  /**
+   * Ensure battleVersion is initialized at most once per active socket,
+   * deduplicating concurrent callers across pages and rejecting responses from
+   * replaced sockets.
+   */
+  const ensureBattleVersion = async (
+    tokenId: string,
+    options: { allowDuringRestored?: boolean } = {},
+  ): Promise<number | null> => {
+    if (!tokenId) return null;
+    const connection = wsConnections.value[tokenId];
+    if (
+      !connection ||
+      connection.status !== "connected" ||
+      !connection.client
+    ) {
+      return null;
+    }
+
+    const existingVersion =
+      accountGameData.forToken(tokenId).value.battleVersion;
+    if (hasValidBattleVersion(existingVersion)) {
+      return existingVersion;
+    }
+
+    if (
+      !options.allowDuringRestored &&
+      connectionRecoveryStatus.value[tokenId] === "restored"
+    ) {
+      return null;
+    }
+
+    const rawClient = toRaw(connection.client);
+    const rawSocket = toRaw(connection.client.socket ?? null);
+    const inFlight = inFlightBattleVersion.get(tokenId);
+    if (
+      inFlight &&
+      inFlight.client === rawClient &&
+      inFlight.socket === rawSocket
+    ) {
+      return inFlight.promise;
+    }
+
+    const entry: {
+      client: unknown;
+      socket: unknown;
+      promise: Promise<number | null>;
+    } = {
+      client: rawClient,
+      socket: rawSocket,
+      promise: Promise.resolve(null),
+    };
+    entry.promise = (async () => {
+      try {
+        const response = (await sendMessageWithPromise(
+          tokenId,
+          "fight_startlevel",
+        )) as { battleData?: { version?: unknown } } | null;
+        const version = response?.battleData?.version;
+        const latestConn = wsConnections.value[tokenId];
+        const latestClient = latestConn?.client;
+        const stillSameSocket =
+          latestConn?.status === "connected" &&
+          Boolean(latestClient) &&
+          toRaw(latestClient) === rawClient &&
+          toRaw(latestClient?.socket ?? null) === rawSocket;
+        if (stillSameSocket && hasValidBattleVersion(version)) {
+          setBattleVersion(version, tokenId);
+          return version;
+        }
+        return null;
+      } catch {
+        return null;
+      } finally {
+        if (inFlightBattleVersion.get(tokenId) === entry) {
+          inFlightBattleVersion.delete(tokenId);
+        }
+      }
+    })();
+
+    inFlightBattleVersion.set(tokenId, entry);
+    return entry.promise;
   };
 
   // =====================
@@ -2298,6 +2475,7 @@ export const useTokenStore = defineStore("tokens", () => {
     // battleVersion
     setBattleVersion,
     getBattleVersion,
+    ensureBattleVersion,
 
     // 调试工具方法
     validateToken,

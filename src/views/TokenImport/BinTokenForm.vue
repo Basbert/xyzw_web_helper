@@ -303,6 +303,9 @@ const handleImport = async () => {
     message.success(formatUpsertImportMessage(result));
     roleList.value = [];
     $emit("ok");
+  } catch (error: any) {
+    console.error("导入角色失败", error);
+    message.error(error?.message || "导入失败，请重试");
   } finally {
     isImporting.value = false;
   }

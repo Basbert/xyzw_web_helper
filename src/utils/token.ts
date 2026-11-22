@@ -254,6 +254,23 @@ export const transformToken = async (arrayBuffer: ArrayBuffer) => {
       throw new Error("登录凭据换取失败，请重新登录");
     }
     const data = rawData as Record<string, unknown>;
+    const credentialKeys = [
+      "roleToken",
+      "token",
+      "gameToken",
+      "roleId",
+      "uid",
+      "openId",
+    ];
+    const hasCredentialField = credentialKeys.some((key) => {
+      const value = data[key];
+      if (typeof value === "string") return value.trim().length > 0;
+      if (typeof value === "number") return Number.isFinite(value) && value > 0;
+      return false;
+    });
+    if (!hasCredentialField) {
+      throw new Error("登录凭据已失效或缺少凭据字段，请重新登录");
+    }
     const currentTime = Date.now();
     const sessId = currentTime * 100 + Math.floor(Math.random() * 100);
     const connId = currentTime + Math.floor(Math.random() * 10);

@@ -640,8 +640,8 @@ function clearLogs() {
 
 function sanitizeError(error) {
   return String(error?.message || error || "")
-    .replace(/请求超时: \w+(\s*\(\d+ms\))?/g, "请求超时")
-    .replace(/\b\w[\dA-Za-z]*_\w+\b(\s*\(\d+ms\))?/g, "")
+    .replace(/请求超时: \w+(?:\s*\(\d+ms\))?/g, "请求超时")
+    .replace(/\b\w[\dA-Za-z]*_\w+\b(?:\s*\(\d+ms\))?/g, "")
     .trim();
 }
 

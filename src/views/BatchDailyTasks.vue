@@ -1251,7 +1251,13 @@ const selectedTemplateId = ref(null);
 const selectedTokensForApply = ref([]);
 const currentTemplateName = ref("");
 const currentTemplateId = ref(null); // 用于编辑现有模板
-const currentTemplate = reactive({
+const TEMPLATE_INHERIT = "inherit";
+const OPTIONAL_TEMPLATE_KEYS = [
+  "claimLegacy",
+  "weeklyQuizEnabled",
+  "dreamShopPurchase",
+];
+const BASE_TEMPLATE_DEFAULTS = {
   arenaFormation: 1,
   towerFormation: 1,
   bossFormation: 1,
@@ -1261,12 +1267,29 @@ const currentTemplate = reactive({
   openBox: true,
   arenaEnable: true,
   claimHangUp: true,
-  claimLegacy: true,
   claimEmail: true,
   blackMarketPurchase: true,
-  dreamShopPurchase: true,
-  weeklyQuizEnabled: true,
-});
+  claimLegacy: TEMPLATE_INHERIT,
+  dreamShopPurchase: TEMPLATE_INHERIT,
+  weeklyQuizEnabled: TEMPLATE_INHERIT,
+};
+const buildTemplateDraft = (settings = {}) => {
+  const draft = { ...BASE_TEMPLATE_DEFAULTS, ...(settings || {}) };
+  for (const key of OPTIONAL_TEMPLATE_KEYS) {
+    draft[key] =
+      typeof settings?.[key] === "boolean" ? settings[key] : TEMPLATE_INHERIT;
+  }
+  return draft;
+};
+const serializeTemplateSettings = (draft = {}) => {
+  const persisted = {};
+  for (const [key, value] of Object.entries(draft)) {
+    if (value === undefined || value === TEMPLATE_INHERIT) continue;
+    persisted[key] = value;
+  }
+  return persisted;
+};
+const currentTemplate = reactive(buildTemplateDraft());
 
 // Account Template References
 const accountTemplateReferences = ref([]);
@@ -3347,12 +3370,13 @@ const applyTemplate = () => {
     return;
   }
 
-  // 应用模板到选中的账号
+  // 应用模板到选中的账号（缺省/继承字段不覆盖账号原有设置）
   let successCount = 0;
+  const templateSettings = serializeTemplateSettings(template.settings);
   selectedTokensForApply.value.forEach((tokenId) => {
     // 保存账号设置时同时保存模板ID
     const accountSettings = {
-      ...template.settings,
+      ...templateSettings,
       templateId: template.id, // 记录模板ID
     };
     const token = tokens.value.find((entry) => entry.id === tokenId) || {
@@ -3374,29 +3398,10 @@ const openTemplateManagerModal = () => {
 };
 
 const openEditTemplateModal = (template) => {
-  // 加载模板数据到当前编辑模板（兼容旧模板缺省字段）
+  // 加载模板数据到当前编辑模板（保留旧模板缺省字段的继承状态，不隐式开启购买项）
   currentTemplateId.value = template.id;
   currentTemplateName.value = template.name;
-  Object.assign(
-    currentTemplate,
-    {
-      arenaFormation: 1,
-      towerFormation: 1,
-      bossFormation: 1,
-      bossTimes: 2,
-      claimBottle: true,
-      payRecruit: true,
-      openBox: true,
-      arenaEnable: true,
-      claimHangUp: true,
-      claimLegacy: true,
-      claimEmail: true,
-      blackMarketPurchase: true,
-      dreamShopPurchase: true,
-      weeklyQuizEnabled: true,
-    },
-    template.settings,
-  );
+  Object.assign(currentTemplate, buildTemplateDraft(template.settings));
   showTaskTemplateModal.value = true;
 };
 
@@ -3420,9 +3425,7 @@ const updateTaskTemplate = () => {
   templates[templateIndex] = {
     ...templates[templateIndex],
     name: currentTemplateName.value.trim(),
-    settings: {
-      ...currentTemplate,
-    },
+    settings: serializeTemplateSettings(currentTemplate),
     updatedAt: new Date().toISOString(),
   };
 
@@ -3460,22 +3463,7 @@ const deleteTaskTemplate = (templateId) => {
 const resetTemplateForm = () => {
   currentTemplateId.value = null;
   currentTemplateName.value = "";
-  Object.assign(currentTemplate, {
-    arenaFormation: 1,
-    towerFormation: 1,
-    bossFormation: 1,
-    bossTimes: 2,
-    claimBottle: true,
-    payRecruit: true,
-    openBox: true,
-    arenaEnable: true,
-    claimHangUp: true,
-    claimLegacy: true,
-    claimEmail: true,
-    blackMarketPurchase: true,
-    dreamShopPurchase: true,
-    weeklyQuizEnabled: true,
-  });
+  Object.assign(currentTemplate, buildTemplateDraft());
 };
 
 const openAccountTemplateModal = () => {
@@ -3563,9 +3551,7 @@ const saveTaskTemplate = () => {
     const template = {
       id: Date.now().toString(),
       name: currentTemplateName.value.trim(),
-      settings: {
-        ...currentTemplate,
-      },
+      settings: serializeTemplateSettings(currentTemplate),
       createdAt: new Date().toISOString(),
     };
 

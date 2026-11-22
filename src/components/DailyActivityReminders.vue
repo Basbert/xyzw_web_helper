@@ -49,7 +49,16 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
-import { describeCampProgress, getReminderDays } from "@/utils/dailyReminders";
+import {
+  describeCampProgress,
+  describeWeeklyQuizReminder,
+  getReminderDays,
+} from "@/utils/dailyReminders";
+import {
+  DAILY_TASK_DEFAULTS,
+  readDailyTaskSettings,
+} from "@/utils/dailyTaskSettings";
+import { loadDailyTaskConfig } from "@/utils/dailyTaskState";
 import {
   isDreamShopChecked,
   subscribeDreamShopChecks,
@@ -79,44 +88,102 @@ const connected = computed(() => {
   const id = tokenStore.selectedToken?.id;
   return !!id && tokenStore.getWebSocketStatus(id) === "connected";
 });
-const weeklyQuizReminder = computed(() => {
-  if (!connected.value) return "";
-  const role = tokenStore.gameData?.roleInfo?.role;
-  const taskDay = role?.dailyTask?.dailyTime;
-  const study = role?.study;
+const weeklyQuizConfig = ref(null);
+const weeklyQuizEnabled = ref(true);
+let quizSequence = 0;
+let disposed = false;
+
+function refreshWeeklyQuizSetting() {
+  const token = tokenStore.selectedToken;
   if (
-    !Number.isSafeInteger(taskDay) ||
-    taskDay <= 0 ||
-    !Number.isSafeInteger(study?.beginTime) ||
-    study.beginTime < 0
-  )
+    !token?.id ||
+    typeof readDailyTaskSettings !== "function" ||
+    typeof localStorage === "undefined"
+  ) {
+    weeklyQuizEnabled.value = true;
+    return;
+  }
+  try {
+    const saved = readDailyTaskSettings(token, tokenStore.gameTokens || []);
+    const defaultEnabled =
+      typeof DAILY_TASK_DEFAULTS === "object"
+        ? DAILY_TASK_DEFAULTS.weeklyQuizEnabled
+        : true;
+    weeklyQuizEnabled.value =
+      typeof saved?.weeklyQuizEnabled === "boolean"
+        ? saved.weeklyQuizEnabled
+        : defaultEnabled;
+  } catch {
+    weeklyQuizEnabled.value = true;
+  }
+}
+
+async function refreshWeeklyQuizConfig() {
+  const id = tokenStore.selectedToken?.id;
+  const request = ++quizSequence;
+  weeklyQuizConfig.value = null;
+  if (
+    !id ||
+    !connected.value ||
+    disposed ||
+    typeof loadDailyTaskConfig !== "function" ||
+    typeof tokenStore.sendMessageWithPromise !== "function"
+  ) {
+    return;
+  }
+  try {
+    const config = await loadDailyTaskConfig(tokenStore, id);
+    if (
+      disposed ||
+      request !== quizSequence ||
+      tokenStore.selectedToken?.id !== id ||
+      !connected.value
+    ) {
+      return;
+    }
+    weeklyQuizConfig.value = config?.weeklyQuiz ?? null;
+  } catch {
+    if (!disposed && request === quizSequence) {
+      weeklyQuizConfig.value = null;
+    }
+  }
+}
+
+watch(
+  () => [tokenStore.selectedToken?.id, tokenStore.selectedToken?.roleId],
+  refreshWeeklyQuizSetting,
+  { immediate: true },
+);
+
+watch(
+  () => [tokenStore.selectedToken?.id, connected.value],
+  refreshWeeklyQuizConfig,
+  { immediate: true },
+);
+
+const weeklyQuizReminder = computed(() => {
+  if (!connected.value || typeof describeWeeklyQuizReminder !== "function") {
     return "";
-  const toDay = (sec) => Math.floor((sec + 8 * 3600) / 86400);
-  const today = toDay(taskDay);
-  const weekStart = today - ((today + 3) % 7);
-  const started = study.beginTime > 0 ? toDay(study.beginTime) : -1;
-  const currentWeek = started >= weekStart;
-  const taskComplete = currentWeek ? (study.taskComplete ?? {}) : {};
-  const states =
-    taskComplete instanceof Map
-      ? Array.from(taskComplete.values())
-      : Object.values(taskComplete);
-  if (states.includes("yes")) {
-    return "本周咸鱼大冲关有待领取奖励，执行每日任务时可自动领取。";
   }
-  if (!currentWeek) {
-    return "本周尚未完成咸鱼大冲关，执行每日任务时可自动答题。";
-  }
-  const maxCorrect = Number(study.maxCorrectNum) || 0;
-  if (maxCorrect < 10 && started !== today) {
-    return `本周最高答对 ${maxCorrect} 题，今日可继续参与冲关。`;
-  }
-  return "";
+  const id = tokenStore.selectedToken?.id;
+  const role = tokenStore.gameData?.roleInfo?.role;
+  const serverTimeMs = id
+    ? tokenStore.wsConnections?.[id]?.client?.serverTime
+    : null;
+  const nowMs =
+    Number.isFinite(serverTimeMs) && serverTimeMs > 0
+      ? serverTimeMs
+      : now.value;
+  return describeWeeklyQuizReminder({
+    role,
+    config: weeklyQuizConfig.value,
+    nowMs,
+    weeklyQuizEnabled: weeklyQuizEnabled.value,
+  });
 });
 const campText = ref("挑战进度待确认");
 let sequence = 0;
 let timer;
-let disposed = false;
 let lastRefresh = 0;
 let unsubscribeDream = () => {};
 async function refreshCamp() {
@@ -153,6 +220,7 @@ watch(
 );
 function refreshWhenVisible() {
   now.value = Date.now();
+  refreshWeeklyQuizSetting();
   if (
     document.visibilityState === "visible" &&
     Date.now() - lastRefresh >= 60000
@@ -162,14 +230,18 @@ function refreshWhenVisible() {
 onMounted(() => {
   unsubscribeDream = subscribeDreamShopChecks(refreshDreamChecked);
   refreshDreamChecked();
+  refreshWeeklyQuizSetting();
   document.addEventListener("visibilitychange", refreshWhenVisible);
+  window.addEventListener?.("storage", refreshWeeklyQuizSetting);
   timer = window.setInterval(refreshWhenVisible, 60000);
 });
 onUnmounted(() => {
   unsubscribeDream();
   disposed = true;
   sequence++;
+  quizSequence++;
   document.removeEventListener("visibilitychange", refreshWhenVisible);
+  window.removeEventListener?.("storage", refreshWeeklyQuizSetting);
   window.clearInterval(timer);
 });
 </script>

@@ -41,13 +41,21 @@ interface DBConfig {
   dbName?: string;
   version?: number;
   storeName?: "tokens";
+  openTimeoutMs?: number;
 }
+
+const DEFAULT_DB_OPEN_TIMEOUT_MS = 8000;
 
 /**
  * Vue3 Hook for IndexedDB ArrayBuffer storage
  */
 export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
-  const { dbName = "xyzw", version = 1, storeName = "tokens" } = config;
+  const {
+    dbName = "xyzw",
+    version = 1,
+    storeName = "tokens",
+    openTimeoutMs = DEFAULT_DB_OPEN_TIMEOUT_MS,
+  } = config;
 
   // 响应式状态
   const isReady = ref(false);
@@ -59,47 +67,118 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
    * 初始化数据库
    */
   const initDB = async (): Promise<void> => {
+    let settled = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
     try {
       error.value = null;
 
-      const database = await openDB<ArrayBufferDB>(dbName, version, {
-        upgrade(db) {
-          // 创建对象存储空间（如果不存在）
-          if (!db.objectStoreNames.contains(storeName)) {
-            const store = db.createObjectStore(storeName, { keyPath: "id" });
-            // 创建创建时间索引
-            store.createIndex("by-created", "createdAt");
-            console.log(`✅ IndexedDB 存储空间 "${storeName}" 创建成功`);
+      const database = await new Promise<IDBPDatabase<ArrayBufferDB>>(
+        (resolve, reject) => {
+          const failOnce = (reason: Error) => {
+            if (settled) return;
+            settled = true;
+            if (timeoutId !== null) {
+              clearTimeout(timeoutId);
+              timeoutId = null;
+            }
+            reject(reason);
+          };
+
+          if (Number.isFinite(openTimeoutMs) && openTimeoutMs > 0) {
+            timeoutId = setTimeout(() => {
+              failOnce(
+                new Error(
+                  "打开本地数据库超时，请刷新页面或关闭其他标签页后重试",
+                ),
+              );
+            }, openTimeoutMs);
           }
+
+          openDB<ArrayBufferDB>(dbName, version, {
+            upgrade(db) {
+              // 创建对象存储空间（如果不存在）
+              if (!db.objectStoreNames.contains(storeName)) {
+                const store = db.createObjectStore(storeName, {
+                  keyPath: "id",
+                });
+                // 创建创建时间索引
+                store.createIndex("by-created", "createdAt");
+                console.log(`✅ IndexedDB 存储空间 "${storeName}" 创建成功`);
+              }
+            },
+            blocked() {
+              const blockedMessage =
+                "数据库被其他标签页阻塞，请关闭其他使用相同数据库的标签页";
+              error.value = blockedMessage;
+              failOnce(new Error(blockedMessage));
+            },
+            blocking() {
+              error.value = "数据库需要升级，请关闭所有标签页后重试";
+            },
+            terminated() {
+              db.value = null;
+              isReady.value = false;
+              readyPromise = null;
+              error.value = "数据库连接意外终止";
+            },
+          }).then(
+            (opened) => {
+              if (settled) {
+                try {
+                  opened.close?.();
+                } catch {
+                  // Ignore cleanup error for late open after timeout/blocked.
+                }
+                return;
+              }
+              settled = true;
+              if (timeoutId !== null) {
+                clearTimeout(timeoutId);
+                timeoutId = null;
+              }
+              resolve(opened);
+            },
+            (openErr) => {
+              failOnce(
+                openErr instanceof Error
+                  ? openErr
+                  : new Error(String(openErr || "未知错误")),
+              );
+            },
+          );
         },
-        blocked() {
-          error.value =
-            "数据库被其他标签页阻塞，请关闭其他使用相同数据库的标签页";
-        },
-        blocking() {
-          error.value = "数据库需要升级，请关闭所有标签页后重试";
-        },
-        terminated() {
-          error.value = "数据库连接意外终止";
-        },
-      });
+      );
 
       db.value = database;
       isReady.value = true;
       console.log(`✅ IndexedDB "${dbName}" 初始化成功`);
     } catch (err) {
+      db.value = null;
+      isReady.value = false;
       const errorMessage = err instanceof Error ? err.message : "未知错误";
       error.value = `初始化数据库失败: ${errorMessage}`;
       console.error("❌ IndexedDB 初始化错误:", err);
+    } finally {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
     }
+  };
+
+  const startInit = () => {
+    const pending = initDB().finally(() => {
+      if (readyPromise === pending && !db.value) {
+        readyPromise = null;
+      }
+    });
+    readyPromise = pending;
+    return pending;
   };
 
   const ensureReady = async (): Promise<IDBPDatabase<ArrayBufferDB> | null> => {
     if (!db.value) {
-      if (!readyPromise) {
-        readyPromise = initDB();
-      }
-      await readyPromise;
+      const pending = readyPromise || startInit();
+      await pending;
     }
     if (!db.value) {
       error.value = error.value || "数据库未初始化";
@@ -260,7 +339,7 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
     }
   };
 
-  readyPromise = initDB();
+  startInit();
 
   return {
     // 状态

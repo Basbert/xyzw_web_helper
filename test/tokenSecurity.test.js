@@ -159,3 +159,20 @@ test("transformToken rejects server error responses instead of returning empty s
     /登录凭据校验失败：token expired/,
   );
 });
+
+test("transformToken rejects empty objects and payloads without credential fields", async () => {
+  for (const payload of [
+    {},
+    { roleToken: "" },
+    { roleToken: "   " },
+    { foo: "bar" },
+  ]) {
+    const { transformToken } = await loadTokenModule({
+      post: async () => ({ data: payload }),
+    });
+    await assert.rejects(
+      transformToken(new ArrayBuffer(8)),
+      /登录凭据已失效或缺少凭据字段/,
+    );
+  }
+});

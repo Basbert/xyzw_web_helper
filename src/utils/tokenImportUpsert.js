@@ -35,6 +35,21 @@ export function findExistingTokenForRole(
   return serverMatch || sameRoleTokens[0];
 }
 
+const BIN_REFRESH_METHODS = new Set(["bin", "wxQrcode", "mobile"]);
+
+function hasValidCombUser(role) {
+  return Boolean(
+    role?.combUser &&
+    typeof role.combUser === "object" &&
+    !Array.isArray(role.combUser) &&
+    Object.keys(role.combUser).length > 0,
+  );
+}
+
+function requiresBinRefreshSource(role) {
+  return !hasValidCombUser(role) && BIN_REFRESH_METHODS.has(role?.importMethod);
+}
+
 /**
  * Insert new imported roles or update existing matching characters in place,
  * preserving local token IDs, groups, remarks, and daily settings.
@@ -51,6 +66,7 @@ export async function upsertImportedRoleTokens({
   const tokenIds = [];
 
   for (const role of roles) {
+    const needsBin = requiresBinRefreshSource(role);
     const existing = findExistingTokenForRole(
       tokenStore.gameTokens || [],
       role,
@@ -58,18 +74,35 @@ export async function upsertImportedRoleTokens({
     );
 
     if (existing) {
-      if (
-        existing.id !== role.id &&
-        role.id &&
-        typeof getArrayBuffer === "function" &&
-        typeof storeArrayBuffer === "function"
-      ) {
+      let binMigrated = false;
+      let previousBin = null;
+      let tempBinKey = null;
+
+      if (needsBin) {
+        if (
+          !role.id ||
+          typeof getArrayBuffer !== "function" ||
+          typeof storeArrayBuffer !== "function"
+        ) {
+          throw new Error("导入失败：本地 BIN 凭据存储不可用，已保留原有账号");
+        }
         const freshBin = await getArrayBuffer(role.id);
-        if (freshBin) {
+        if (
+          !freshBin ||
+          (freshBin instanceof ArrayBuffer && freshBin.byteLength === 0)
+        ) {
+          throw new Error("导入失败：未找到新的 BIN 凭据数据，已保留原有账号");
+        }
+        if (existing.id !== role.id) {
+          previousBin = await getArrayBuffer(existing.id);
           const moved = await storeArrayBuffer(existing.id, freshBin);
-          if (moved && typeof deleteArrayBuffer === "function") {
-            await deleteArrayBuffer(role.id);
+          if (!moved) {
+            throw new Error(
+              "导入失败：写入账号 BIN 凭据失败，已保留原有账号与连接",
+            );
           }
+          binMigrated = true;
+          tempBinKey = role.id;
         }
       }
 
@@ -82,12 +115,26 @@ export async function upsertImportedRoleTokens({
         roleIndex: role.roleIndex ?? existing.roleIndex,
         wsUrl: role.wsUrl || existing.wsUrl,
         importMethod: role.importMethod || existing.importMethod,
-        combUser: role.combUser ?? null,
+        combUser: hasValidCombUser(role) ? role.combUser : null,
         lastRefreshed: Date.now(),
         upgradedToPermanent: true,
       };
 
-      tokenStore.updateToken(existing.id, updates);
+      const updated = tokenStore.updateToken(existing.id, updates);
+      if (updated === false) {
+        if (binMigrated) {
+          if (previousBin) {
+            await storeArrayBuffer(existing.id, previousBin);
+          } else if (typeof deleteArrayBuffer === "function") {
+            await deleteArrayBuffer(existing.id);
+          }
+        }
+        throw new Error("导入失败：更新已有账号记录失败，已保留原有凭据");
+      }
+
+      if (tempBinKey && typeof deleteArrayBuffer === "function") {
+        await deleteArrayBuffer(tempBinKey);
+      }
 
       const status = tokenStore.getWebSocketStatus?.(existing.id);
       if (status && status !== "disconnected") {
@@ -97,6 +144,18 @@ export async function upsertImportedRoleTokens({
       updatedCount++;
       tokenIds.push(existing.id);
     } else {
+      if (needsBin) {
+        if (!role.id || typeof getArrayBuffer !== "function") {
+          throw new Error("导入失败：本地 BIN 凭据存储不可用");
+        }
+        const freshBin = await getArrayBuffer(role.id);
+        if (
+          !freshBin ||
+          (freshBin instanceof ArrayBuffer && freshBin.byteLength === 0)
+        ) {
+          throw new Error("导入失败：未找到新的 BIN 凭据数据，请重新选择角色");
+        }
+      }
       const added = tokenStore.addToken({ ...role });
       addedCount++;
       tokenIds.push(added?.id || role.id);
