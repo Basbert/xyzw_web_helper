@@ -237,8 +237,23 @@ export const transformToken = async (arrayBuffer: ArrayBuffer) => {
         responseType: "arraybuffer",
       },
     );
-    const msg = g_utils.parse(res.data);
-    const data = (msg.getData() ?? {}) as Record<string, unknown>;
+    const msg = g_utils.parse(res.data) as {
+      error?: unknown;
+      code?: unknown;
+      getData: () => unknown;
+    };
+    if (msg?.error || (Number.isInteger(msg?.code) && Number(msg.code) !== 0)) {
+      const reason =
+        typeof msg.error === "string" && msg.error.trim()
+          ? msg.error.trim()
+          : `错误码 ${String(msg.code)}`;
+      throw new Error(`登录凭据校验失败：${reason}`);
+    }
+    const rawData = msg.getData();
+    if (!rawData || typeof rawData !== "object" || Array.isArray(rawData)) {
+      throw new Error("登录凭据换取失败，请重新登录");
+    }
+    const data = rawData as Record<string, unknown>;
     const currentTime = Date.now();
     const sessId = currentTime * 100 + Math.floor(Math.random() * 100);
     const connId = currentTime + Math.floor(Math.random() * 10);

@@ -191,7 +191,7 @@
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import DailyActivityReminders from "@/components/DailyActivityReminders.vue";
 import { useDashboardDailyActions } from "@/composables/useDashboardDailyActions";
@@ -294,12 +294,46 @@ const isConnected = computed(() => {
 const connectingAccount = ref(null);
 const isConnecting = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId) return false;
   return (
-    Boolean(connectingAccount.value) ||
-    (Boolean(tokenId) &&
-      tokenStore.getWebSocketStatus(tokenId) === "connecting")
+    connectingAccount.value === tokenId ||
+    tokenStore.getWebSocketStatus(tokenId) === "connecting"
   );
 });
+
+const pendingBattleVersionIds = new Set();
+const ensureDashboardBattleVersion = async (tokenId) => {
+  if (!tokenId || pendingBattleVersionIds.has(tokenId)) return;
+  if (tokenStore.connectionRecoveryStatus?.[tokenId] === "restored") return;
+  const accountData = tokenStore.getAccountGameData?.(tokenId)?.value;
+  if (accountData?.battleVersion) return;
+
+  pendingBattleVersionIds.add(tokenId);
+  try {
+    const response = await tokenStore.sendMessageWithPromise(
+      tokenId,
+      "fight_startlevel",
+    );
+    const version = response?.battleData?.version;
+    if (version && tokenStore.getWebSocketStatus(tokenId) === "connected") {
+      tokenStore.setBattleVersion(version, tokenId);
+    }
+  } catch {
+    // 战斗版本号初始化失败不阻断首页使用
+  } finally {
+    pendingBattleVersionIds.delete(tokenId);
+  }
+};
+
+watch(
+  [() => tokenStore.selectedToken?.id, isConnected],
+  ([tokenId, connected]) => {
+    if (tokenId && connected) {
+      ensureDashboardBattleVersion(tokenId);
+    }
+  },
+  { immediate: true },
+);
 
 const connectSelectedAccount = async () => {
   const token = tokenStore.selectedToken;

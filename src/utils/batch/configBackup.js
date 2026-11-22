@@ -1,3 +1,4 @@
+import { normalizeRoleId } from "../accountIdentity.js";
 import { DAILY_TASK_DEFAULTS } from "../dailyTaskSettings.js";
 
 /** Batch setting keys allowed in config backup export and import. */
@@ -8,6 +9,7 @@ export const BACKUP_BATCH_SETTING_KEYS = [
   "defaultBoxType",
   "defaultFishType",
   "blackMarketPurchaseList",
+  "dreamPurchaseList",
   "commandDelay",
   "taskDelay",
   "actionDelay",
@@ -19,6 +21,15 @@ export const BACKUP_BATCH_SETTING_KEYS = [
 ];
 
 const ALLOWED_BATCH_SETTING_SET = new Set(BACKUP_BATCH_SETTING_KEYS);
+const VALID_IMPORT_METHODS = new Set([
+  "bin",
+  "wxQrcode",
+  "mobile",
+  "wxForceLogout",
+  "url",
+  "manual",
+  "import",
+]);
 const SAFE_EXPORT_TOKEN_SETTING_KEYS = new Set([
   ...Object.keys(DAILY_TASK_DEFAULTS),
   "towerFormation",
@@ -53,7 +64,13 @@ export function buildConfigBackupData({
 
   const tokenSettings = [];
   tokens.forEach((token) => {
-    const raw = storage?.getItem?.(`daily-settings:${token.id}`);
+    const roleId = normalizeRoleId(token?.roleId);
+    const raw =
+      (roleId &&
+        storage?.getItem?.(
+          `daily-role-settings:${encodeURIComponent(roleId)}`,
+        )) ||
+      storage?.getItem?.(`daily-settings:${token.id}`);
     if (!raw) return;
     try {
       const parsed = JSON.parse(raw);
@@ -87,12 +104,15 @@ export function buildConfigBackupData({
             id: t.id,
             name: t.name,
             roleId: t.roleId,
+            serverId: t.serverId ?? null,
+            roleIndex: t.roleIndex ?? null,
             token: t.token,
             server: t.server,
             wsUrl: t.wsUrl,
             remark: t.remark,
             importMethod: t.importMethod,
             sourceUrl: t.sourceUrl,
+            combUser: t.combUser ?? null,
             upgradedToPermanent: true,
             upgradedAt: t.upgradedAt,
             updatedAt: t.updatedAt,
@@ -148,18 +168,24 @@ export function applyConfigBackupData({
       accountMap.set(token.id, exists.id);
     }
     if (!exists && token.token) {
+      const preservedMethod = VALID_IMPORT_METHODS.has(token.importMethod)
+        ? token.importMethod
+        : "import";
       gameTokens.push({
         id:
           token.id ||
           `token_${Date.now()}${Math.random().toString(36).slice(2)}`,
         name: token.name || "",
         roleId: token.roleId || null,
+        serverId: token.serverId ?? null,
+        roleIndex: token.roleIndex ?? null,
         token: token.token,
         server: token.server || "",
         wsUrl: token.wsUrl || null,
         remark: token.remark || "",
-        importMethod: "import",
+        importMethod: preservedMethod,
         sourceUrl: token.sourceUrl || null,
+        combUser: token.combUser ?? null,
         upgradedToPermanent: true,
         upgradedAt: token.upgradedAt || null,
         updatedAt: token.updatedAt || new Date().toISOString(),

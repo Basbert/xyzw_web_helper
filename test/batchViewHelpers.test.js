@@ -110,82 +110,120 @@ describe("sortTokensList / getNextSortConfig / getSortIndicator", () => {
 });
 
 describe("activity schedule helpers", () => {
-  test("baoku is closed on Monday/Tuesday and open Wednesday-Sunday", () => {
-    assert.equal(isBaokuActivityOpen(new Date("2026-03-02T12:00:00")), false); // Monday
-    assert.equal(isBaokuActivityOpen(new Date("2026-03-03T12:00:00")), false); // Tuesday
-    assert.equal(isBaokuActivityOpen(new Date("2026-03-04T12:00:00")), true); // Wednesday
-    assert.equal(isBaokuActivityOpen(new Date("2026-03-01T12:00:00")), true); // Sunday
-  });
-
-  test("arena opens 06:00-21:59", () => {
-    assert.equal(isArenaActivityOpen(new Date("2026-03-01T05:59:00")), false);
-    assert.equal(isArenaActivityOpen(new Date("2026-03-01T06:00:00")), true);
-    assert.equal(isArenaActivityOpen(new Date("2026-03-01T21:59:00")), true);
-    assert.equal(isArenaActivityOpen(new Date("2026-03-01T22:00:00")), false);
-  });
-
-  test("activity week cycles 黑市周 -> 招募周 -> 宝箱周 starting 2025-12-12 12:00", () => {
-    assert.equal(getCurrentActivityWeek(new Date("2025-12-12T11:59:59")), null);
+  test("baoku is closed on Monday/Tuesday and open Wednesday-Sunday in China time", () => {
     assert.equal(
-      getCurrentActivityWeek(new Date("2025-12-12T12:00:00")),
+      isBaokuActivityOpen(new Date("2026-03-02T12:00:00+08:00")),
+      false,
+    ); // Monday
+    assert.equal(
+      isBaokuActivityOpen(new Date("2026-03-03T12:00:00+08:00")),
+      false,
+    ); // Tuesday
+    assert.equal(
+      isBaokuActivityOpen(new Date("2026-03-04T00:00:00+08:00")),
+      true,
+    ); // Wednesday 00:00 CST (Tuesday 16:00Z)
+    assert.equal(
+      isBaokuActivityOpen(new Date("2026-03-01T12:00:00+08:00")),
+      true,
+    ); // Sunday
+  });
+
+  test("arena opens 06:00-21:59 China time regardless of host timezone", () => {
+    assert.equal(
+      isArenaActivityOpen(new Date("2026-03-01T05:59:00+08:00")),
+      false,
+    );
+    assert.equal(
+      isArenaActivityOpen(new Date("2026-03-01T06:00:00+08:00")),
+      true,
+    );
+    assert.equal(
+      isArenaActivityOpen(Date.parse("2026-03-01T13:59:00Z")), // 21:59 CST
+      true,
+    );
+    assert.equal(
+      isArenaActivityOpen(Date.parse("2026-03-01T14:00:00Z")), // 22:00 CST
+      false,
+    );
+  });
+
+  test("activity week cycles 黑市周 -> 招募周 -> 宝箱周 starting 2025-12-12 12:00+08:00", () => {
+    assert.equal(
+      getCurrentActivityWeek(new Date("2025-12-12T11:59:59+08:00")),
+      null,
+    );
+    assert.equal(
+      getCurrentActivityWeek(new Date("2025-12-12T12:00:00+08:00")),
       "黑市周",
     );
     assert.equal(
-      getCurrentActivityWeek(new Date("2025-12-19T12:00:00")),
+      getCurrentActivityWeek(new Date("2025-12-19T12:00:00+08:00")),
       "招募周",
     );
     assert.equal(
-      getCurrentActivityWeek(new Date("2025-12-26T12:00:00")),
+      getCurrentActivityWeek(new Date("2025-12-26T12:00:00+08:00")),
       "宝箱周",
     );
     assert.equal(
-      getCurrentActivityWeek(new Date("2026-01-02T12:00:00")),
+      getCurrentActivityWeek(Date.parse("2026-01-02T04:00:00Z")), // 12:00 CST
       "黑市周",
     );
   });
 
-  test("weird tower opens only during 黑市周 and after 12:00 on Fridays", () => {
+  test("weird tower opens only during 黑市周 and after 12:00 CST on Fridays", () => {
     assert.equal(
-      isWeirdTowerActivityOpen(new Date("2025-12-12T11:59:59")),
+      isWeirdTowerActivityOpen(new Date("2025-12-12T11:59:59+08:00")),
       false,
     );
     assert.equal(
-      isWeirdTowerActivityOpen(new Date("2025-12-12T12:00:00")),
+      isWeirdTowerActivityOpen(new Date("2025-12-12T12:00:00+08:00")),
       true,
     );
     assert.equal(
-      isWeirdTowerActivityOpen(new Date("2026-01-02T11:30:00")),
+      isWeirdTowerActivityOpen(new Date("2026-01-02T11:30:00+08:00")),
       false,
-    ); // Friday 11:30 in 黑市周 (before cycle reset to 黑市周 at 12:00 anyway)
+    ); // Friday 11:30 CST (before cycle reset to 黑市周 at 12:00 CST)
     assert.equal(
-      isWeirdTowerActivityOpen(new Date("2026-01-03T10:00:00")),
+      isWeirdTowerActivityOpen(new Date("2026-01-03T10:00:00+08:00")),
       true,
     ); // Saturday in 黑市周
     assert.equal(
-      isWeirdTowerActivityOpen(new Date("2025-12-20T10:00:00")),
+      isWeirdTowerActivityOpen(new Date("2025-12-20T10:00:00+08:00")),
       false,
     ); // 招募周
   });
 
-  test("fourth sunday and war guess schedule preserve March 2026 special rules", () => {
-    const march2026 = getFourthSundayOfMonth(new Date("2026-03-10T10:00:00"));
+  test("fourth sunday and war guess schedule preserve March 2026 special rules in China time", () => {
+    const march2026 = getFourthSundayOfMonth(
+      new Date("2026-03-10T10:00:00+08:00"),
+    );
     assert.equal(march2026.getFullYear(), 2026);
     assert.equal(march2026.getMonth(), 2);
     assert.equal(march2026.getDate(), 29);
 
-    assert.equal(isWarGuessActivityOpen(new Date("2026-03-01T19:55:00")), true);
     assert.equal(
-      isWarGuessActivityOpen(new Date("2026-03-01T19:56:00")),
+      isWarGuessActivityOpen(new Date("2026-03-01T19:55:00+08:00")),
+      true,
+    );
+    assert.equal(
+      isWarGuessActivityOpen(new Date("2026-03-01T19:56:00+08:00")),
       false,
     );
-    assert.equal(isWarGuessActivityOpen(new Date("2026-03-29T18:00:00")), true);
     assert.equal(
-      isWarGuessActivityOpen(new Date("2026-03-29T19:56:00")),
+      isWarGuessActivityOpen(new Date("2026-03-29T18:00:00+08:00")),
+      true,
+    );
+    assert.equal(
+      isWarGuessActivityOpen(new Date("2026-03-29T19:56:00+08:00")),
       false,
     );
-    assert.equal(getWarGuessActivityTip(new Date("2026-03-29T18:00:00")), "");
     assert.equal(
-      getWarGuessActivityTip(new Date("2026-03-29T20:00:00")),
+      getWarGuessActivityTip(new Date("2026-03-29T18:00:00+08:00")),
+      "",
+    );
+    assert.equal(
+      getWarGuessActivityTip(new Date("2026-03-29T20:00:00+08:00")),
       "月赛助威仅在每月第四个周日 (3月29日) 00:00-19:55 开放",
     );
   });

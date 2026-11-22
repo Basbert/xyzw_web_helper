@@ -2,7 +2,24 @@ import { isSameGameValue } from "../gameValue.js";
 
 const WEEK_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
 const CYCLE_DURATION_MS = 3 * WEEK_DURATION_MS;
-const ACTIVITY_CYCLE_START = new Date("2025-12-12T12:00:00");
+const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000;
+const ACTIVITY_CYCLE_START_MS = Date.parse("2025-12-12T12:00:00+08:00");
+
+function toTimestampMs(now = Date.now()) {
+  return now instanceof Date ? now.getTime() : Number(now);
+}
+
+function getShanghaiCalendar(now = Date.now()) {
+  const shifted = new Date(toTimestampMs(now) + SHANGHAI_OFFSET_MS);
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth(),
+    date: shifted.getUTCDate(),
+    day: shifted.getUTCDay(),
+    hour: shifted.getUTCHours(),
+    minute: shifted.getUTCMinutes(),
+  };
+}
 
 const DEFAULT_SORT_CONFIG = {
   field: "createdAt",
@@ -97,26 +114,26 @@ export function getSortIndicator(sortConfig, field) {
 }
 
 /**
- * Baoku opens Wednesday through Sunday (days 0, 3, 4, 5, 6).
+ * Baoku opens Wednesday through Sunday in China time (days 0, 3, 4, 5, 6).
  */
-export function isBaokuActivityOpen(now = new Date()) {
-  const day = now.getDay();
+export function isBaokuActivityOpen(now = Date.now()) {
+  const { day } = getShanghaiCalendar(now);
   return !isSameGameValue(day, 1) && !isSameGameValue(day, 2);
 }
 
 /**
- * Arena opens daily from 06:00 to 21:59.
+ * Arena opens daily from 06:00 to 21:59 China time.
  */
-export function isArenaActivityOpen(now = new Date()) {
-  const hour = now.getHours();
+export function isArenaActivityOpen(now = Date.now()) {
+  const { hour } = getShanghaiCalendar(now);
   return hour >= 6 && hour < 22;
 }
 
 /**
- * Compute current weekly rotation ("黑市周" | "招募周" | "宝箱周") starting 2025-12-12 12:00.
+ * Compute current weekly rotation ("黑市周" | "招募周" | "宝箱周") starting 2025-12-12 12:00+08:00.
  */
-export function getCurrentActivityWeek(now = new Date()) {
-  const elapsed = now - ACTIVITY_CYCLE_START;
+export function getCurrentActivityWeek(now = Date.now()) {
+  const elapsed = toTimestampMs(now) - ACTIVITY_CYCLE_START_MS;
   if (elapsed < 0) return null;
 
   const cyclePosition = elapsed % CYCLE_DURATION_MS;
@@ -131,13 +148,12 @@ export function getCurrentActivityWeek(now = new Date()) {
 }
 
 /**
- * Weird Tower opens during 黑市周, starting Friday 12:00.
+ * Weird Tower opens during 黑市周, starting Friday 12:00 China time.
  */
-export function isWeirdTowerActivityOpen(now = new Date()) {
+export function isWeirdTowerActivityOpen(now = Date.now()) {
   if (getCurrentActivityWeek(now) !== "黑市周") return false;
 
-  const day = now.getDay();
-  const hour = now.getHours();
+  const { day, hour } = getShanghaiCalendar(now);
   if (day === 5) {
     return hour >= 12;
   }
@@ -145,14 +161,12 @@ export function isWeirdTowerActivityOpen(now = new Date()) {
 }
 
 /**
- * Return the fourth Sunday date of the given month (keeping March 2026 override).
+ * Return the fourth Sunday calendar date of the China-time month (keeping March 2026 override).
  */
-export function getFourthSundayOfMonth(now = new Date()) {
-  const year = now.getFullYear();
-  const month = now.getMonth();
+export function getFourthSundayOfMonth(now = Date.now()) {
+  const { year, month } = getShanghaiCalendar(now);
 
-  const firstDay = new Date(year, month, 1);
-  const dayOfWeek = firstDay.getDay();
+  const dayOfWeek = new Date(Date.UTC(year, month, 1)).getUTCDay();
 
   let firstSundayDate = 1 + ((7 - dayOfWeek) % 7);
 
@@ -165,26 +179,20 @@ export function getFourthSundayOfMonth(now = new Date()) {
 }
 
 /**
- * War Guess opens 00:00-19:55 on the 4th Sunday (and March 1, 2026 override).
+ * War Guess opens 00:00-19:55 China time on the 4th Sunday (and March 1, 2026 override).
  */
-export function isWarGuessActivityOpen(now = new Date()) {
+export function isWarGuessActivityOpen(now = Date.now()) {
+  const { year, month, date, hour, minute } = getShanghaiCalendar(now);
+
   // 手动修正：2026年3月1日开放
-  if (
-    now.getFullYear() === 2026 &&
-    now.getMonth() === 2 &&
-    now.getDate() === 1
-  ) {
-    const hour = now.getHours();
-    const minute = now.getMinutes();
+  if (year === 2026 && month === 2 && date === 1) {
     if (hour < 19 || (hour === 19 && minute <= 55)) return true;
   }
 
   const fourthSunday = getFourthSundayOfMonth(now);
 
-  if (now.getDate() !== fourthSunday.getDate()) return false;
+  if (date !== fourthSunday.getDate()) return false;
 
-  const hour = now.getHours();
-  const minute = now.getMinutes();
   if (hour > 19 || (hour === 19 && minute > 55)) return false;
 
   return true;
@@ -193,7 +201,7 @@ export function isWarGuessActivityOpen(now = new Date()) {
 /**
  * Human-readable War Guess schedule hint when closed.
  */
-export function getWarGuessActivityTip(now = new Date()) {
+export function getWarGuessActivityTip(now = Date.now()) {
   if (isWarGuessActivityOpen(now)) return "";
 
   const fourthSunday = getFourthSundayOfMonth(now);

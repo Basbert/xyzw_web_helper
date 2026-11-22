@@ -735,7 +735,6 @@ import {
   SyncCircle,
   TrashBin,
 } from "@vicons/ionicons5";
-import lz4 from "lz4js";
 import { NAlert, NIcon, useDialog, useMessage } from "naive-ui";
 import { computed, h, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useRouter } from "vue-router";
@@ -749,13 +748,17 @@ import {
   getBinPayload,
   getRoleBinFileName,
 } from "@/utils/binFile";
-import { prepareMultiGameLaunch } from "@/utils/gameLauncher";
+import { convertBinToLx, prepareMultiGameLaunch } from "@/utils/gameLauncher";
 import {
   pruneTokenSelection,
   selectAllTokenIds,
   toggleTokenSelection,
 } from "@/utils/gameSelection";
-import { scheduleAuthUserRequest, transformToken } from "@/utils/token";
+import {
+  fetchTokenPayloadFromUrl,
+  scheduleAuthUserRequest,
+  transformToken,
+} from "@/utils/token";
 import {
   generateBinFromCombUser,
   refreshTokenFromCombUser,
@@ -1726,69 +1729,6 @@ const goToPushingLevels = () => {
   router.push("/admin/PushingLevels");
 };
 
-// ============ BIN 格式转换（来自 convertBin.mjs） ============
-
-function extractKey(bytes) {
-  return (
-    (((bytes[2] >> 6) & 1) << 7) |
-    (((bytes[2] >> 4) & 1) << 6) |
-    (((bytes[2] >> 2) & 1) << 5) |
-    ((bytes[2] & 1) << 4) |
-    (((bytes[3] >> 6) & 1) << 3) |
-    (((bytes[3] >> 4) & 1) << 2) |
-    (((bytes[3] >> 2) & 1) << 1) |
-    (bytes[3] & 1)
-  );
-}
-
-function encodeKey(bytes, r) {
-  bytes[2] =
-    (bytes[2] & 0b10101010) |
-    (((r >> 7) & 1) << 6) |
-    (((r >> 6) & 1) << 4) |
-    (((r >> 5) & 1) << 2) |
-    ((r >> 4) & 1);
-  bytes[3] =
-    (bytes[3] & 0b10101010) |
-    (((r >> 3) & 1) << 6) |
-    (((r >> 2) & 1) << 4) |
-    (((r >> 1) & 1) << 2) |
-    (r & 1);
-}
-
-function xDecrypt(buf) {
-  const e = new Uint8Array(buf);
-  const t = extractKey(e);
-  const out = new Uint8Array(e);
-  for (let n = out.length; --n >= 4;) out[n] ^= t;
-  return out.subarray(4);
-}
-
-function lxEncrypt(plain) {
-  const compressed = lz4.compress(plain);
-  const out = new Uint8Array(compressed.length);
-  out.set(compressed);
-  const r = 2 + ~~(Math.random() * 248);
-  for (let n = Math.min(out.length, 100); --n >= 0;) out[n] ^= r;
-  out[0] = 112; // 'p'
-  out[1] = 108; // 'l'
-  encodeKey(out, r);
-  return out;
-}
-
-function convertBinToLx(buf) {
-  const e = new Uint8Array(buf);
-  // 已经是 lx 格式
-  if (e.length > 4 && e[0] === 112 && e[1] === 108) return e;
-  // x 格式，转换为 lx
-  if (e.length > 4 && e[0] === 112 && e[1] === 120) {
-    const plain = xDecrypt(e);
-    return lxEncrypt(plain);
-  }
-  // 其他格式原样返回
-  return e;
-}
-
 async function openSelectedGames() {
   if (selectedMultiGameTokens.value.length === 0 || isOpeningMultiGame.value)
     return;
@@ -1873,25 +1813,10 @@ const handleUrlParams = async () => {
       let tokenResult = null;
 
       if (props.api) {
-        // 通过API获取token
-        // 降噪
+        // 通过API获取token（统一复用 URL 校验、超时与最小凭证选项）
         message.info("正在从API获取token...");
 
-        const response = await fetch(props.api, {
-          method: "GET",
-          headers: {
-            Accept: "application/json",
-          },
-          mode: "cors",
-        });
-
-        if (!response.ok) {
-          throw new Error(
-            `API请求失败: ${response.status} ${response.statusText}`,
-          );
-        }
-
-        const data = await response.json();
+        const data = await fetchTokenPayloadFromUrl(props.api);
 
         if (!data.token) {
           throw new Error("API返回数据中未找到token字段");

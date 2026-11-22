@@ -152,3 +152,64 @@ test("import skips scheduled tasks when local scheduler config is stale", () => 
   assert.equal(result.scheduledTasksSkippedByStaleConfig, true);
   assert.equal(scheduledTasks.length, 0);
 });
+
+test("full backup preserves combUser, serverId, roleIndex, importMethod, dreamPurchaseList and role-scoped settings", () => {
+  const exported = buildConfigBackupData({
+    mode: "full",
+    tokens: [
+      {
+        id: "t1",
+        name: "主号",
+        roleId: 888,
+        serverId: 1000037,
+        roleIndex: 1,
+        server: "10服",
+        token: "tok-1",
+        importMethod: "wxQrcode",
+        combUser: { uid: "u1", token: "c1" },
+      },
+    ],
+    scheduledTasks: [],
+    batchSettings: {
+      blackMarketPurchaseList: [],
+      dreamPurchaseList: [{ id: 1, enabled: true }],
+    },
+    storage: {
+      getItem: (key) =>
+        key === "daily-role-settings:888"
+          ? JSON.stringify({ claimLegacy: false, arenaFormation: 2 })
+          : null,
+    },
+  });
+
+  assert.equal(exported.tokens[0].importMethod, "wxQrcode");
+  assert.equal(exported.tokens[0].serverId, 1000037);
+  assert.equal(exported.tokens[0].roleIndex, 1);
+  assert.deepEqual(exported.tokens[0].combUser, { uid: "u1", token: "c1" });
+  assert.deepEqual(exported.batchSettings.dreamPurchaseList, [
+    { id: 1, enabled: true },
+  ]);
+  assert.equal(exported.tokenSettings[0].settings.claimLegacy, false);
+
+  const restoredTokens = [];
+  const restoredBatchSettings = {
+    blackMarketPurchaseList: [],
+    dreamPurchaseList: [],
+  };
+  const result = applyConfigBackupData({
+    importData: exported,
+    gameTokens: restoredTokens,
+    scheduledTasks: [],
+    batchSettings: restoredBatchSettings,
+  });
+
+  assert.equal(result.status, "imported");
+  assert.equal(restoredTokens.length, 1);
+  assert.equal(restoredTokens[0].importMethod, "wxQrcode");
+  assert.equal(restoredTokens[0].serverId, 1000037);
+  assert.equal(restoredTokens[0].roleIndex, 1);
+  assert.deepEqual(restoredTokens[0].combUser, { uid: "u1", token: "c1" });
+  assert.deepEqual(restoredBatchSettings.dreamPurchaseList, [
+    { id: 1, enabled: true },
+  ]);
+});

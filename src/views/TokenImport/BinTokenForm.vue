@@ -102,10 +102,14 @@ import {
 } from "@/utils/binFile";
 import { g_utils } from "@/utils/bonProtocol";
 import { getServerList, getTokenId, transformToken } from "@/utils/token";
+import {
+  formatUpsertImportMessage,
+  upsertImportedRoleTokens,
+} from "@/utils/tokenImportUpsert";
 
 const $emit = defineEmits(["cancel", "ok"]);
 
-const { storeArrayBuffer } = useIndexedDB();
+const { storeArrayBuffer, getArrayBuffer, deleteArrayBuffer } = useIndexedDB();
 
 const cancel = () => {
   roleList.value = [];
@@ -287,23 +291,21 @@ const handleImport = async () => {
     message.error("请先上传bin文件！");
     return;
   }
-  roleList.value.forEach((role) => {
-    // tokenStore.gameTokens中发现已存在的重复名称，则移出token后重新添加
-    const gameToken = tokenStore.gameTokens.find((t) => t.id === role.id);
-    if (gameToken) {
-      // tokenStore.removeToken(gameToken.id);
-      tokenStore.updateToken(gameToken.id, {
-        ...role,
-      });
-    } else {
-      tokenStore.addToken({
-        ...role,
-      });
-    }
-  });
-  message.success("Token添加成功");
-  roleList.value = [];
-  $emit("ok");
+  isImporting.value = true;
+  try {
+    const result = await upsertImportedRoleTokens({
+      roles: roleList.value,
+      tokenStore,
+      getArrayBuffer,
+      storeArrayBuffer,
+      deleteArrayBuffer,
+    });
+    message.success(formatUpsertImportMessage(result));
+    roleList.value = [];
+    $emit("ok");
+  } finally {
+    isImporting.value = false;
+  }
 };
 </script>
 

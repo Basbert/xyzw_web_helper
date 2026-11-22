@@ -1090,11 +1090,21 @@ const getSortIcon = (field) => getSortIndicator(sortConfig.value, field);
 const tokens = computed(() => tokenStore.gameTokens);
 const shanghaiNow = useShanghaiClock();
 const ismengjingActivityOpen = computed(() => isDungeonOpen(shanghaiNow.value));
-const isbaokuActivityOpen = computed(() => isBaokuActivityOpen());
-const isarenaActivityOpen = computed(() => isArenaActivityOpen());
-const isWeirdTowerActivityOpen = computed(() => checkWeirdTowerActivityOpen());
-const isWarGuessActivityOpen = computed(() => checkWarGuessActivityOpen());
-const warGuessActivityTip = computed(() => getWarGuessActivityTip());
+const isbaokuActivityOpen = computed(() =>
+  isBaokuActivityOpen(shanghaiNow.value),
+);
+const isarenaActivityOpen = computed(() =>
+  isArenaActivityOpen(shanghaiNow.value),
+);
+const isWeirdTowerActivityOpen = computed(() =>
+  checkWeirdTowerActivityOpen(shanghaiNow.value),
+);
+const isWarGuessActivityOpen = computed(() =>
+  checkWarGuessActivityOpen(shanghaiNow.value),
+);
+const warGuessActivityTip = computed(() =>
+  getWarGuessActivityTip(shanghaiNow.value),
+);
 
 const selectedTokens = ref([]);
 const tokenStatus = ref({}); // { tokenId: 'waiting' | 'running' | 'completed' | 'failed' }
@@ -1610,6 +1620,8 @@ const openTaskModal = () => {
     enabled: true,
   });
   taskScheduleSelectedGroupIds.value = [];
+  cronValidation.value = { valid: true, message: "" };
+  cronNextRuns.value = [];
   showTaskModal.value = true;
 };
 
@@ -1644,6 +1656,12 @@ const editTask = (task) => {
   });
   Object.assign(taskForm, taskData);
   taskScheduleSelectedGroupIds.value = [];
+  if (taskForm.runType === "cron" && taskForm.cronExpression) {
+    parseCronExpression(taskForm.cronExpression);
+  } else {
+    cronValidation.value = { valid: true, message: "" };
+    cronNextRuns.value = [];
+  }
   showTaskModal.value = true;
 };
 
@@ -2279,6 +2297,7 @@ const handleTokenRefreshWaiting = (data) => {
 
 // Debug: Log initial state when component mounts
 onMounted(() => {
+  tokenStore.initConnectionCoordination?.();
   window.addEventListener("storage", handleScheduledStorageChange);
   // Start the task scheduler after all functions are initialized
   scheduleTaskExecution();

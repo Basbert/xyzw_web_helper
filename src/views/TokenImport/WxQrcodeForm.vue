@@ -162,11 +162,15 @@ import {
 import { g_utils } from "@/utils/bonProtocol";
 import { encodeHortorLoginPayload } from "@/utils/hortorMobileLogin";
 import { getServerList, getTokenId, transformToken } from "@/utils/token";
+import {
+  formatUpsertImportMessage,
+  upsertImportedRoleTokens,
+} from "@/utils/tokenImportUpsert";
 import { encodeCombUserBin } from "@/utils/xyzwRuntime";
 // 定义事件
 const emit = defineEmits(["cancel", "ok"]);
 const tokenStore = useTokenStore();
-const { storeArrayBuffer } = useIndexedDB();
+const { storeArrayBuffer, getArrayBuffer, deleteArrayBuffer } = useIndexedDB();
 
 const message = useMessage();
 const isImporting = ref(false);
@@ -607,26 +611,24 @@ const saveAccount = async (arrBuf: ArrayBuffer) => {
 
 const handleImport = async () => {
   if (roleList.value.length === 0) {
-    message.error("请先上传bin文件！");
+    message.error("请先扫码并选择需要添加的角色！");
     return;
   }
-  roleList.value.forEach((role) => {
-    // tokenStore.gameTokens中发现已存在的重复名称，则移出token后重新添加
-    const gameToken = tokenStore.gameTokens.find((t) => t.id === role.id);
-    if (gameToken) {
-      // tokenStore.removeToken(gameToken.id);
-      tokenStore.updateToken(gameToken.id, {
-        ...role,
-      });
-    } else {
-      tokenStore.addToken({
-        ...role,
-      });
-    }
-  });
-  message.success("Token添加成功");
-  roleList.value = [];
-  emit("ok");
+  isImporting.value = true;
+  try {
+    const result = await upsertImportedRoleTokens({
+      roles: roleList.value,
+      tokenStore,
+      getArrayBuffer,
+      storeArrayBuffer,
+      deleteArrayBuffer,
+    });
+    message.success(formatUpsertImportMessage(result));
+    roleList.value = [];
+    emit("ok");
+  } finally {
+    isImporting.value = false;
+  }
 };
 
 /**

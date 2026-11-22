@@ -124,3 +124,38 @@ test("transformToken and getServerList configure timeouts and omit invalid refer
     assert.equal(req.config.headers.referrerPolicy, undefined);
   }
 });
+
+test("transformToken rejects server error responses instead of returning empty session JSON", async () => {
+  const { transformToken } = await loadModule(
+    new URL("../src/utils/token.ts", import.meta.url),
+    {
+      axios: {
+        default: {
+          post: async () => ({
+            data: { error: "token expired", code: 401 },
+          }),
+        },
+      },
+      "crypto-js": {
+        enc: { Hex: "hex" },
+        lib: { WordArray: { create: () => ({}) } },
+        MD5: () => ({ toString: () => "id" }),
+      },
+      "@/utils/bonProtocol": {
+        g_utils: {
+          parse: (data) => ({
+            error: data.error,
+            code: data.code,
+            getData: () => null,
+          }),
+        },
+      },
+    },
+    { AbortController, setTimeout, clearTimeout },
+  );
+
+  await assert.rejects(
+    transformToken(new ArrayBuffer(8)),
+    /登录凭据校验失败：token expired/,
+  );
+});

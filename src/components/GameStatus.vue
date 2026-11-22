@@ -765,21 +765,30 @@ const isShowTowerStatus = computed(() => {
   return true;
 });
 
-// 监听 WebSocket 连接状态（俱乐部信息）
-const hasFetchedLegionOnce = ref(false);
-watch(
-  () =>
-    tokenStore.selectedToken
-      ? tokenStore.getWebSocketStatus(tokenStore.selectedToken.id)
-      : "disconnected",
-  (status) => {
-    if (status === "connected") {
-      if (!hasFetchedLegionOnce.value && tokenStore.selectedToken) {
-        hasFetchedLegionOnce.value = true;
-        const tokenId = tokenStore.selectedToken.id;
-        tokenStore.sendMessage(tokenId, "legion_getinfo");
-      }
+// 监听 WebSocket 连接状态（按账号隔离俱乐部信息拉取）
+const fetchedLegionTokenIds = new Set();
+const fetchLegionInfoIfNeeded = (tokenId, status) => {
+  if (!tokenId) return;
+  if (status === "connected") {
+    if (!fetchedLegionTokenIds.has(tokenId)) {
+      fetchedLegionTokenIds.add(tokenId);
+      tokenStore.sendMessage(tokenId, "legion_getinfo");
     }
+  } else if (status === "disconnected" || status === "error") {
+    fetchedLegionTokenIds.delete(tokenId);
+  }
+};
+
+watch(
+  [
+    () => tokenStore.selectedToken?.id,
+    () =>
+      tokenStore.selectedToken
+        ? tokenStore.getWebSocketStatus(tokenStore.selectedToken.id)
+        : "disconnected",
+  ],
+  ([tokenId, status]) => {
+    fetchLegionInfoIfNeeded(tokenId, status);
   },
 );
 
@@ -788,13 +797,9 @@ watch(
 // 生命周期
 onMounted(() => {
   // 获取俱乐部信息
-  if (
-    tokenStore.selectedToken &&
-    tokenStore.getWebSocketStatus(tokenStore.selectedToken.id) === "connected"
-  ) {
-    const tokenId = tokenStore.selectedToken.id;
-    tokenStore.sendMessage(tokenId, "legion_getinfo");
-    hasFetchedLegionOnce.value = true;
+  const tokenId = tokenStore.selectedToken?.id;
+  if (tokenId) {
+    fetchLegionInfoIfNeeded(tokenId, tokenStore.getWebSocketStatus(tokenId));
   }
 });
 

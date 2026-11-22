@@ -151,12 +151,16 @@ import {
 import { g_utils } from "@/utils/bonProtocol";
 import { encodeHortorLoginPayload } from "@/utils/hortorMobileLogin";
 import { getServerList, getTokenId, transformToken } from "@/utils/token";
+import {
+  formatUpsertImportMessage,
+  upsertImportedRoleTokens,
+} from "@/utils/tokenImportUpsert";
 import { encodeCombUserBin } from "@/utils/xyzwRuntime";
 
 const emit = defineEmits(["cancel", "ok"]);
 const message = useMessage();
 const tokenStore = useTokenStore();
-const { storeArrayBuffer } = useIndexedDB();
+const { storeArrayBuffer, getArrayBuffer, deleteArrayBuffer } = useIndexedDB();
 
 const HORTOR_PROXY_PREFIX = "/api/hortor";
 const HORTOR_UCENTER_PROXY_PREFIX = "/api/hortor-ucenter";
@@ -489,22 +493,22 @@ const handleDownload = (roleInfo: any) => {
 
 const removeRole = (index: number) => roleList.value.splice(index, 1);
 
-const handleImport = () => {
+const handleImport = async () => {
   if (roleList.value.length === 0) {
     message.error("请先登录并选择角色");
     return;
   }
   isImporting.value = true;
   try {
-    for (const role of roleList.value) {
-      const existing = tokenStore.gameTokens.find(
-        (token) => token.id === role.id,
-      );
-      if (existing) tokenStore.updateToken(existing.id, role);
-      else tokenStore.addToken(role);
-    }
+    const result = await upsertImportedRoleTokens({
+      roles: roleList.value,
+      tokenStore,
+      getArrayBuffer,
+      storeArrayBuffer,
+      deleteArrayBuffer,
+    });
     roleList.value = [];
-    message.success("Token添加成功");
+    message.success(formatUpsertImportMessage(result));
     emit("ok");
   } finally {
     isImporting.value = false;

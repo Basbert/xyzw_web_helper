@@ -180,7 +180,7 @@ const emit = defineEmits([
             @update:value="
               (val) => {
                 emit('updateTaskForm', { cronExpression: val });
-                emit('parseCronExpression');
+                emit('parseCronExpression', val);
               }
             "
           />

@@ -43,7 +43,8 @@ export class DailyTaskRunner {
       options.sleep ||
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.getCurrentHour =
-      options.getCurrentHour || (() => new Date().getHours());
+      options.getCurrentHour ||
+      (() => new Date(Date.now() + 8 * 60 * 60 * 1000).getUTCHours());
     this.tokenStore = tokenStore;
     this.delaySettings = delaySettings || {
       commandDelay: 500,

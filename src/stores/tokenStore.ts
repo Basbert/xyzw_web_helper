@@ -114,7 +114,6 @@ export const selectedTokenId = useLocalStorage("selectedTokenId", "");
 export const selectedToken = computed(() => {
   return gameTokens.value?.find((token) => token.id === selectedTokenId.value);
 });
-export const selectedRoleInfo = useLocalStorage<any>("selectedRoleInfo", null);
 
 // 跨标签页连接协调
 const activeConnections = useLocalStorage<
@@ -540,6 +539,12 @@ export const useTokenStore = defineStore("tokens", () => {
       }
       return true;
     } else {
+      if (wsConnections.value[tokenId]) {
+        wsConnections.value[tokenId].lastError = {
+          timestamp: new Date().toISOString(),
+          error: "登录凭据已失效，请前往账号管理重新登录",
+        };
+      }
       wsLogger.error(`Token刷新失败，请手动重新导入 [${tokenId}]`);
       return false;
     }
@@ -971,6 +976,7 @@ export const useTokenStore = defineStore("tokens", () => {
     connectionMonitor.stopMonitoring();
     connectionRecovery.dispose();
     tokenStoreInitialized = false;
+    rateLimiterCallbackRegistered = false;
   });
 
   // WebSocket连接管理（重构版 - 防重连）
@@ -1758,14 +1764,44 @@ export const useTokenStore = defineStore("tokens", () => {
   };
 
   const clearAllTokens = async () => {
-    // 关闭所有WebSocket连接
-    Object.keys(wsConnections.value).forEach((tokenId) => {
-      closeWebSocketConnection(tokenId);
+    const tokenIds = Array.from(
+      new Set([
+        ...Object.keys(wsConnections.value),
+        ...gameTokens.value.map((token) => token.id),
+      ]),
+    );
+
+    desiredConnections.clear();
+    Object.keys(connectionRecoveryStatus.value).forEach((tokenId) => {
+      connectionRecovery.cancel(tokenId);
+    });
+    tokenIds.forEach((tokenId) => {
+      connectionRecovery.cancel(tokenId);
     });
 
-    gameTokens.value = [];
     selectedTokenId.value = "";
+    await Promise.all(
+      Object.keys(wsConnections.value).map((tokenId) =>
+        closeWebSocketConnectionAsync(tokenId),
+      ),
+    );
+
+    gameTokens.value = [];
+    tokenGroups.value = [];
+    connectionLocks.value = {};
+    activeConnections.value = {};
     accountGameData.clear();
+
+    if (typeof localStorage !== "undefined") {
+      tokenIds.forEach((tokenId) => {
+        localStorage.removeItem(`ws_connection_${tokenId}`);
+      });
+      Object.keys(localStorage).forEach((key) => {
+        if (key.startsWith("ws_connection_")) {
+          localStorage.removeItem(key);
+        }
+      });
+    }
 
     // 清空IndexedDB
     await clearAll();
@@ -2050,39 +2086,10 @@ export const useTokenStore = defineStore("tokens", () => {
     window.addEventListener("storage", storageListener);
   };
 
-  // Listen for other tabs without changing the stored account list.
-  const initConnectionCoordination = () => {
-    setupCrossTabListener();
-  };
-
-  // 初始化
-  const initTokenStore = () => {
-    if (tokenStoreInitialized) return;
-    tokenStoreInitialized = true;
-    // // 恢复数据
-    // const savedTokens = localStorage.getItem('gameTokens')
-    // const savedSelectedId = localStorage.getItem('selectedTokenId')
-
-    // if (savedTokens) {
-    //   try {
-    //     gameTokens.value = JSON.parse(savedTokens)
-    //   } catch (error) {
-    //     tokenLogger.error('解析Token数据失败:', error.message)
-    //     gameTokens.value = []
-    //   }
-    // }
-
-    // if (savedSelectedId) {
-    //   selectedTokenId.value = savedSelectedId
-    // }
-
-    // 清理过期token
-    cleanExpiredTokens();
-    // 启动连接监控并监听跨标签页状态
-    connectionMonitor.startMonitoring();
-    initConnectionCoordination();
-
-    // 设置限流等待回调
+  let rateLimiterCallbackRegistered = false;
+  const registerRateLimiterCallback = () => {
+    if (rateLimiterCallbackRegistered) return;
+    rateLimiterCallbackRegistered = true;
     setAuthUserRateLimiterCallback((waitTimeMs: number, queueSize: number) => {
       const waitSeconds = Math.ceil(waitTimeMs / 1000);
       $emit.emit("token:refresh:waiting", {
@@ -2092,6 +2099,24 @@ export const useTokenStore = defineStore("tokens", () => {
         timestamp: Date.now(),
       });
     });
+  };
+
+  // Listen for other tabs and keep connection monitoring active without altering stored accounts.
+  const initConnectionCoordination = () => {
+    connectionMonitor.startMonitoring();
+    setupCrossTabListener();
+    registerRateLimiterCallback();
+  };
+
+  // 初始化
+  const initTokenStore = () => {
+    if (tokenStoreInitialized) return;
+    tokenStoreInitialized = true;
+
+    // 清理过期token
+    cleanExpiredTokens();
+    // 启动连接监控、跨标签页协调与限流通知
+    initConnectionCoordination();
 
     tokenLogger.info("Token Store 初始化完成，连接监控已启动");
   };
