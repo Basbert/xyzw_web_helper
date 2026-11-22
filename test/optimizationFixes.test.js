@@ -3825,7 +3825,11 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     getArrayBufferImpl = null,
     storeArrayBufferImpl = null,
     deleteArrayBufferImpl = null,
+    getAllKeysImpl = null,
     clearAllImpl = null,
+    idbErrorRef = null,
+    idbReadyRef = null,
+    wsClientClass = null,
     onStorageWrite = null,
   }) => {
     const pinia = createPinia();
@@ -3861,6 +3865,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     const storageAdapter = Object.assign(
       Object.create(globalThis.Storage.prototype),
       {
+        key: (i) => Array.from(sharedStorage.keys())[i] ?? null,
         getItem: (k) => (sharedStorage.has(k) ? sharedStorage.get(k) : null),
         setItem: (k, v) => {
           const next = String(v);
@@ -3884,8 +3889,43 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
         },
       },
     );
+    Object.defineProperty(storageAdapter, "length", {
+      get: () => sharedStorage.size,
+      configurable: true,
+    });
     const recoveryTimers = new Map();
     let nextTimer = 0;
+    const idbApi = {
+      getArrayBuffer:
+        getArrayBufferImpl || (async (k) => sharedIdb.get(k) ?? null),
+      storeArrayBuffer:
+        storeArrayBufferImpl ||
+        (async (k, buf) => {
+          sharedIdb.set(k, buf);
+          return true;
+        }),
+      deleteArrayBuffer:
+        deleteArrayBufferImpl ||
+        (async (k) => {
+          sharedIdb.delete(k);
+          return true;
+        }),
+      clearAll:
+        clearAllImpl ||
+        (async () => {
+          sharedIdb.clear();
+          return true;
+        }),
+    };
+    if (getAllKeysImpl) {
+      idbApi.getAllKeys = getAllKeysImpl;
+    }
+    if (idbErrorRef) {
+      idbApi.error = idbErrorRef;
+    }
+    if (idbReadyRef) {
+      idbApi.isReady = idbReadyRef;
+    }
 
     const mod = await loadModule(
       new URL("../src/stores/tokenStore.ts", import.meta.url),
@@ -3901,28 +3941,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
         pinia: { defineStore },
         vue,
         "@/hooks/useIndexedDB": {
-          default: () => ({
-            getArrayBuffer:
-              getArrayBufferImpl || (async (k) => sharedIdb.get(k) ?? null),
-            storeArrayBuffer:
-              storeArrayBufferImpl ||
-              (async (k, buf) => {
-                sharedIdb.set(k, buf);
-                return true;
-              }),
-            deleteArrayBuffer:
-              deleteArrayBufferImpl ||
-              (async (k) => {
-                sharedIdb.delete(k);
-                return true;
-              }),
-            clearAll:
-              clearAllImpl ||
-              (async () => {
-                sharedIdb.clear();
-                return true;
-              }),
-          }),
+          default: () => idbApi,
         },
         "@/router": {
           default: { currentRoute: { value: { path: "/tokens" } } },
@@ -3959,21 +3978,23 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
           roleIndexFromServerId: () => 0,
         },
         "@/utils/xyzwWebSocket": {
-          XyzwWebSocketClient: class {
-            constructor() {
-              this.socket = { readyState: 1 };
-            }
-            setMessageListener() {}
-            init() {
-              this.onConnect();
-            }
-            disconnect() {
-              if (this.socket) this.socket.readyState = 3;
-              this.socket = null;
-            }
-            send() {}
-            sendHeartbeat() {}
-          },
+          XyzwWebSocketClient:
+            wsClientClass ||
+            class {
+              constructor() {
+                this.socket = { readyState: 1 };
+              }
+              setMessageListener() {}
+              init() {
+                this.onConnect();
+              }
+              disconnect() {
+                if (this.socket) this.socket.readyState = 3;
+                this.socket = null;
+              }
+              send() {}
+              sendHeartbeat() {}
+            },
         },
         "./events/index.js": { $emit: { emit() {} }, emitPlus() {} },
       },
@@ -5576,6 +5597,778 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       assert.equal(store.gameTokens.length, 5);
     } finally {
       pinia._e.stop();
+    }
+  });
+
+  test("Round8 P1: cleanExpiredTokens re-checks shouldDelete after getArrayBuffer and deleteArrayBuffer when another tab selects the account, preserving account and restoring BIN", async () => {
+    const expiredIso = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
+
+    // Subcase A: Tab B selects acc1 while Tab A is paused inside getArrayBuffer
+    {
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc1",
+              name: "手动号A",
+              roleId: "8001",
+              token: "manual-tok-a",
+              importMethod: "manual",
+              createdAt: expiredIso,
+              lastUsed: expiredIso,
+            },
+          ]),
+        ],
+      ]);
+      const sharedIdb = new Map([["acc1", new Uint8Array([6, 6]).buffer]]);
+      const sharedLocks = createLockManager();
+      let releaseGetBin;
+      let getBinEntered;
+      const getBinStarted = new Promise((r) => {
+        getBinEntered = r;
+      });
+      let deleteCalls = 0;
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+        getArrayBufferImpl: async (k) => {
+          getBinEntered();
+          await new Promise((r) => {
+            releaseGetBin = r;
+          });
+          return sharedIdb.get(k) ?? null;
+        },
+        deleteArrayBufferImpl: async (k) => {
+          deleteCalls += 1;
+          sharedIdb.delete(k);
+          return true;
+        },
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+      });
+
+      try {
+        const cleanPromise = tabA.store.cleanExpiredTokens();
+        await getBinStarted;
+
+        // Tab B selects the account mid-cleanup, refreshing lastUsed and connecting
+        const selected = tabB.store.selectToken("acc1");
+        assert.ok(selected);
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(tabB.store.wsConnections.acc1?.status, "connected");
+        const refreshedDisk = JSON.parse(sharedStorage.get("gameTokens"));
+        assert.ok(
+          new Date(refreshedDisk[0].lastUsed).getTime() >
+            Date.now() - 60 * 1000,
+        );
+
+        releaseGetBin();
+        const cleaned = await cleanPromise;
+        assert.equal(cleaned, 0);
+        assert.equal(deleteCalls, 0);
+        assert.equal(JSON.parse(sharedStorage.get("gameTokens")).length, 1);
+        assert.equal(tabA.store.gameTokens.length, 1);
+        assert.deepEqual(
+          Array.from(new Uint8Array(sharedIdb.get("acc1"))),
+          [6, 6],
+        );
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+      }
+    }
+
+    // Subcase B: Tab B selects acc2 while Tab A is paused inside deleteArrayBuffer -> must skip delete AND restore BIN
+    {
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc2",
+              name: "手动号B",
+              roleId: "8002",
+              token: "manual-tok-b",
+              importMethod: "manual",
+              createdAt: expiredIso,
+              lastUsed: expiredIso,
+            },
+          ]),
+        ],
+      ]);
+      const sharedIdb = new Map([["acc2", new Uint8Array([7, 7]).buffer]]);
+      const sharedLocks = createLockManager();
+      let releaseDeleteBin;
+      let deleteBinEntered;
+      const deleteBinStarted = new Promise((r) => {
+        deleteBinEntered = r;
+      });
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+        deleteArrayBufferImpl: async (k) => {
+          sharedIdb.delete(k);
+          deleteBinEntered();
+          await new Promise((r) => {
+            releaseDeleteBin = r;
+          });
+          return true;
+        },
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+      });
+
+      try {
+        const cleanPromise = tabA.store.cleanExpiredTokens();
+        await deleteBinStarted;
+        assert.equal(sharedIdb.has("acc2"), false);
+
+        // Tab B selects acc2 AFTER deleteArrayBuffer removed BIN, BEFORE localStorage commit
+        const selected = tabB.store.selectToken("acc2");
+        assert.ok(selected);
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(tabB.store.wsConnections.acc2?.status, "connected");
+
+        releaseDeleteBin();
+        const cleaned = await cleanPromise;
+        assert.equal(cleaned, 0);
+        const disk = JSON.parse(sharedStorage.get("gameTokens"));
+        assert.equal(disk.length, 1);
+        assert.equal(disk[0].id, "acc2");
+        assert.ok(
+          new Date(disk[0].lastUsed).getTime() > Date.now() - 60 * 1000,
+        );
+        assert.equal(tabA.store.gameTokens.length, 1);
+        assert.deepEqual(
+          Array.from(new Uint8Array(sharedIdb.get("acc2"))),
+          [7, 7],
+          "BIN deleted before predicate flipped must be restored",
+        );
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+      }
+    }
+  });
+
+  test("Round8 P2-1: clearAllTokens and removeToken post-lock socket close never wipes another tab's newly created ws_connection_* lease", async () => {
+    // Subcase A: clearAllTokens closes acc-old after lock release while Tab B imports and connects acc-new
+    {
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc-old",
+              name: "旧号",
+              roleId: "9001",
+              token: "valid-old-token-0001",
+              importMethod: "bin",
+              createdAt: "2026-11-01T00:00:00.000Z",
+            },
+          ]),
+        ],
+      ]);
+      const sharedIdb = new Map([["acc-old", new Uint8Array([1]).buffer]]);
+      const sharedLocks = createLockManager();
+      let disconnectCalled;
+      const disconnectStarted = new Promise((r) => {
+        disconnectCalled = r;
+      });
+      let slowSocketRef = null;
+
+      class SlowCloseWsClient {
+        constructor() {
+          this.socket = { readyState: 1 };
+        }
+        setMessageListener() {}
+        init() {
+          this.onConnect();
+        }
+        disconnect() {
+          // Leave socket in CLOSING (readyState 2) until the test finishes closing it
+          slowSocketRef = this.socket;
+          if (slowSocketRef) slowSocketRef.readyState = 2;
+          this.socket = null;
+          disconnectCalled();
+        }
+        send() {}
+        sendHeartbeat() {}
+      }
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+        wsClientClass: SlowCloseWsClient,
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+      });
+      const tabC = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+      });
+
+      try {
+        tabA.store.selectToken("acc-old");
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(tabA.store.wsConnections["acc-old"]?.status, "connected");
+        assert.ok(sharedStorage.has("ws_connection_acc-old"));
+
+        const clearPromise = tabA.store.clearAllTokens();
+        await disconnectStarted;
+
+        // Lock is now released while Tab A waits on slowSocketRef to reach CLOSED (3).
+        // Tab B imports acc-new and connects it.
+        const added = await tabB.store.commitNewToken({
+          id: "acc-new",
+          name: "新号",
+          roleId: "9002",
+          token: "valid-new-token-0002",
+          importMethod: "bin",
+        });
+        assert.equal(added.id, "acc-new");
+        tabB.store.selectToken("acc-new");
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(tabB.store.wsConnections["acc-new"]?.status, "connected");
+        assert.ok(sharedStorage.has("ws_connection_acc-new"));
+        assert.equal(
+          tabC.store.isConnectionActiveInAnotherTab("acc-new"),
+          true,
+        );
+
+        // Allow Tab A's old socket to finish closing
+        slowSocketRef.readyState = 3;
+        const clearRes = await clearPromise;
+        assert.equal(clearRes.ok, true);
+
+        // Old lease removed, brand-new Tab B lease preserved so Tab C cannot duplicate-connect
+        assert.equal(sharedStorage.has("ws_connection_acc-old"), false);
+        assert.equal(sharedStorage.has("ws_connection_acc-new"), true);
+        assert.equal(
+          tabC.store.isConnectionActiveInAnotherTab("acc-new"),
+          true,
+        );
+        const activeOnDisk = JSON.parse(
+          sharedStorage.get("activeConnections") || "{}",
+        );
+        assert.ok(activeOnDisk["acc-new"]);
+        assert.equal(activeOnDisk["acc-old"], undefined);
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+        tabC.pinia._e.stop();
+      }
+    }
+
+    // Subcase B: removeToken closes acc-same while Tab B re-imports the SAME ID and connects
+    {
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc-same",
+              name: "同ID账号",
+              roleId: "9003",
+              token: "valid-same-token-0001",
+              importMethod: "bin",
+              createdAt: "2026-11-01T00:00:00.000Z",
+            },
+          ]),
+        ],
+      ]);
+      const sharedIdb = new Map([["acc-same", new Uint8Array([2]).buffer]]);
+      const sharedLocks = createLockManager();
+      let disconnectCalled;
+      const disconnectStarted = new Promise((r) => {
+        disconnectCalled = r;
+      });
+      let slowSocketRef = null;
+
+      class SlowCloseWsClient {
+        constructor() {
+          this.socket = { readyState: 1 };
+        }
+        setMessageListener() {}
+        init() {
+          this.onConnect();
+        }
+        disconnect() {
+          slowSocketRef = this.socket;
+          if (slowSocketRef) slowSocketRef.readyState = 2;
+          this.socket = null;
+          disconnectCalled();
+        }
+        send() {}
+        sendHeartbeat() {}
+      }
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+        wsClientClass: SlowCloseWsClient,
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+      });
+      const tabC = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+      });
+
+      try {
+        tabA.store.selectToken("acc-same");
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(tabA.store.wsConnections["acc-same"]?.status, "connected");
+        const removePromise = tabA.store.removeToken("acc-same");
+        await disconnectStarted;
+
+        await tabB.store.commitNewToken({
+          id: "acc-same",
+          name: "同ID账号-重导",
+          roleId: "9003",
+          token: "valid-same-token-0002",
+          importMethod: "bin",
+        });
+        tabB.store.selectToken("acc-same");
+        await new Promise((r) => setTimeout(r, 20));
+        assert.equal(tabB.store.wsConnections["acc-same"]?.status, "connected");
+        const tabBLeaseRaw = sharedStorage.get("ws_connection_acc-same");
+        assert.ok(tabBLeaseRaw);
+
+        slowSocketRef.readyState = 3;
+        const removeRes = await removePromise;
+        assert.equal(removeRes.ok, true);
+        assert.equal(sharedStorage.get("ws_connection_acc-same"), tabBLeaseRaw);
+        assert.equal(
+          tabC.store.isConnectionActiveInAnotherTab("acc-same"),
+          true,
+        );
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+        tabC.pinia._e.stop();
+      }
+    }
+  });
+
+  test("Round8 P2-2: clearAllTokens backs up and deletes exact enumerated IndexedDB set, restoring pending-import BINs on failure and aborting on backup failure", async () => {
+    const initialTokens = [
+      {
+        id: "acc1",
+        name: "主号",
+        roleId: "9101",
+        token: "tok-1",
+        importMethod: "bin",
+        createdAt: "2026-11-01T00:00:00.000Z",
+      },
+    ];
+
+    // Subcase A: localStorage write fails on "[]" (probe passes) -> restores BOTH acc1 AND pending-import BIN
+    {
+      const sharedStorage = new Map([
+        ["gameTokens", JSON.stringify(initialTokens)],
+      ]);
+      const sharedIdb = new Map([
+        ["acc1", new Uint8Array([1, 1]).buffer],
+        ["temp-pending", new Uint8Array([9, 9]).buffer],
+      ]);
+      const sharedLocks = createLockManager();
+      let clearAllCalls = 0;
+
+      const tab = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+        shouldFailSetItem: (k, v) => k === "gameTokens" && v === "[]",
+        getAllKeysImpl: async () => Array.from(sharedIdb.keys()),
+        clearAllImpl: async () => {
+          clearAllCalls += 1;
+          sharedIdb.clear();
+          return true;
+        },
+      });
+
+      try {
+        const res = await tab.store.clearAllTokens();
+        assert.equal(res.ok, false);
+        assert.equal(res.reason, "storage_write_failed");
+        assert.equal(res.binCleared, false);
+        assert.equal(clearAllCalls, 0);
+        assert.deepEqual(
+          Array.from(new Uint8Array(sharedIdb.get("acc1"))),
+          [1, 1],
+        );
+        assert.deepEqual(
+          Array.from(new Uint8Array(sharedIdb.get("temp-pending"))),
+          [9, 9],
+          "pending-import BIN must be restored when clearAllTokens rolls back",
+        );
+        assert.equal(JSON.parse(sharedStorage.get("gameTokens")).length, 1);
+      } finally {
+        tab.pinia._e.stop();
+      }
+    }
+
+    // Subcase B: Backup failure on pending-import BIN aborts BEFORE deleting any record
+    {
+      const sharedStorage = new Map([
+        ["gameTokens", JSON.stringify(initialTokens)],
+      ]);
+      const sharedIdb = new Map([
+        ["acc1", new Uint8Array([1, 1]).buffer],
+        ["temp-pending", new Uint8Array([9, 9]).buffer],
+      ]);
+      const sharedLocks = createLockManager();
+      let deleteCalls = 0;
+      let clearAllCalls = 0;
+
+      const tab = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+        getAllKeysImpl: async () => Array.from(sharedIdb.keys()),
+        getArrayBufferImpl: async (k) => {
+          if (k === "temp-pending") return null;
+          return sharedIdb.get(k) ?? null;
+        },
+        deleteArrayBufferImpl: async (k) => {
+          deleteCalls += 1;
+          sharedIdb.delete(k);
+          return true;
+        },
+        clearAllImpl: async () => {
+          clearAllCalls += 1;
+          sharedIdb.clear();
+          return true;
+        },
+      });
+
+      try {
+        const res = await tab.store.clearAllTokens();
+        assert.equal(res.ok, false);
+        assert.equal(res.reason, "bin_delete_failed");
+        assert.equal(deleteCalls, 0);
+        assert.equal(clearAllCalls, 0);
+        assert.equal(sharedIdb.size, 2);
+        assert.equal(JSON.parse(sharedStorage.get("gameTokens")).length, 1);
+      } finally {
+        tab.pinia._e.stop();
+      }
+    }
+
+    // Subcase C: getAllKeys failure (setting idbError) aborts BEFORE deleting any record
+    {
+      const sharedStorage = new Map([
+        ["gameTokens", JSON.stringify(initialTokens)],
+      ]);
+      const sharedIdb = new Map([
+        ["acc1", new Uint8Array([1, 1]).buffer],
+        ["temp-pending", new Uint8Array([9, 9]).buffer],
+      ]);
+      const sharedLocks = createLockManager();
+      const idbErrorRef = vue.ref(null);
+      const idbReadyRef = vue.ref(true);
+      let deleteCalls = 0;
+      let clearAllCalls = 0;
+
+      const tab = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+        idbErrorRef,
+        idbReadyRef,
+        getAllKeysImpl: async () => {
+          idbErrorRef.value = "获取键列表失败: IDB closed";
+          return [];
+        },
+        deleteArrayBufferImpl: async (k) => {
+          deleteCalls += 1;
+          sharedIdb.delete(k);
+          return true;
+        },
+        clearAllImpl: async () => {
+          clearAllCalls += 1;
+          sharedIdb.clear();
+          return true;
+        },
+      });
+
+      try {
+        const res = await tab.store.clearAllTokens();
+        assert.equal(res.ok, false);
+        assert.equal(res.reason, "bin_delete_failed");
+        assert.equal(deleteCalls, 0);
+        assert.equal(clearAllCalls, 0);
+        assert.equal(sharedIdb.size, 2);
+      } finally {
+        tab.pinia._e.stop();
+      }
+    }
+
+    // Subcase D: empty IndexedDB (getAllKeys -> []) never falls back to clearAll(), so a concurrent temp BIN added right after getAllKeys() survives
+    {
+      const sharedStorage = new Map([
+        ["gameTokens", JSON.stringify(initialTokens)],
+      ]);
+      const sharedIdb = new Map();
+      const sharedLocks = createLockManager();
+      let clearAllCalls = 0;
+
+      const tab = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+        getAllKeysImpl: async () => {
+          const snapshot = Array.from(sharedIdb.keys());
+          // Simulate another tab writing a pending BIN immediately after getAllKeys resolves
+          sharedIdb.set("temp-late", new Uint8Array([5, 5]).buffer);
+          return snapshot;
+        },
+        clearAllImpl: async () => {
+          clearAllCalls += 1;
+          sharedIdb.clear();
+          return true;
+        },
+      });
+
+      try {
+        const res = await tab.store.clearAllTokens();
+        assert.equal(res.ok, true);
+        assert.equal(clearAllCalls, 0);
+        assert.deepEqual(
+          Array.from(new Uint8Array(sharedIdb.get("temp-late"))),
+          [5, 5],
+        );
+      } finally {
+        tab.pinia._e.stop();
+      }
+    }
+  });
+
+  test("Round8 Self-Audit P2: multi-connection clearAllTokens does not resurrect activeConnections entries, non-open removeToken preserves other tabs, and BIN restore runs concurrently", async () => {
+    // Subcase A: clearAllTokens with 2 open connections must flush activeConnections synchronously so acc1 is not resurrected as connected
+    {
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc1",
+              name: "账号1",
+              roleId: "9201",
+              token: "valid-multi-token-0001",
+              importMethod: "bin",
+            },
+            {
+              id: "acc2",
+              name: "账号2",
+              roleId: "9202",
+              token: "valid-multi-token-0002",
+              importMethod: "bin",
+            },
+          ]),
+        ],
+      ]);
+      const sharedIdb = new Map();
+      const sharedLocks = createLockManager();
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+      });
+      try {
+        await tabA.store.createWebSocketConnection(
+          "acc1",
+          "valid-multi-token-0001",
+        );
+        await tabA.store.createWebSocketConnection(
+          "acc2",
+          "valid-multi-token-0002",
+        );
+        const beforeActive = JSON.parse(
+          sharedStorage.get("activeConnections") || "{}",
+        );
+        assert.equal(beforeActive.acc1?.action, "connected");
+        assert.equal(beforeActive.acc2?.action, "connected");
+
+        const res = await tabA.store.clearAllTokens();
+        assert.equal(res.ok, true);
+        await new Promise((r) => setTimeout(r, 10));
+
+        const afterActive = JSON.parse(
+          sharedStorage.get("activeConnections") || "{}",
+        );
+        assert.deepEqual(
+          afterActive,
+          {},
+          "all cleared connections must be removed from activeConnections without resurrecting earlier keys",
+        );
+        assert.equal(sharedStorage.has("ws_connection_acc1"), false);
+        assert.equal(sharedStorage.has("ws_connection_acc2"), false);
+      } finally {
+        tabA.pinia._e.stop();
+      }
+    }
+
+    // Subcase B: non-open removeToken(acc1) in Tab A merges live activeConnections so Tab B's acc2 stays intact
+    {
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc1",
+              name: "账号1",
+              roleId: "9203",
+              token: "valid-tab-token-0001",
+              importMethod: "bin",
+            },
+            {
+              id: "acc2",
+              name: "账号2",
+              roleId: "9204",
+              token: "valid-tab-token-0002",
+              importMethod: "bin",
+            },
+          ]),
+        ],
+        [
+          "activeConnections",
+          JSON.stringify({
+            acc1: { action: "connected", sessionId: "stale-tab", timestamp: 1 },
+          }),
+        ],
+      ]);
+      const sharedIdb = new Map();
+      const sharedLocks = createLockManager();
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+      });
+      try {
+        // Tab B connects acc2 without delivering a storage event for activeConnections to Tab A
+        await tabB.store.createWebSocketConnection(
+          "acc2",
+          "valid-tab-token-0002",
+        );
+        assert.equal(
+          JSON.parse(sharedStorage.get("activeConnections")).acc2?.action,
+          "connected",
+        );
+
+        const rmRes = await tabA.store.removeToken("acc1");
+        assert.equal(rmRes.ok, true);
+        const afterActive = JSON.parse(
+          sharedStorage.get("activeConnections") || "{}",
+        );
+        assert.equal(afterActive.acc1, undefined);
+        assert.equal(
+          afterActive.acc2?.action,
+          "connected",
+          "Tab B live activeConnections entry must survive Tab A non-open removeToken",
+        );
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+      }
+    }
+
+    // Subcase C: clearAllTokens BIN rollback invokes storeArrayBuffer concurrently via Promise.all
+    {
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc1",
+              name: "号1",
+              roleId: "9211",
+              token: "tok-1",
+              importMethod: "bin",
+            },
+            {
+              id: "acc2",
+              name: "号2",
+              roleId: "9212",
+              token: "tok-2",
+              importMethod: "bin",
+            },
+            {
+              id: "acc3",
+              name: "号3",
+              roleId: "9213",
+              token: "tok-3",
+              importMethod: "bin",
+            },
+          ]),
+        ],
+      ]);
+      const sharedIdb = new Map([
+        ["acc1", new Uint8Array([1]).buffer],
+        ["acc2", new Uint8Array([2]).buffer],
+        ["acc3", new Uint8Array([3]).buffer],
+      ]);
+      const sharedLocks = createLockManager();
+      let inFlightRestores = 0;
+      let maxConcurrentRestores = 0;
+
+      const tab = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+        shouldFailSetItem: (k, v) => k === "gameTokens" && v === "[]",
+        getAllKeysImpl: async () => Array.from(sharedIdb.keys()),
+        storeArrayBufferImpl: async (k, buf) => {
+          inFlightRestores += 1;
+          maxConcurrentRestores = Math.max(
+            maxConcurrentRestores,
+            inFlightRestores,
+          );
+          await new Promise((r) => setTimeout(r, 15));
+          sharedIdb.set(k, buf);
+          inFlightRestores -= 1;
+          return true;
+        },
+      });
+      try {
+        const res = await tab.store.clearAllTokens();
+        assert.equal(res.ok, false);
+        assert.equal(res.reason, "storage_write_failed");
+        assert.equal(
+          maxConcurrentRestores,
+          3,
+          "BIN rollback must dispatch storeArrayBuffer concurrently so stalled openDB shares one readyPromise",
+        );
+      } finally {
+        tab.pinia._e.stop();
+      }
     }
   });
 });

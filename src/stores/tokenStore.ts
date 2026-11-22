@@ -29,12 +29,19 @@ const {
   getArrayBuffer,
   storeArrayBuffer,
   deleteArrayBuffer,
+  getAllKeys,
   clearAll,
   isReady: isIdbReady,
   error: idbError,
 } = useIndexedDB();
 const isIndexedDbUnavailable = () =>
   isIdbReady?.value === false && Boolean(idbError?.value);
+const resetStaleIdbError = () => {
+  if (isIdbReady?.value && idbError) {
+    idbError.value = null;
+  }
+};
+const hasIdbError = () => isIndexedDbUnavailable() || Boolean(idbError?.value);
 
 declare interface TokenData {
   id: string;
@@ -312,7 +319,7 @@ export const selectedToken = computed(() => {
 // 跨标签页连接协调
 const activeConnections = useLocalStorage<
   Record<string, CrossTabConnectionState>
->("activeConnections", {});
+>("activeConnections", {}, { flush: "sync" });
 
 // Token分组管理
 export const tokenGroups = useLocalStorage<TokenGroup[]>("tokenGroups", []);
@@ -1257,6 +1264,156 @@ export const useTokenStore = defineStore("tokens", () => {
     lockWaitTimeoutMs?: number;
   }
 
+  const listLocalStorageKeys = (): string[] => {
+    if (typeof localStorage === "undefined") return [];
+    const keys = new Set<string>();
+    try {
+      Object.keys(localStorage).forEach((key) => keys.add(key));
+    } catch {
+      // Ignore non-enumerable storage proxies.
+    }
+    try {
+      const len = Number(localStorage.length || 0);
+      for (let i = 0; i < len; i += 1) {
+        const key = localStorage.key?.(i);
+        if (typeof key === "string") {
+          keys.add(key);
+        }
+      }
+    } catch {
+      // Ignore storage implementations without key().
+    }
+    return Array.from(keys);
+  };
+
+  const readLiveActiveConnections = (): Record<
+    string,
+    CrossTabConnectionState
+  > => {
+    if (typeof localStorage !== "undefined") {
+      const raw = localStorage.getItem("activeConnections");
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            return { ...parsed };
+          }
+        } catch {
+          // Fall back to in-memory copy when stored JSON is malformed.
+        }
+      }
+    }
+    return { ...(activeConnections.value || {}) };
+  };
+
+  const snapshotLiveActiveConnectionJson = (tokenId: string): string | null => {
+    const entry = readLiveActiveConnections()[tokenId];
+    if (!entry) return null;
+    try {
+      return JSON.stringify(entry);
+    } catch {
+      return null;
+    }
+  };
+
+  const writeActiveConnections = (
+    next: Record<string, CrossTabConnectionState>,
+  ) => {
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem("activeConnections", JSON.stringify(next));
+      } catch {
+        // Ignore storage write errors on advisory activeConnections map.
+      }
+    }
+    activeConnections.value = next;
+  };
+
+  const pruneActiveConnections = (
+    shouldDeleteEntry: (
+      tokenId: string,
+      entry: CrossTabConnectionState,
+    ) => boolean,
+  ) => {
+    const live = readLiveActiveConnections();
+    let changed = false;
+    Object.keys(live).forEach((id) => {
+      const entry = live[id];
+      if (entry && shouldDeleteEntry(id, entry)) {
+        delete live[id];
+        changed = true;
+      }
+    });
+    if (changed) {
+      writeActiveConnections(live);
+    }
+  };
+
+  const removeOwnOrStaleWsLease = (
+    tokenId: string,
+    capturedRaw: string | null,
+    capturedActiveJson: string | null = null,
+  ) => {
+    // If this tab already opened a brand-new local connection for tokenId
+    // after lock release, never remove its active lease.
+    if (wsConnections.value[tokenId]) {
+      return;
+    }
+
+    const matchesOwnedOrCapturedActive = (
+      entry: CrossTabConnectionState | undefined,
+    ) => {
+      if (!entry) return false;
+      if (capturedActiveJson !== null) {
+        try {
+          if (JSON.stringify(entry) === capturedActiveJson) {
+            return true;
+          }
+        } catch {
+          // Ignore non-serializable entries.
+        }
+      }
+      return (
+        entry.sessionId === currentSessionId &&
+        (entry.action === "disconnected" || entry.action === "disconnecting")
+      );
+    };
+
+    pruneActiveConnections(
+      (id, entry) => id === tokenId && matchesOwnedOrCapturedActive(entry),
+    );
+
+    Object.keys(connectionLocks.value).forEach((lockKey) => {
+      if (
+        lockKey.startsWith(`${tokenId}_`) &&
+        connectionLocks.value[lockKey]?.sessionId === currentSessionId
+      ) {
+        delete connectionLocks.value[lockKey];
+      }
+    });
+    if (typeof localStorage !== "undefined") {
+      const key = `ws_connection_${tokenId}`;
+      const currentRaw = localStorage.getItem(key);
+      if (currentRaw === null) return;
+      if (capturedRaw !== null && currentRaw === capturedRaw) {
+        localStorage.removeItem(key);
+        return;
+      }
+      try {
+        const parsed = JSON.parse(currentRaw);
+        if (
+          parsed?.sessionId === currentSessionId &&
+          (parsed?.action === "disconnected" ||
+            parsed?.action === "disconnecting")
+        ) {
+          localStorage.removeItem(key);
+        }
+      } catch {
+        // Leave non-JSON or unrecognized foreign entries untouched.
+      }
+    }
+  };
+
   /**
    * Remove token metadata, its active connection and associated persisted BIN data.
    * Acquires the store-wide write lock before mutating selection or closing connections
@@ -1269,6 +1426,10 @@ export const useTokenStore = defineStore("tokens", () => {
     tokenId: string,
     options: RemoveTokenOptions = {},
   ): Promise<TokenDeletionResult> => {
+    let hadOpenConnection = false;
+    let capturedConnection: Partial<WebSocketConnection> | undefined;
+    let capturedWsLease: string | null = null;
+    let capturedActiveJson: string | null = null;
     let deletionOutcome: TokenDeletionResult;
     try {
       deletionOutcome = await withStoreWriteLease<TokenDeletionResult>(
@@ -1320,14 +1481,17 @@ export const useTokenStore = defineStore("tokens", () => {
           // Backup and delete BIN in IndexedDB BEFORE publishing the removed
           // list to localStorage so an IndexedDB failure never sends a premature
           // cross-tab removal event that tears down other tabs' live state.
+          resetStaleIdbError();
           let previousBin: ArrayBuffer | null = null;
+          let backupThrew = false;
           try {
             previousBin = await getArrayBuffer(tokenId);
           } catch {
+            backupThrew = true;
             previousBin = null;
           }
 
-          if (isIndexedDbUnavailable()) {
+          if (backupThrew || hasIdbError()) {
             return {
               ok: false,
               listCleared: false,
@@ -1336,6 +1500,36 @@ export const useTokenStore = defineStore("tokens", () => {
               reason: "bin_delete_failed",
               message:
                 "删除失败：清理本地 BIN 凭据失败，已保留原账号以便关闭其他标签页后重试",
+            };
+          }
+
+          // Re-verify predicate BEFORE deleting BIN in case another tab
+          // refreshed lastUsed or upgraded this account while getArrayBuffer awaited.
+          syncGameTokensFromStorage();
+          const latestBeforeBinDelete = gameTokens.value.find(
+            (token) => token.id === tokenId,
+          );
+          if (!latestBeforeBinDelete) {
+            return {
+              ok: true,
+              listCleared: true,
+              binCleared: true,
+              retryable: false,
+              reason: null,
+              skipped: true,
+            };
+          }
+          if (
+            options.shouldDelete &&
+            !options.shouldDelete(latestBeforeBinDelete)
+          ) {
+            return {
+              ok: true,
+              listCleared: false,
+              binCleared: false,
+              retryable: false,
+              reason: null,
+              skipped: true,
             };
           }
 
@@ -1362,9 +1556,56 @@ export const useTokenStore = defineStore("tokens", () => {
             };
           }
 
-          // Re-sync after async IndexedDB awaits so unrelated account metadata
-          // updated during the await is preserved.
+          // Re-sync AND re-check predicate AFTER deleteArrayBuffer so an account
+          // selected/refreshed by another tab mid-delete is never deleted (and its
+          // BIN is restored before skipping).
           syncGameTokensFromStorage();
+          const latestAfterBinDelete = gameTokens.value.find(
+            (token) => token.id === tokenId,
+          );
+          if (!latestAfterBinDelete) {
+            return {
+              ok: true,
+              listCleared: true,
+              binCleared: true,
+              retryable: false,
+              reason: null,
+              skipped: true,
+            };
+          }
+          if (
+            options.shouldDelete &&
+            !options.shouldDelete(latestAfterBinDelete)
+          ) {
+            let binRestored = true;
+            if (previousBin) {
+              try {
+                binRestored = Boolean(
+                  await storeArrayBuffer(tokenId, previousBin),
+                );
+              } catch (restoreError) {
+                binRestored = false;
+                wsLogger.warn(
+                  `恢复已重新激活账号的 BIN 凭据失败 [${tokenId}]:`,
+                  restoreError,
+                );
+              }
+              if (!binRestored) {
+                wsLogger.warn(
+                  `恢复已重新激活账号的 BIN 凭据返回失败 [${tokenId}]`,
+                );
+              }
+            }
+            return {
+              ok: true,
+              listCleared: false,
+              binCleared: !binRestored,
+              retryable: false,
+              reason: null,
+              skipped: true,
+            };
+          }
+
           const latestBeforeRemove = [...gameTokens.value];
           bumpCredentialVersion(tokenId);
           withLocalGameTokensWrite(() => {
@@ -1405,6 +1646,27 @@ export const useTokenStore = defineStore("tokens", () => {
             };
           }
 
+          capturedConnection = wsConnections.value[tokenId];
+          hadOpenConnection = Boolean(capturedConnection);
+          if (typeof localStorage !== "undefined") {
+            const rawLease = localStorage.getItem(`ws_connection_${tokenId}`);
+            if (hadOpenConnection) {
+              capturedWsLease = rawLease;
+            } else if (rawLease !== null) {
+              localStorage.removeItem(`ws_connection_${tokenId}`);
+            }
+          }
+          if (hadOpenConnection) {
+            capturedActiveJson = snapshotLiveActiveConnectionJson(tokenId);
+          } else {
+            pruneActiveConnections((id) => id === tokenId);
+            Object.keys(connectionLocks.value).forEach((lockKey) => {
+              if (lockKey.startsWith(`${tokenId}_`)) {
+                delete connectionLocks.value[lockKey];
+              }
+            });
+          }
+
           if (selectedTokenId.value === tokenId) {
             selectedTokenId.value = "";
           }
@@ -1441,23 +1703,17 @@ export const useTokenStore = defineStore("tokens", () => {
     if (!deletionOutcome.ok || deletionOutcome.skipped) {
       if (deletionOutcome.listCleared && wsConnections.value[tokenId]) {
         await closeWebSocketConnectionAsync(tokenId);
+        removeOwnOrStaleWsLease(tokenId, null, null);
       }
       return deletionOutcome;
     }
 
     // 在释放整表写锁后关闭对应WebSocket连接，避免嵌套连接锁死锁
-    if (wsConnections.value[tokenId]) {
-      await closeWebSocketConnectionAsync(tokenId);
-    }
-
-    delete activeConnections.value[tokenId];
-    Object.keys(connectionLocks.value).forEach((lockKey) => {
-      if (lockKey.startsWith(`${tokenId}_`)) {
-        delete connectionLocks.value[lockKey];
+    if (hadOpenConnection) {
+      if (wsConnections.value[tokenId]) {
+        await closeWebSocketConnectionAsync(tokenId, false, capturedConnection);
       }
-    });
-    if (typeof localStorage !== "undefined") {
-      localStorage.removeItem(`ws_connection_${tokenId}`);
+      removeOwnOrStaleWsLease(tokenId, capturedWsLease, capturedActiveJson);
     }
 
     return deletionOutcome;
@@ -2101,7 +2357,12 @@ export const useTokenStore = defineStore("tokens", () => {
         return;
       const state = { action, sessionId, timestamp: Date.now() };
       localStorage.setItem(key, JSON.stringify(state));
-      if (activeConnections.value) activeConnections.value[tokenId] = state;
+      if (activeConnections.value) {
+        writeActiveConnections({
+          ...readLiveActiveConnections(),
+          [tokenId]: state,
+        });
+      }
     } catch (error) {
       wsLogger.warn("更新跨标签页连接状态失败", error);
     }
@@ -2229,8 +2490,10 @@ export const useTokenStore = defineStore("tokens", () => {
       ...Array.from(desiredConnections),
       ...Object.keys(connectionRecoveryStatus.value),
     ]);
+    const removedIds = new Set<string>();
     for (const tokenId of trackedIds) {
       if (validIds.has(tokenId)) continue;
+      removedIds.add(tokenId);
       inFlightBattleVersion.delete(tokenId);
       connectionGeneration.set(
         tokenId,
@@ -2249,12 +2512,14 @@ export const useTokenStore = defineStore("tokens", () => {
         }
         delete wsConnections.value[tokenId];
       }
-      delete activeConnections.value[tokenId];
       Object.keys(connectionLocks.value).forEach((lockKey) => {
         if (lockKey.startsWith(`${tokenId}_`)) {
           delete connectionLocks.value[lockKey];
         }
       });
+    }
+    if (removedIds.size > 0) {
+      pruneActiveConnections((id) => removedIds.has(id));
     }
   };
   gameTokensSyncListeners.add(reconcileRemovedAccountConnections);
@@ -3128,6 +3393,12 @@ export const useTokenStore = defineStore("tokens", () => {
   ): Promise<TokenDeletionResult> => {
     let tokenIdsToCleanup: string[] = [];
     let openConnectionIds: string[] = [];
+    const capturedOpenConnections = new Map<
+      string,
+      Partial<WebSocketConnection>
+    >();
+    const capturedWsLeases = new Map<string, string | null>();
+    const capturedActiveJsons = new Map<string, string | null>();
     let clearOutcome: TokenDeletionResult;
 
     try {
@@ -3167,21 +3438,18 @@ export const useTokenStore = defineStore("tokens", () => {
             };
           }
 
-          // Backup known BIN keys concurrently so all reads share a single
-          // in-flight IndexedDB open attempt instead of multiplying open timeouts.
+          // Enumerate and backup EVERY IndexedDB record (committed accounts AND
+          // pending-import BINs) before clearing, aborting immediately if backup
+          // or DB open fails so pending BINs are never lost on rollback.
+          resetStaleIdbError();
           const backedUpBins = new Map<string, ArrayBuffer>();
-          if (previousTokens.length > 0) {
-            await Promise.all(
-              previousTokens.map(async (token) => {
-                try {
-                  const buf = await getArrayBuffer(token.id);
-                  if (buf) backedUpBins.set(token.id, buf);
-                } catch {
-                  // Ignore individual backup read failures; DB health checked below.
-                }
-              }),
-            );
-            if (isIndexedDbUnavailable()) {
+          const hasGetAllKeys = typeof getAllKeys === "function";
+          let existingIdbKeys: string[] = [];
+          if (hasGetAllKeys) {
+            try {
+              existingIdbKeys = await getAllKeys();
+            } catch (keyError) {
+              wsLogger.error("枚举本地 BIN 凭据失败:", keyError);
               return {
                 ok: false,
                 listCleared: false,
@@ -3189,35 +3457,121 @@ export const useTokenStore = defineStore("tokens", () => {
                 retryable: true,
                 reason: "bin_delete_failed",
                 message:
-                  "清除失败：清空本地 BIN 凭据失败，已保留原有账号列表，请关闭其他标签页后重试",
+                  "清除失败：读取本地 BIN 凭据失败，已保留原有账号与待导入凭据，请关闭其他标签页后重试",
+              };
+            }
+            if (hasIdbError()) {
+              return {
+                ok: false,
+                listCleared: false,
+                binCleared: false,
+                retryable: true,
+                reason: "bin_delete_failed",
+                message:
+                  "清除失败：读取本地 BIN 凭据失败，已保留原有账号与待导入凭据，请关闭其他标签页后重试",
               };
             }
           }
 
-          // Clear IndexedDB BEFORE publishing [] to localStorage so a blocked
-          // IndexedDB never broadcasts a premature removal event to other tabs.
+          const existingKeySet = new Set(existingIdbKeys);
+          const keysToBackup = hasGetAllKeys
+            ? Array.from(existingKeySet)
+            : previousTokens.map((token) => token.id);
+
+          if (keysToBackup.length > 0) {
+            let backupFailed = false;
+            await Promise.all(
+              keysToBackup.map(async (key) => {
+                try {
+                  const buf = await getArrayBuffer(key);
+                  if (buf) {
+                    backedUpBins.set(key, buf);
+                  } else if (hasGetAllKeys && existingKeySet.has(key)) {
+                    backupFailed = true;
+                  }
+                } catch {
+                  backupFailed = true;
+                }
+              }),
+            );
+            if (backupFailed || hasIdbError()) {
+              return {
+                ok: false,
+                listCleared: false,
+                binCleared: false,
+                retryable: true,
+                reason: "bin_delete_failed",
+                message:
+                  "清除失败：备份本地 BIN 凭据失败，已保留原有账号与待导入凭据，请关闭其他标签页后重试",
+              };
+            }
+          }
+
+          // Delete the exact backed-up keys when enumerated via getAllKeys (or
+          // clearAll when getAllKeys is unavailable), BEFORE publishing [] to
+          // localStorage, so backup and deletion cover the exact same record set.
           let binCleared = true;
           try {
-            const cleared = await clearAll();
-            if (cleared === false) {
-              binCleared = false;
+            if (hasGetAllKeys) {
+              if (keysToBackup.length > 0) {
+                resetStaleIdbError();
+                const results = await Promise.all(
+                  keysToBackup.map((key) => deleteArrayBuffer(key)),
+                );
+                if (results.includes(false) || hasIdbError()) {
+                  binCleared = false;
+                }
+              }
+            } else {
+              resetStaleIdbError();
+              const cleared = await clearAll();
+              if (cleared === false || hasIdbError()) {
+                binCleared = false;
+              }
             }
           } catch (idbError) {
             wsLogger.error("清空 IndexedDB BIN 凭据失败:", idbError);
             binCleared = false;
           }
 
+          const restoreBackedUpBins = async () => {
+            let allBinsRestored = true;
+            await Promise.all(
+              Array.from(backedUpBins.entries()).map(async ([key, buf]) => {
+                try {
+                  const ok = await storeArrayBuffer(key, buf);
+                  if (!ok) allBinsRestored = false;
+                } catch {
+                  allBinsRestored = false;
+                }
+              }),
+            );
+            return allBinsRestored;
+          };
+
           if (!binCleared) {
+            // If partial per-key deletion happened, restore all backed-up BINs concurrently.
+            const allBinsRestored = await restoreBackedUpBins();
             return {
               ok: false,
               listCleared: false,
-              binCleared: false,
+              binCleared: !allBinsRestored,
               retryable: true,
               reason: "bin_delete_failed",
-              message:
-                "清除失败：清空本地 BIN 凭据失败，已保留原有账号列表，请关闭其他标签页后重试",
+              message: allBinsRestored
+                ? "清除失败：清空本地 BIN 凭据失败，已保留原有账号与待导入凭据，请关闭其他标签页后重试"
+                : "清除失败：清空本地 BIN 凭据失败且恢复部分凭据失败，请关闭其他标签页后重试清除",
             };
           }
+
+          syncGameTokensFromStorage();
+          const latestBeforeClear = [...gameTokens.value];
+          tokenIdsToCleanup = Array.from(
+            new Set([
+              ...tokenIdsToCleanup,
+              ...latestBeforeClear.map((token) => token.id),
+            ]),
+          );
 
           tokenIdsToCleanup.forEach((tokenId) => {
             previousVersionSnapshots.set(tokenId, {
@@ -3243,19 +3597,11 @@ export const useTokenStore = defineStore("tokens", () => {
           const persisted = persistGameTokensToStorage();
           if (!persisted.ok) {
             withLocalGameTokensWrite(() => {
-              gameTokens.value = previousTokens;
+              gameTokens.value = latestBeforeClear;
             });
             tokenGroups.value = previousGroups;
             restoreAllVersions();
-            let allBinsRestored = true;
-            for (const [key, buf] of backedUpBins.entries()) {
-              try {
-                const ok = await storeArrayBuffer(key, buf);
-                if (!ok) allBinsRestored = false;
-              } catch {
-                allBinsRestored = false;
-              }
-            }
+            const allBinsRestored = await restoreBackedUpBins();
             return {
               ok: false,
               listCleared: false,
@@ -3278,6 +3624,48 @@ export const useTokenStore = defineStore("tokens", () => {
             connectionRecovery.cancel(tokenId);
           });
           openConnectionIds = Object.keys(wsConnections.value);
+          openConnectionIds.forEach((id) => {
+            if (wsConnections.value[id]) {
+              capturedOpenConnections.set(id, wsConnections.value[id]);
+            }
+          });
+          const openConnectionSet = new Set(openConnectionIds);
+
+          // Snapshot and clear non-open ws_connection_* keys INSIDE the lock so
+          // post-lock cleanup never scans or wipes a brand-new account's lease
+          // created by another tab while old local sockets finish closing.
+          if (typeof localStorage !== "undefined") {
+            const leaseKeys = new Set<string>(
+              tokenIdsToCleanup.map((id) => `ws_connection_${id}`),
+            );
+            listLocalStorageKeys().forEach((key) => {
+              if (key.startsWith("ws_connection_")) {
+                leaseKeys.add(key);
+              }
+            });
+            leaseKeys.forEach((key) => {
+              const id = key.replace("ws_connection_", "");
+              const raw = localStorage.getItem(key);
+              if (openConnectionSet.has(id)) {
+                capturedWsLeases.set(id, raw);
+              } else if (raw !== null) {
+                localStorage.removeItem(key);
+              }
+            });
+          }
+          openConnectionIds.forEach((id) => {
+            capturedActiveJsons.set(id, snapshotLiveActiveConnectionJson(id));
+          });
+          pruneActiveConnections((id) => !openConnectionSet.has(id));
+          Object.keys(connectionLocks.value).forEach((lockKey) => {
+            const belongsToOpen = openConnectionIds.some((id) =>
+              lockKey.startsWith(`${id}_`),
+            );
+            if (!belongsToOpen) {
+              delete connectionLocks.value[lockKey];
+            }
+          });
+
           tokenGroups.value = [];
           accountGameData.clear();
           return {
@@ -3308,32 +3696,35 @@ export const useTokenStore = defineStore("tokens", () => {
     if (openConnectionIds.length > 0) {
       await Promise.all(
         openConnectionIds.map((tokenId) =>
-          closeWebSocketConnectionAsync(tokenId),
+          closeWebSocketConnectionAsync(
+            tokenId,
+            false,
+            capturedOpenConnections.get(tokenId),
+          ),
         ),
       );
     }
 
     if (!clearOutcome.ok) {
       if (clearOutcome.listCleared) {
-        connectionLocks.value = {};
-        activeConnections.value = {};
+        openConnectionIds.forEach((tokenId) => {
+          removeOwnOrStaleWsLease(
+            tokenId,
+            capturedWsLeases.get(tokenId) ?? null,
+            capturedActiveJsons.get(tokenId) ?? null,
+          );
+        });
       }
       return clearOutcome;
     }
 
-    connectionLocks.value = {};
-    activeConnections.value = {};
-
-    if (typeof localStorage !== "undefined") {
-      tokenIdsToCleanup.forEach((tokenId) => {
-        localStorage.removeItem(`ws_connection_${tokenId}`);
-      });
-      Object.keys(localStorage).forEach((key) => {
-        if (key.startsWith("ws_connection_")) {
-          localStorage.removeItem(key);
-        }
-      });
-    }
+    openConnectionIds.forEach((tokenId) => {
+      removeOwnOrStaleWsLease(
+        tokenId,
+        capturedWsLeases.get(tokenId) ?? null,
+        capturedActiveJsons.get(tokenId) ?? null,
+      );
+    });
 
     return clearOutcome;
   };
@@ -3474,12 +3865,25 @@ export const useTokenStore = defineStore("tokens", () => {
         });
 
         // 清理过期的跨标签页状态（超过5分钟）
-        Object.entries(activeConnections.value).forEach(([tokenId, state]) => {
+        pruneActiveConnections((tokenId, state) => {
           if (now - state.timestamp > 300000) {
             wsLogger.debug(`清理过期跨标签页状态: ${tokenId}`);
-            delete activeConnections.value[tokenId];
-            localStorage.removeItem(`ws_connection_${tokenId}`);
+            if (typeof localStorage !== "undefined") {
+              try {
+                const raw = localStorage.getItem(`ws_connection_${tokenId}`);
+                if (raw) {
+                  const parsed = JSON.parse(raw);
+                  if (now - (parsed?.timestamp || 0) > 300000) {
+                    localStorage.removeItem(`ws_connection_${tokenId}`);
+                  }
+                }
+              } catch {
+                // Ignore malformed ws_connection_* entries.
+              }
+            }
+            return true;
           }
+          return false;
         });
       }, 10000); // 每10秒检查一次
     },
@@ -3551,7 +3955,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
       // 清理所有锁和状态
       connectionLocks.value = {};
-      activeConnections.value = {};
+      writeActiveConnections({});
       desiredConnections.clear();
       Object.keys(connectionRecoveryStatus.value).forEach((id) => {
         connectionRecovery.cancel(id);
