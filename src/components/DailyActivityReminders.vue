@@ -1,6 +1,6 @@
 <template>
   <section
-    v-if="days.dream || days.camp"
+    v-if="days.dream || days.camp || days.legionWar || weeklyQuizReminder"
     class="activity-reminders"
     aria-label="今日活动提醒"
   >
@@ -24,6 +24,24 @@
         <p>{{ campText }} · 开放时间 10:00–22:00</p>
       </div>
       <button type="button" @click="emit('navigate', 'camp')">查看营地</button>
+    </div>
+    <div v-if="days.legionWar" class="reminder-row">
+      <div>
+        <strong>盐场争夺战</strong>
+        <p>当前处于盐场开放时段，可前往查看盐场信息。</p>
+      </div>
+      <button type="button" @click="emit('navigate', 'legionWar')">
+        查看盐场
+      </button>
+    </div>
+    <div v-if="weeklyQuizReminder" class="reminder-row">
+      <div>
+        <strong>咸鱼大冲关（每周答题）</strong>
+        <p>{{ weeklyQuizReminder }}</p>
+      </div>
+      <button type="button" @click="emit('navigate', 'daily')">
+        去执行日常
+      </button>
     </div>
   </section>
 </template>
@@ -60,6 +78,40 @@ watch(
 const connected = computed(() => {
   const id = tokenStore.selectedToken?.id;
   return !!id && tokenStore.getWebSocketStatus(id) === "connected";
+});
+const weeklyQuizReminder = computed(() => {
+  if (!connected.value) return "";
+  const role = tokenStore.gameData?.roleInfo?.role;
+  const taskDay = role?.dailyTask?.dailyTime;
+  const study = role?.study;
+  if (
+    !Number.isSafeInteger(taskDay) ||
+    taskDay <= 0 ||
+    !Number.isSafeInteger(study?.beginTime) ||
+    study.beginTime < 0
+  )
+    return "";
+  const toDay = (sec) => Math.floor((sec + 8 * 3600) / 86400);
+  const today = toDay(taskDay);
+  const weekStart = today - ((today + 3) % 7);
+  const started = study.beginTime > 0 ? toDay(study.beginTime) : -1;
+  const currentWeek = started >= weekStart;
+  const taskComplete = currentWeek ? (study.taskComplete ?? {}) : {};
+  const states =
+    taskComplete instanceof Map
+      ? Array.from(taskComplete.values())
+      : Object.values(taskComplete);
+  if (states.includes("yes")) {
+    return "本周咸鱼大冲关有待领取奖励，执行每日任务时可自动领取。";
+  }
+  if (!currentWeek) {
+    return "本周尚未完成咸鱼大冲关，执行每日任务时可自动答题。";
+  }
+  const maxCorrect = Number(study.maxCorrectNum) || 0;
+  if (maxCorrect < 10 && started !== today) {
+    return `本周最高答对 ${maxCorrect} 题，今日可继续参与冲关。`;
+  }
+  return "";
 });
 const campText = ref("挑战进度待确认");
 let sequence = 0;

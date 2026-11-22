@@ -78,30 +78,59 @@ const formatTime = (seconds) => {
   return `${h}:${m}:${s}`;
 };
 
-const syncFromRole = () => {
-  const role = roleInfo.value?.role;
-  if (!role?.bottleHelpers) return;
-  const now = Date.now() / 1000;
-  state.value.stopTime = role.bottleHelpers.helperStopTime;
-  state.value.isRunning = role.bottleHelpers.helperStopTime > now;
-  state.value.remainingTime = Math.max(
-    0,
-    Math.floor(role.bottleHelpers.helperStopTime - now),
-  );
+let serverOffsetMs = 0;
+
+const recomputeFromTimestamp = () => {
+  if (!Number.isFinite(state.value.stopTime) || state.value.stopTime <= 0) {
+    state.value.isRunning = false;
+    state.value.remainingTime = 0;
+    return;
+  }
+  const nowSec = (Date.now() + serverOffsetMs) / 1000;
+  const remaining = Math.max(0, Math.floor(state.value.stopTime - nowSec));
+  state.value.remainingTime = remaining;
+  state.value.isRunning = remaining > 0;
 };
 
-watch(roleInfo, () => syncFromRole(), { deep: true, immediate: true });
+const syncFromRole = () => {
+  const stopTime = roleInfo.value?.role?.bottleHelpers?.helperStopTime;
+  if (!Number.isFinite(stopTime)) return;
+  const tokenId = tokenStore.selectedToken?.id;
+  const clientServerTime = tokenId
+    ? tokenStore.wsConnections?.[tokenId]?.client?.serverTime
+    : null;
+  serverOffsetMs =
+    Number.isFinite(clientServerTime) && clientServerTime > 0
+      ? clientServerTime - Date.now()
+      : 0;
+  state.value.stopTime = stopTime;
+  recomputeFromTimestamp();
+};
+
+watch(
+  () => [
+    tokenStore.selectedToken?.id,
+    roleInfo.value?.role?.bottleHelpers?.helperStopTime,
+  ],
+  () => syncFromRole(),
+  { immediate: true },
+);
+
+const handleVisibilityChange = () => {
+  if (document.visibilityState === "visible") {
+    recomputeFromTimestamp();
+  }
+};
 
 let timer = null;
 onMounted(() => {
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   timer = setInterval(() => {
-    if (state.value.isRunning && state.value.remainingTime > 0) {
-      state.value.remainingTime = Math.max(0, state.value.remainingTime - 1);
-      if (state.value.remainingTime <= 0) state.value.isRunning = false;
-    }
+    recomputeFromTimestamp();
   }, 1000);
 });
 onUnmounted(() => {
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
   if (timer) clearInterval(timer);
 });
 

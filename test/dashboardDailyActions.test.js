@@ -127,8 +127,13 @@ test("服务端结果不完整时不误报完成", async () => {
 test("首页每日摘要显示服务器跳过的步骤数", async () => {
   const f = fixture();
   const pending = f.api.run("daily");
+  f.calls[0].onProgress("执行: 免费点金 1");
   f.finish({ incomplete: 0, failed: 0, skipped: 3 });
   await pending;
   assert.match(f.api.results.a.text, /跳过 3/);
+  assert.ok(Array.isArray(f.api.results.a.logs));
+  assert.ok(
+    f.api.results.a.logs.some((entry) => entry.text.includes("免费点金 1")),
+  );
   f.scope.stop();
 });

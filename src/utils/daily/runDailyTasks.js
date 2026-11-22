@@ -2,6 +2,8 @@ import { runDailyDreamPurchase } from "../dailyDreamPurchase.js";
 import { DailyTaskRunner } from "../dailyTaskRunner.js";
 import { markDreamShopChecked } from "../dreamShopCheckState.js";
 
+export { markDreamShopChecked };
+
 /** Shared entry point for dashboard, daily view and batch scheduling. */
 export function runDailyTasks({
   tokenStore,

@@ -302,3 +302,156 @@ describe("tokenStore clearAllTokens and background monitoring", () => {
     pinia._e.stop();
   });
 });
+
+describe("Commit 2 daily player UX checks", () => {
+  test("BatchHelperModals and BatchTemplateModals stay aligned with daily settings", async () => {
+    const helperModal = await readFile(
+      new URL(
+        "../src/components/BatchDaily/BatchHelperModals.vue",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const templateModal = await readFile(
+      new URL(
+        "../src/components/BatchDaily/BatchTemplateModals.vue",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    assert.match(helperModal, /settingsDraft\.claimLegacy/);
+    assert.match(templateModal, /templateDraft\.claimLegacy/);
+    assert.match(templateModal, /templateDraft\.weeklyQuizEnabled/);
+    assert.match(templateModal, /templateDraft\.dreamShopPurchase/);
+  });
+
+  test("DailyTaskRunner skips bottlehelper_stop when bottle is already stopped and keeps box/blackmarket intact", async () => {
+    const { DailyTaskRunner } = await loadModule(
+      new URL("../src/utils/dailyTaskRunner.js", import.meta.url),
+      {
+        "@/utils/dailyTaskState":
+          await import("../src/utils/dailyTaskState.js"),
+        "@/utils/dailyTaskSettings":
+          await import("../src/utils/dailyTaskSettings.js"),
+        "./accountConnection.js":
+          await import("../src/utils/accountConnection.js"),
+        "./accountIdentity.js": accountIdentity,
+        "./daily/arena.js": await import("../src/utils/daily/arena.js"),
+        "./daily/dream.js": await import("../src/utils/daily/dream.js"),
+        "./weeklyQuiz.js": await import("../src/utils/weeklyQuiz.js"),
+      },
+    );
+
+    const calls = [];
+    const role = {
+      dailyTask: {
+        dailyTime: 1700000000,
+        complete: {
+          1: -1,
+          2: -1,
+          3: -1,
+          4: -1,
+          5: -1,
+          6: -1,
+          7: 0,
+          12: 0,
+          13: -1,
+          14: 0,
+        },
+        dailyPoint: 0,
+        dailyReward: {},
+        weekPoint: 0,
+        weekReward: {},
+      },
+      bottleHelpers: { helperStopTime: 1699999000 },
+      statistics: {
+        "artifact:normal:lottery:time": 1700000010,
+        "genie:sweep:buy": 3,
+      },
+      statisticsTime: {
+        "genie:sweep:buy": 1700000010,
+        "legion:sign:in": 1700000010,
+        "genie:daily:free:1": 1700000010,
+        "genie:daily:free:2": 1700000010,
+        "genie:daily:free:3": 1700000010,
+        "genie:daily:free:4": 1700000010,
+      },
+    };
+    const store = {
+      gameTokens: [{ id: "acc1", name: "主号" }],
+      selectedToken: { id: "acc1" },
+      wsConnections: { acc1: { client: { serverTime: 1700000100 * 1000 } } },
+      getWebSocketStatus: () => "connected",
+      sendGetRoleInfo: async () => ({ role: structuredClone(role) }),
+      sendMessageWithPromise: async (_id, cmd, params) => {
+        calls.push({ cmd, params });
+        if (cmd === "presetteam_getinfo")
+          return { presetTeamInfo: { useTeamId: 1 } };
+        return {};
+      },
+    };
+    const runner = new DailyTaskRunner(
+      store,
+      { commandDelay: 0, taskDelay: 0 },
+      {
+        loadConfig: async () => ({
+          tasks: [
+            [1, 1, 1],
+            [2, 2, 1],
+            [3, 3, 3],
+            [4, 4, 2],
+            [5, 5, 5],
+            [6, 6, 3],
+            [7, 7, 3],
+            [8, 13, 1],
+            [9, 12, 1],
+            [10, 14, 1],
+          ].map(([id, completeCondition, completeValue]) => ({
+            id,
+            completeCondition,
+            completeValue,
+          })),
+          dailyRewards: [],
+          weeklyRewards: [],
+        }),
+        sleep: async () => {},
+        getCurrentHour: () => 10,
+      },
+    );
+
+    await runner.run(
+      "acc1",
+      {},
+      {
+        arenaFormation: 1,
+        bossFormation: 1,
+        bossTimes: 0,
+        claimBottle: true,
+        payRecruit: false,
+        openBox: true,
+        arenaEnable: false,
+        claimHangUp: false,
+        claimLegacy: false,
+        claimEmail: false,
+        weeklyQuizEnabled: false,
+        blackMarketPurchase: true,
+        dreamShopPurchase: false,
+        freeGachaEnable: false,
+      },
+    );
+
+    assert.equal(
+      calls.some((c) => c.cmd === "bottlehelper_stop"),
+      false,
+    );
+    assert.equal(
+      calls.some((c) => c.cmd === "bottlehelper_start"),
+      true,
+    );
+    const boxCall = calls.find((c) => c.cmd === "item_openbox");
+    const storeCall = calls.find((c) => c.cmd === "store_purchase");
+    assert.equal(boxCall?.params?.itemId, 2001);
+    assert.equal(boxCall?.params?.number, 10);
+    assert.equal(storeCall?.params?.goodsId, 1);
+  });
+});

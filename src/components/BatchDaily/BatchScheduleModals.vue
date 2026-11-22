@@ -3,6 +3,7 @@ defineProps({
   showTasksModal: { type: Boolean, default: false },
   scheduledTasks: { type: Array, default: () => [] },
   taskCountdowns: { type: Object, default: () => ({}) },
+  taskRunHistory: { type: Object, default: () => ({}) },
   executingTaskIds: { type: Array, default: () => [] },
   uiBusy: { type: Boolean, default: false },
 
@@ -100,9 +101,32 @@ const emit = defineEmits([
           <span class="task-meta-label">选中账号：</span>
           <span>{{ task.selectedTokens.length }} 个</span>
         </div>
-        <div style="margin-bottom: 8px">
+        <div style="margin-bottom: 4px">
           <span class="task-meta-label">选中任务：</span>
           <span>{{ task.selectedTasks.length }} 个</span>
+        </div>
+        <div
+          v-if="taskRunHistory[task.id]?.lastRunAt"
+          style="margin-bottom: 8px"
+        >
+          <span class="task-meta-label">上次执行：</span>
+          <span>
+            {{ new Date(taskRunHistory[task.id].lastRunAt).toLocaleString() }}
+            （{{
+              {
+                completed: "完成",
+                partial: "部分完成",
+                pending: "待检查",
+                failed: "失败",
+                stopped: "已停止",
+              }[taskRunHistory[task.id].lastRunStatus] ||
+              taskRunHistory[task.id].lastRunStatus
+            }}）
+          </span>
+        </div>
+        <div v-else style="margin-bottom: 8px">
+          <span class="task-meta-label">上次执行：</span>
+          <span>暂无记录</span>
         </div>
         <div style="display: flex; gap: 8px">
           <n-button size="tiny" @click="emit('editTask', task)">编辑</n-button>

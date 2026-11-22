@@ -39,6 +39,7 @@ export class DailyTaskRunner {
     this.loadConfig = options.loadConfig || loadDailyTaskConfig;
     this.runDreamShopPurchases = options.runDreamShopPurchases || null;
     this.onDreamShopChecked = options.onDreamShopChecked || null;
+    this.hasCustomSleep = typeof options.sleep === "function";
     this.sleep =
       options.sleep ||
       ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -50,6 +51,23 @@ export class DailyTaskRunner {
       commandDelay: 500,
       taskDelay: 500,
     };
+  }
+
+  async waitInterruptible(ms) {
+    const duration = Math.max(0, Number(ms) || 0);
+    if (duration <= 0) return;
+    if (this.hasCustomSleep) {
+      await this.sleep(duration);
+      return;
+    }
+    const deadline = Date.now() + duration;
+    while (true) {
+      if (this.restoringFormation) this.assertRunConnection();
+      else this.throwIfInterrupted();
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      await this.sleep(Math.min(remaining, 250));
+    }
   }
 
   log(message, type = "info") {
@@ -430,7 +448,13 @@ export class DailyTaskRunner {
                 Number.isFinite(lastTime)
                   ? Math.max(lastTime * 1000 + interval - serverTime, 0)
                   : interval;
-              await this.sleep(wait);
+              if (wait >= 1000) {
+                this.log(
+                  `等待挂机领取冷却 ${Math.ceil(wait / 1000)} 秒...`,
+                  "info",
+                );
+              }
+              await this.waitInterruptible(wait);
             }
             return this.executeGameCommand(
               tokenId,
@@ -492,17 +516,28 @@ export class DailyTaskRunner {
     }
 
     if (!isTaskCompleted(14) && settings.claimBottle) {
-      taskList.push({
-        name: "停止盐罐计时",
-        condition: 14,
-        execute: () =>
-          this.executeGameCommand(
-            tokenId,
-            "bottlehelper_stop",
-            {},
-            "停止盐罐计时",
-          ),
-      });
+      const bottleStopTime = roleData.bottleHelpers?.helperStopTime;
+      const serverTimeMs =
+        this.tokenStore.wsConnections?.[tokenId]?.client?.serverTime;
+      const nowSec =
+        Number.isFinite(serverTimeMs) && serverTimeMs > 0
+          ? serverTimeMs / 1000
+          : Date.now() / 1000;
+      const shouldStopBottleFirst =
+        !Number.isFinite(bottleStopTime) || bottleStopTime > nowSec;
+      if (shouldStopBottleFirst) {
+        taskList.push({
+          name: "停止盐罐计时",
+          condition: 14,
+          execute: () =>
+            this.executeGameCommand(
+              tokenId,
+              "bottlehelper_stop",
+              {},
+              "停止盐罐计时",
+            ),
+        });
+      }
       taskList.push({
         name: "开始盐罐计时",
         condition: 14,

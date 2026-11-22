@@ -5,7 +5,12 @@
       <div class="main-container">
         <div class="dashboard-heading">
           <div>
-            <p class="dashboard-date">{{ currentDate }}</p>
+            <p class="dashboard-date">
+              {{ currentDate }}
+              <span v-if="currentActivityWeek" class="activity-week-pill">
+                本周：{{ currentActivityWeek }}
+              </span>
+            </p>
             <h1>今天的操作</h1>
             <p>从常用任务开始，其他功能随时可以打开。</p>
           </div>
@@ -50,6 +55,25 @@
           </n-button>
         </div>
 
+        <div
+          v-if="accountNotice"
+          class="account-notice"
+          :class="`is-${accountNotice.type}`"
+          role="status"
+          aria-live="polite"
+        >
+          <span>{{ accountNotice.text }}</span>
+          <n-button
+            v-if="accountNotice.showRelogin"
+            size="tiny"
+            type="warning"
+            secondary
+            @click="handleManageTokens"
+          >
+            重新登录
+          </n-button>
+        </div>
+
         <DailyActivityReminders @navigate="openReminder" />
 
         <section class="today-panel" aria-label="今日常用操作">
@@ -83,6 +107,9 @@
               <span class="today-item-name">
                 <strong>盐罐、挂机与残卷</strong>
                 <span>一键处理盐罐、挂机和功法残卷</span>
+              </span>
+              <span v-if="isConnected" class="today-item-status">
+                <span>{{ maintenanceSummary }}</span>
               </span>
             </button>
             <button
@@ -156,6 +183,20 @@
           >
             {{ dashboardDailyResult.text }}
           </p>
+          <details v-if="dashboardDailyLogs.length" class="quick-logs">
+            <summary>
+              查看本次执行日志（{{ dashboardDailyLogs.length }} 条）
+            </summary>
+            <ul class="quick-log-list">
+              <li
+                v-for="(entry, index) in dashboardDailyLogs"
+                :key="`${entry.time}-${index}`"
+              >
+                <span class="quick-log-time">{{ entry.time }}</span>
+                <span>{{ entry.text }}</span>
+              </li>
+            </ul>
+          </details>
           <n-button size="small" @click="router.push('/admin/game-features')"
             >进入日常页</n-button
           >
@@ -191,7 +232,7 @@
 
 <script setup>
 import { useMessage } from "naive-ui";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import DailyActivityReminders from "@/components/DailyActivityReminders.vue";
 import { useDashboardDailyActions } from "@/composables/useDashboardDailyActions";
@@ -200,6 +241,7 @@ import useIndexedDB from "@/hooks/useIndexedDB";
 import { formatShanghaiDate, useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
 import { compactApexGuessStatus } from "@/utils/apexGuessHelper.js";
+import { getCurrentActivityWeek } from "@/utils/batch/viewHelpers";
 import { runBottleAndHangUp } from "@/utils/bottleAndHangUp";
 import { runDailyTasks } from "@/utils/daily/runDailyTasks.js";
 import {
@@ -213,8 +255,21 @@ const openDailyTarget = (daily) => {
   if (["tasks", "maintenance", "apex"].includes(daily))
     return router.push({ path: "/admin/game-features", query: { daily } });
 };
-const openReminder = (kind) =>
-  router.push({ path: "/admin/game-features", query: { reminder: kind } });
+const openReminder = (kind) => {
+  if (kind === "legionWar") {
+    return router.push("/admin/legion-war");
+  }
+  if (kind === "daily") {
+    return router.push({
+      path: "/admin/game-features",
+      query: { daily: "tasks" },
+    });
+  }
+  return router.push({
+    path: "/admin/game-features",
+    query: { reminder: kind },
+  });
+};
 const message = useMessage();
 const tokenStore = useTokenStore();
 const { getArrayBuffer } = useIndexedDB();
@@ -242,6 +297,15 @@ const dailyActions = useDashboardDailyActions(tokenStore, {
 const dashboardDailyResult = computed(
   () => dailyActions.results[tokenStore.selectedToken?.id] || null,
 );
+const dashboardDailyLogs = computed(() => {
+  if (
+    dailyActions.state.running &&
+    dailyActions.state.tokenId === tokenStore.selectedToken?.id
+  ) {
+    return dailyActions.state.logs || [];
+  }
+  return dashboardDailyResult.value?.logs || [];
+});
 
 const openGame = async () => {
   const token = tokenStore.selectedToken;
@@ -283,6 +347,9 @@ const openGame = async () => {
 // 计算属性
 const now = useShanghaiClock();
 const currentDate = computed(() => formatShanghaiDate(now.value));
+const currentActivityWeek = computed(() => getCurrentActivityWeek(now.value));
+const secondTickMs = ref(Date.now());
+let secondTimer = null;
 
 const isConnected = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
@@ -384,6 +451,66 @@ const dailyProgress = computed(() => {
     : "等待更新";
 });
 
+const formatCompactDuration = (seconds) => {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  if (h > 0) return `${h}小时${String(m).padStart(2, "0")}分`;
+  const s = total % 60;
+  return `${m}分${String(s).padStart(2, "0")}秒`;
+};
+
+const maintenanceSummary = computed(() => {
+  if (!isConnected.value) return "未连接";
+  const role = tokenStore.gameData?.roleInfo?.role;
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!role || !tokenId) return "等待更新";
+  const client = tokenStore.wsConnections?.[tokenId]?.client;
+  const nowSec =
+    Number.isFinite(client?.serverTime) && client.serverTime > 0
+      ? client.serverTime / 1000
+      : secondTickMs.value / 1000;
+
+  const parts = [];
+  const bottleStop = role.bottleHelpers?.helperStopTime;
+  if (Number.isFinite(bottleStop)) {
+    const left = Math.floor(bottleStop - nowSec);
+    parts.push(left > 0 ? `盐罐剩 ${formatCompactDuration(left)}` : "盐罐已停");
+  }
+  const hangUp = role.hangUp;
+  if (
+    Number.isFinite(hangUp?.lastTime) &&
+    Number.isFinite(hangUp?.hangUpTime)
+  ) {
+    const left = Math.floor(hangUp.lastTime + hangUp.hangUpTime - nowSec);
+    parts.push(left > 0 ? `挂机剩 ${formatCompactDuration(left)}` : "挂机已满");
+  }
+  return parts.length ? parts.join(" · ") : "等待更新";
+});
+
+const accountNotice = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  if (!tokenId || isConnected.value) return null;
+  const conn = tokenStore.wsConnections?.[tokenId];
+  const lastError = conn?.lastError?.error || "";
+  if (/凭据已失效|token expired|重新登录/i.test(lastError)) {
+    return {
+      type: "warning",
+      text: "当前账号登录凭据已失效，请前往账号管理扫码或验证码原地刷新（无需清除账号）。",
+      showRelogin: true,
+    };
+  }
+  const recovery = tokenStore.connectionRecoveryStatus?.[tokenId];
+  if (recovery === "waiting") {
+    return {
+      type: "info",
+      text: "连接已断开，正在自动等待重连；若长时间未恢复可点击重新登录。",
+      showRelogin: true,
+    };
+  }
+  return null;
+});
+
 const handleManageTokens = () => {
   // 降噪
   /* 当前Token状态:
@@ -442,6 +569,29 @@ onMounted(async () => {
 
   // 初始化Token数据
   tokenStore.initTokenStore();
+
+  // 进入首页时自动为当前选中账号建立连接，减少每次手动点“连接”
+  const selected = tokenStore.selectedToken;
+  if (
+    selected &&
+    tokenStore.getWebSocketStatus(selected.id) === "disconnected" &&
+    !tokenStore.isConnectionActiveInAnotherTab?.(selected.id)
+  ) {
+    connectSelectedAccount();
+  }
+
+  secondTimer = window.setInterval(() => {
+    if (isConnected.value && document.visibilityState === "visible") {
+      secondTickMs.value = Date.now();
+    }
+  }, 1000);
+});
+
+onUnmounted(() => {
+  if (secondTimer) {
+    window.clearInterval(secondTimer);
+    secondTimer = null;
+  }
 });
 </script>
 
@@ -482,6 +632,78 @@ onMounted(async () => {
 }
 
 .dashboard-date {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-week-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--primary-color-light, rgba(24, 160, 88, 0.12));
+  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.account-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  border: 1px solid var(--border-light);
+  background: var(--bg-primary);
+
+  &.is-warning {
+    border-color: rgba(240, 160, 32, 0.45);
+    background: rgba(240, 160, 32, 0.08);
+    color: var(--text-primary);
+  }
+}
+
+.quick-logs {
+  width: 100%;
+  font-size: 13px;
+  color: var(--text-secondary);
+
+  summary {
+    width: fit-content;
+    cursor: pointer;
+    color: var(--primary-color);
+  }
+}
+
+.quick-log-list {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  list-style: none;
+  max-height: 220px;
+  overflow-y: auto;
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  li {
+    display: flex;
+    gap: 8px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+}
+
+.quick-log-time {
+  flex: none;
+  color: var(--text-tertiary);
   font-variant-numeric: tabular-nums;
 }
 

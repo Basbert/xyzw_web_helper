@@ -138,6 +138,10 @@ const handleSelectGroupForApply = (groupId) => {
             <n-switch v-model:value="templateDraft.claimHangUp" />
           </div>
           <div class="switch-row">
+            <span class="switch-label">领功法残卷</span>
+            <n-switch v-model:value="templateDraft.claimLegacy" />
+          </div>
+          <div class="switch-row">
             <span class="switch-label">竞技场</span>
             <n-switch v-model:value="templateDraft.arenaEnable" />
           </div>
@@ -150,12 +154,20 @@ const handleSelectGroupForApply = (groupId) => {
             <n-switch v-model:value="templateDraft.claimEmail" />
           </div>
           <div class="switch-row">
+            <span class="switch-label">咸鱼大冲关（每周答题）</span>
+            <n-switch v-model:value="templateDraft.weeklyQuizEnabled" />
+          </div>
+          <div class="switch-row">
             <span class="switch-label">黑市购买物品</span>
             <n-switch v-model:value="templateDraft.blackMarketPurchase" />
           </div>
           <div class="switch-row">
             <span class="switch-label">付费招募</span>
             <n-switch v-model:value="templateDraft.payRecruit" />
+          </div>
+          <div class="switch-row">
+            <span class="switch-label">梦境金币商品及高级商人黄金鱼竿</span>
+            <n-switch v-model:value="templateDraft.dreamShopPurchase" />
           </div>
         </div>
       </div>

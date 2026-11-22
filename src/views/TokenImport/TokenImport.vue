@@ -6,6 +6,26 @@
         <div class="header-content">
           <div class="header-top">
             <img src="/icons/xiaoyugan.png" alt="XYZW" class="brand-logo" />
+            <div v-if="tokenStore.hasTokens" class="header-quick-nav">
+              <n-button
+                size="small"
+                secondary
+                @click="router.push('/admin/dashboard')"
+              >
+                <template #icon>
+                  <NIcon><Home /></NIcon>
+                </template>
+                返回首页
+              </n-button>
+              <n-button
+                size="small"
+                type="primary"
+                secondary
+                @click="router.push('/admin/game-features')"
+              >
+                进入日常页
+              </n-button>
+            </div>
             <!-- 主题切换按钮 -->
             <ThemeToggle />
           </div>
@@ -1947,6 +1967,24 @@ onUnmounted(() => {
   position: relative;
   width: 100%;
   justify-content: center;
+  flex-wrap: wrap;
+}
+
+.header-quick-nav {
+  position: absolute;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 640px) {
+  .header-quick-nav {
+    position: static;
+    width: 100%;
+    justify-content: center;
+    order: 2;
+  }
 }
 
 .theme-toggle {

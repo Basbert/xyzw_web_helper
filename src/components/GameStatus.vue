@@ -85,6 +85,17 @@
                 : "一键处理盐罐、挂机与残卷"
             }}
           </n-button>
+          <n-button
+            v-if="combinedBusy"
+            size="small"
+            type="error"
+            secondary
+            block
+            style="margin-top: 8px"
+            @click="stopCombinedDailyAction"
+          >
+            停止后续操作
+          </n-button>
           <p
             v-if="combinedResult && !combinedBusy"
             class="combined-daily-result"
@@ -110,7 +121,13 @@
       class="daily-extras"
       aria-label="爬塔和阵容"
     >
-      <WeirdTowerStatus />
+      <WeirdTowerStatus v-if="isWeirdTowerWeek" />
+      <details v-else class="weird-tower-collapsed">
+        <summary>怪异塔（当前非黑市周，暂未开放；点击可展开查看）</summary>
+        <div class="weird-tower-collapsed-body">
+          <WeirdTowerStatus />
+        </div>
+      </details>
       <TowerStatus v-if="activeSection === 'daily' && isShowTowerStatus" />
       <TeamFormation />
     </section>
@@ -404,7 +421,9 @@ import {
   watch,
 } from "vue";
 import { useRoute } from "vue-router";
+import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
+import { getCurrentActivityWeek } from "@/utils/batch/viewHelpers";
 import { runBottleAndHangUp } from "@/utils/bottleAndHangUp";
 
 import ApexGuessCard from "./cards/ApexGuessCard.vue";
@@ -545,6 +564,17 @@ const combinedConnected = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
   return tokenId && tokenStore.getWebSocketStatus(tokenId) === "connected";
 });
+const shanghaiNow = useShanghaiClock();
+const isWeirdTowerWeek = computed(
+  () => getCurrentActivityWeek(shanghaiNow.value) === "黑市周",
+);
+
+const stopCombinedDailyAction = () => {
+  if (!combinedBusy.value) return;
+  combinedGeneration++;
+  combinedProgress.value = "正在停止，等待当前请求结束";
+  message.info("已请求停止，当前步骤完成后结束");
+};
 
 const runCombinedDailyAction = async () => {
   const tokenId = tokenStore.selectedToken?.id;
@@ -674,6 +704,14 @@ const route = useRoute();
 let dreamObserver;
 const openReminder = async (kind) => {
   if (kind === "camp") activeSection.value = "campChallengeGroup";
+  if (kind === "legionWar") activeSection.value = "saltFieldGroup";
+  if (kind === "daily") {
+    activeSection.value = "daily";
+    await nextTick();
+    const target = document.getElementById("daily-task-target");
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ behavior: "auto", block: "start" });
+  }
   if (kind === "dream") {
     dreamInitialTab.value = "buy";
     activeSection.value = "tools";
@@ -813,6 +851,25 @@ onUnmounted(() => {
   grid-column: 1 / -1;
   padding: 20px;
   color: var(--text-secondary);
+}
+
+.weird-tower-collapsed {
+  grid-column: 1 / -1;
+  padding: 12px 16px;
+  border: 1px dashed var(--border-light);
+  border-radius: 12px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-size: 13px;
+
+  summary {
+    cursor: pointer;
+    font-weight: 500;
+  }
+}
+
+.weird-tower-collapsed-body {
+  margin-top: 12px;
 }
 .game-status-container {
   display: grid;

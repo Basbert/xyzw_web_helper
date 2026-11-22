@@ -26,6 +26,7 @@ export function createTasksDungeon(deps) {
     addLog,
     message,
     currentRunningTokenId,
+    markDreamShopChecked,
   } = deps;
 
   const markMissing = (tokenId) => {
@@ -444,6 +445,12 @@ export function createTasksDungeon(deps) {
             });
             check();
             if (!operations.length) {
+              if (levelId >= 4000) {
+                markDreamShopChecked?.({
+                  roleId: roleInfo.role.roleId ?? token.roleId,
+                  taskDay: roleInfo.role.dailyTask?.dailyTime,
+                });
+              }
               tokenStatus.value[tokenId] = "skipped";
               addLog({
                 time: new Date().toLocaleTimeString(),
@@ -516,6 +523,12 @@ export function createTasksDungeon(deps) {
             }
 
             check();
+            if (!failCount) {
+              markDreamShopChecked?.({
+                roleId: roleInfo.role.roleId ?? token.roleId,
+                taskDay: roleInfo.role.dailyTask?.dailyTime,
+              });
+            }
             tokenStatus.value[tokenId] = failCount ? "failed" : "completed";
             addLog({
               time: new Date().toLocaleTimeString(),

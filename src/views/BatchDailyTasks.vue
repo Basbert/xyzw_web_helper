@@ -219,13 +219,33 @@
           </div>
 
           <n-space vertical>
-            <n-checkbox
-              :checked="isAllSelected"
-              :indeterminate="isIndeterminate"
-              @update:checked="handleSelectAll"
+            <div
+              style="
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                flex-wrap: wrap;
+              "
             >
-              全选
-            </n-checkbox>
+              <n-checkbox
+                :checked="isAllSelected"
+                :indeterminate="isIndeterminate"
+                @update:checked="handleSelectAll"
+              >
+                全选
+              </n-checkbox>
+              <n-button
+                v-if="incompleteTokenIds.length > 0"
+                size="tiny"
+                type="warning"
+                secondary
+                :disabled="uiBusy"
+                @click="selectIncompleteTokens"
+              >
+                勾选未完成账号（{{ incompleteTokenIds.length }}）
+              </n-button>
+            </div>
             <n-checkbox-group v-model:value="selectedTokens">
               <n-grid
                 :x-gap="12"
@@ -848,6 +868,7 @@
       :show-tasks-modal="showTasksModal"
       :scheduled-tasks="scheduledTasks"
       :task-countdowns="taskCountdowns"
+      :task-run-history="taskRunHistory"
       :executing-task-ids="executingTaskIds"
       :ui-busy="uiBusy"
       :show-task-modal="showTaskModal"
@@ -1047,7 +1068,10 @@ import {
   createScheduledRunQueue,
   summarizeScheduledRun,
 } from "@/utils/batch/scheduledRuns";
-import { runDailyTasks } from "@/utils/daily/runDailyTasks.js";
+import {
+  markDreamShopChecked,
+  runDailyTasks,
+} from "@/utils/daily/runDailyTasks.js";
 import {
   DAILY_TASK_DEFAULTS,
   readDailyTaskSettingsForExecution,
@@ -1210,6 +1234,7 @@ const currentSettings = reactive({
   openBox: true,
   arenaEnable: true,
   claimHangUp: true,
+  claimLegacy: true,
   claimEmail: true,
   blackMarketPurchase: true,
   dreamShopPurchase: true,
@@ -1236,8 +1261,11 @@ const currentTemplate = reactive({
   openBox: true,
   arenaEnable: true,
   claimHangUp: true,
+  claimLegacy: true,
   claimEmail: true,
   blackMarketPurchase: true,
+  dreamShopPurchase: true,
+  weeklyQuizEnabled: true,
 });
 
 // Account Template References
@@ -1411,6 +1439,36 @@ const avatarLoadError = ref(false);
 // Scheduled Tasks State Management
 const scheduledTasks = ref([]); // List of all scheduled tasks
 const scheduledTasksStale = ref(false);
+const loadTaskRunHistory = () => {
+  try {
+    const raw = localStorage.getItem("scheduledTaskRunHistory");
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : {};
+  } catch {
+    return {};
+  }
+};
+const taskRunHistory = ref(loadTaskRunHistory());
+const recordScheduledTaskOutcome = (taskId, status) => {
+  if (!taskId || !status) return;
+  taskRunHistory.value = {
+    ...taskRunHistory.value,
+    [taskId]: {
+      lastRunAt: new Date().toISOString(),
+      lastRunStatus: status,
+    },
+  };
+  try {
+    localStorage.setItem(
+      "scheduledTaskRunHistory",
+      JSON.stringify(taskRunHistory.value),
+    );
+  } catch {
+    // 忽略存储空间不足等非致命错误
+  }
+};
 const showTaskModal = ref(false); // Control the visibility of the add/edit task modal
 const showTasksModal = ref(false); // Control the visibility of the tasks list modal
 const showRedeemCodeModal = ref(false); // Control the visibility of the redeem code modal
@@ -2719,7 +2777,11 @@ const scheduledQueue = createScheduledRunQueue({
       context.startedAt = Date.now();
       activeScheduledRun.value = context;
       try {
-        return await executeScheduledTask(context.task);
+        const runResult = await executeScheduledTask(context.task);
+        if (typeof recordScheduledTaskOutcome === "function") {
+          recordScheduledTaskOutcome(context.task.id, runResult?.status);
+        }
+        return runResult;
       } finally {
         activeScheduledRun.value = null;
       }
@@ -3312,10 +3374,29 @@ const openTemplateManagerModal = () => {
 };
 
 const openEditTemplateModal = (template) => {
-  // 加载模板数据到当前编辑模板
+  // 加载模板数据到当前编辑模板（兼容旧模板缺省字段）
   currentTemplateId.value = template.id;
   currentTemplateName.value = template.name;
-  Object.assign(currentTemplate, template.settings);
+  Object.assign(
+    currentTemplate,
+    {
+      arenaFormation: 1,
+      towerFormation: 1,
+      bossFormation: 1,
+      bossTimes: 2,
+      claimBottle: true,
+      payRecruit: true,
+      openBox: true,
+      arenaEnable: true,
+      claimHangUp: true,
+      claimLegacy: true,
+      claimEmail: true,
+      blackMarketPurchase: true,
+      dreamShopPurchase: true,
+      weeklyQuizEnabled: true,
+    },
+    template.settings,
+  );
   showTaskTemplateModal.value = true;
 };
 
@@ -3389,8 +3470,11 @@ const resetTemplateForm = () => {
     openBox: true,
     arenaEnable: true,
     claimHangUp: true,
+    claimLegacy: true,
     claimEmail: true,
     blackMarketPurchase: true,
+    dreamShopPurchase: true,
+    weeklyQuizEnabled: true,
   });
 };
 
@@ -3404,9 +3488,18 @@ const loadAccountTemplateReferences = () => {
   const templates = loadTaskTemplates();
   const references = [];
 
-  // 遍历所有账号，获取其模板引用
+  // 遍历所有账号，获取其模板引用（优先读取按角色 ID 持久化的设置）
   sortedTokens.value.forEach((token) => {
-    const settingsStr = localStorage.getItem(`daily-settings:${token.id}`);
+    const normalizedRoleId =
+      token.roleId !== undefined && token.roleId !== null
+        ? String(token.roleId).trim()
+        : "";
+    const settingsStr =
+      (normalizedRoleId &&
+        localStorage.getItem(
+          `daily-role-settings:${encodeURIComponent(normalizedRoleId)}`,
+        )) ||
+      localStorage.getItem(`daily-settings:${token.id}`);
     if (settingsStr) {
       try {
         const settings = JSON.parse(settingsStr);
@@ -3539,10 +3632,24 @@ const handleSelectAll = (checked) => {
   }
 };
 
+const incompleteTokenIds = computed(() =>
+  sortedTokens.value
+    .filter((token) =>
+      ["failed", "pending", "stopped"].includes(tokenStatus.value[token.id]),
+    )
+    .map((token) => token.id),
+);
+
+const selectIncompleteTokens = () => {
+  selectedTokens.value = [...incompleteTokenIds.value];
+  message.info(`已勾选 ${selectedTokens.value.length} 个未完成账号`);
+};
+
 const getStatusType = (tokenId) => {
   const status = tokenStatus.value[tokenId];
   if (status === "completed") return "success";
   if (status === "failed") return "error";
+  if (status === "pending" || status === "stopped") return "warning";
   if (status === "running") return "info";
   return "default";
 };
@@ -3762,7 +3869,10 @@ const {
   batchGenieSweep,
 } = tasksItem;
 
-const tasksDungeon = createTasksDungeon(createTaskDeps());
+const tasksDungeon = createTasksDungeon({
+  ...createTaskDeps(),
+  markDreamShopChecked,
+});
 const { batchbaoku13, batchbaoku45, batchmengjing, batchBuyDreamItems } =
   tasksDungeon;
 
@@ -3959,7 +4069,7 @@ const stopBatch = () => {
 <style scoped>
 .batch-daily-tasks {
   padding: 20px;
-  height: 100vh;
+  height: calc(100dvh - 64px);
   box-sizing: border-box;
   overflow: hidden;
   background: var(--bg-secondary);

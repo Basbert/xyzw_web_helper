@@ -127,6 +127,10 @@ watch(
             <n-switch v-model:value="settingsDraft.claimHangUp" />
           </div>
           <div class="switch-row">
+            <span class="switch-label">领功法残卷</span>
+            <n-switch v-model:value="settingsDraft.claimLegacy" />
+          </div>
+          <div class="switch-row">
             <span class="switch-label">竞技场</span>
             <n-switch v-model:value="settingsDraft.arenaEnable" />
           </div>

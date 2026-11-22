@@ -112,10 +112,9 @@ import {
   LockOpen,
   Menu,
   PersonCircle,
-  Settings,
 } from "@vicons/ionicons5";
 import { useDialog, useMessage } from "naive-ui";
-import { ref } from "vue";
+import { computed, ref } from "vue";
 
 import { useRouter } from "vue-router";
 import ThemeToggle from "@/components/Common/ThemeToggle.vue";
@@ -143,26 +142,70 @@ const secondaryNavigation = [
     icon: ChatbubbleEllipsesSharp,
   },
   { to: "/admin/legion-war", label: "实时盐场", icon: LockOpen, warOnly: true },
-  { to: "/admin/profile", label: "个人设置", icon: Settings },
 ];
 const getSecondaryNavigation = () =>
   secondaryNavigation.filter((item) => !item.warOnly || isNowInLegionWarTime());
 
-const userMenuOptions = [
-  {
-    label: "清除所有Token并退出",
-    key: "logout",
-  },
-];
+const userMenuOptions = computed(() => {
+  const options = [];
+  const tokens = tokenStore.gameTokens || [];
+  if (tokens.length > 1) {
+    options.push({
+      label: "快速切换账号",
+      key: "switch-account",
+      children: tokens.map((token) => {
+        const isCurrent = token.id === selectedToken.value?.id;
+        const connected =
+          tokenStore.getWebSocketStatus(token.id) === "connected";
+        const statusDot = connected ? "● " : "";
+        const currentMark = isCurrent ? "（当前）" : "";
+        const serverPart = token.server ? ` · ${token.server}` : "";
+        return {
+          label: `${statusDot}${token.name || "未命名角色"}${serverPart}${currentMark}`,
+          key: `switch:${token.id}`,
+          disabled: isCurrent,
+        };
+      }),
+    });
+  }
+  options.push(
+    {
+      label: "重新登录 / 管理账号",
+      key: "manage-tokens",
+    },
+    {
+      type: "divider",
+      key: "d1",
+    },
+    {
+      label: "清除所有Token并退出",
+      key: "logout",
+    },
+  );
+  return options;
+});
 
 // 方法
 const handleUserAction = (key) => {
+  if (typeof key === "string" && key.startsWith("switch:")) {
+    const targetId = key.slice("switch:".length);
+    const target = tokenStore.gameTokens.find((t) => t.id === targetId);
+    if (target) {
+      tokenStore.selectToken(target.id);
+      message.success(`已切换到账号：${target.name}`);
+    }
+    return;
+  }
+
   switch (key) {
+    case "manage-tokens":
+      router.push("/tokens");
+      break;
     case "logout":
       dialog.warning({
         title: "清除所有Token并退出",
         content:
-          "这会清除当前浏览器中保存的所有账号和BIN数据，之后需要重新导入。确定继续吗？",
+          "这会清除当前浏览器中保存的所有账号和BIN数据，之后需要重新导入。如果只是登录过期，推荐点“重新登录 / 管理账号”原地刷新凭据。确定继续清除吗？",
         positiveText: "确定清除",
         negativeText: "取消",
         onPositiveClick: async () => {

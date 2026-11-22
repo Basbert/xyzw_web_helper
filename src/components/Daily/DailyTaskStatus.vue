@@ -86,6 +86,14 @@
         <span v-else>执行每日任务</span>
       </button>
       <button
+        v-if="busy"
+        type="button"
+        class="stop-action-button"
+        @click="stopDailyFix"
+      >
+        停止后续操作
+      </button>
+      <button
         v-if="
           runSummary &&
           !busy &&
@@ -614,6 +622,13 @@ const refreshRoleInfo = async () => {
   }
 };
 
+const stopDailyFix = () => {
+  if (!busy.value) return;
+  runConnectionGeneration++;
+  log("已请求停止，当前步骤完成后结束", "warning");
+  message.info("已请求停止，当前步骤完成后结束");
+};
+
 // 一键补差主函数
 const runDailyFix = async () => {
   if (!tokenStore.selectedToken || busy.value) {
@@ -758,12 +773,14 @@ watch(isConnected, (connected) => {
   }
 });
 
-// 监听角色信息变化，自动同步任务状态
+// 监听角色每日任务字段变化，自动同步任务状态（避免深度监听整个 roleInfo 大对象）
 watch(
-  () => tokenStore.selectedTokenRoleInfo,
-  (newRoleInfo) => {
-    if (newRoleInfo?.role?.dailyTask?.complete) {
-      syncCompleteFromServer(newRoleInfo, { silent: true });
+  () => tokenStore.selectedTokenRoleInfo?.role?.dailyTask,
+  (dailyTask) => {
+    if (dailyTask?.complete) {
+      syncCompleteFromServer(tokenStore.selectedTokenRoleInfo, {
+        silent: true,
+      });
     }
   },
   { immediate: true, deep: true },
@@ -846,6 +863,24 @@ onBeforeUnmount(() => {
   color: var(--primary-color);
   cursor: pointer;
   font-size: var(--font-size-sm);
+}
+
+.stop-action-button {
+  display: block;
+  width: 100%;
+  margin-top: var(--spacing-xs);
+  padding: 8px 12px;
+  border: 1px solid rgba(208, 48, 80, 0.4);
+  border-radius: var(--border-radius-medium);
+  background: rgba(208, 48, 80, 0.08);
+  color: #d03050;
+  cursor: pointer;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+}
+
+.stop-action-button:hover {
+  background: rgba(208, 48, 80, 0.14);
 }
 
 .result-link:focus-visible {

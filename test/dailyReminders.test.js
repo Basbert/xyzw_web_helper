@@ -25,6 +25,15 @@ test("reminders appear only on the requested China-time activity days", () => {
   );
   assert.equal(getReminderDays(Date.UTC(2026, 10, 2, 16)).camp, true);
   assert.equal(getReminderDays(Date.UTC(2026, 10, 2, 15, 59)).dream, true);
+  // Saturday 20:00 CST (2026-11-07 12:00Z) -> legionWar true; 18:00 CST -> false
+  assert.equal(
+    getReminderDays(Date.parse("2026-11-07T20:00:00+08:00")).legionWar,
+    true,
+  );
+  assert.equal(
+    getReminderDays(Date.parse("2026-11-07T18:00:00+08:00")).legionWar,
+    false,
+  );
 });
 
 test("camp progress distinguishes attempts and wins without overstating a privilege limit", () => {

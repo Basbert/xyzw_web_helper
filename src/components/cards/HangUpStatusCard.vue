@@ -98,38 +98,78 @@ const formatTime = (seconds) => {
   return `${h}:${m}:${s}`;
 };
 
-const syncFromRole = () => {
-  const role = roleInfo.value?.role;
-  if (!role?.hangUp) return;
-  const now = Date.now() / 1000;
-  hangUp.value.lastTime = role.hangUp.lastTime;
-  hangUp.value.hangUpTime = role.hangUp.hangUpTime;
-  const elapsed = now - hangUp.value.lastTime;
-  if (elapsed <= hangUp.value.hangUpTime) {
-    hangUp.value.remainingTime = Math.floor(hangUp.value.hangUpTime - elapsed);
-    hangUp.value.isActive = true;
+let serverOffsetMs = 0;
+
+const recomputeFromTimestamp = () => {
+  const { lastTime, hangUpTime } = hangUp.value;
+  if (
+    !Number.isFinite(lastTime) ||
+    !Number.isFinite(hangUpTime) ||
+    hangUpTime <= 0
+  ) {
+    hangUp.value.remainingTime = 0;
+    hangUp.value.elapsedTime = 0;
+    hangUp.value.isActive = false;
+    return;
+  }
+  const nowSec = (Date.now() + serverOffsetMs) / 1000;
+  const elapsed = Math.max(0, nowSec - lastTime);
+  if (elapsed < hangUpTime) {
+    hangUp.value.remainingTime = Math.floor(hangUpTime - elapsed);
+    hangUp.value.isActive = hangUp.value.remainingTime > 0;
   } else {
     hangUp.value.remainingTime = 0;
     hangUp.value.isActive = false;
   }
-  hangUp.value.elapsedTime = Math.floor(
-    hangUp.value.hangUpTime - hangUp.value.remainingTime,
+  hangUp.value.elapsedTime = Math.max(
+    0,
+    Math.floor(hangUpTime - hangUp.value.remainingTime),
   );
 };
 
-watch(roleInfo, () => syncFromRole(), { deep: true, immediate: true });
+const syncFromRole = () => {
+  const data = roleInfo.value?.role?.hangUp;
+  if (!Number.isFinite(data?.lastTime) || !Number.isFinite(data?.hangUpTime)) {
+    return;
+  }
+  const tokenId = tokenStore.selectedToken?.id;
+  const clientServerTime = tokenId
+    ? tokenStore.wsConnections?.[tokenId]?.client?.serverTime
+    : null;
+  serverOffsetMs =
+    Number.isFinite(clientServerTime) && clientServerTime > 0
+      ? clientServerTime - Date.now()
+      : 0;
+  hangUp.value.lastTime = data.lastTime;
+  hangUp.value.hangUpTime = data.hangUpTime;
+  recomputeFromTimestamp();
+};
+
+watch(
+  () => [
+    tokenStore.selectedToken?.id,
+    roleInfo.value?.role?.hangUp?.lastTime,
+    roleInfo.value?.role?.hangUp?.hangUpTime,
+  ],
+  () => syncFromRole(),
+  { immediate: true },
+);
+
+const handleVisibilityChange = () => {
+  if (document.visibilityState === "visible") {
+    recomputeFromTimestamp();
+  }
+};
 
 let timer = null;
 onMounted(() => {
+  document.addEventListener("visibilitychange", handleVisibilityChange);
   timer = setInterval(() => {
-    if (hangUp.value.isActive && hangUp.value.remainingTime > 0) {
-      hangUp.value.remainingTime = Math.max(0, hangUp.value.remainingTime - 1);
-      hangUp.value.elapsedTime = hangUp.value.elapsedTime + 1;
-      if (hangUp.value.remainingTime <= 0) hangUp.value.isActive = false;
-    }
+    recomputeFromTimestamp();
   }, 1000);
 });
 onUnmounted(() => {
+  document.removeEventListener("visibilitychange", handleVisibilityChange);
   if (timer) clearInterval(timer);
 });
 
