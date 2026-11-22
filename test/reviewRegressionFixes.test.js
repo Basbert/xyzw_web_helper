@@ -1266,7 +1266,7 @@ test("Fix #10: switching accounts clears reactive @vueuse/core chat cache so old
   });
   assert.deepEqual(JSON.parse(map.get("xyzw_chat_msg_list")), [{ id: "msgA" }]);
 
-  store.selectToken("B");
+  await store.selectToken("B");
   assert.equal(map.has("xyzw_chat_msg_list"), false);
   assert.deepEqual([...chatLoaded.chatMsgList.value], []);
 

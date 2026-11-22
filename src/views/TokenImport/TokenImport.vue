@@ -291,7 +291,7 @@
                 :options="getTokenActions(gameToken)"
                 @select="(key) => handleTokenAction(key, gameToken)"
               >
-                <n-button text>
+                <n-button text @click.stop>
                   <template #icon>
                     <NIcon>
                       <EllipsisHorizontal />
@@ -435,7 +435,7 @@
                 size="large"
                 block
                 :loading="connectingTokens.has(gameToken.id)"
-                @click="startTaskManagement(gameToken)"
+                @click.stop="startTaskManagement(gameToken)"
               >
                 <template #icon>
                   <NIcon>
@@ -1135,7 +1135,7 @@ const upgradeTokenToPermanent = (token) => {
           message.success(`Token "${token.name}" 已升级为长期有效！`);
           return true;
         }
-        const success = tokenStore.upgradeTokenToPermanent(token.id);
+        const success = await tokenStore.upgradeTokenToPermanent(token.id);
         if (success) {
           message.success(`Token "${token.name}" 已升级为长期有效！`);
           return true;
@@ -1150,7 +1150,9 @@ const upgradeTokenToPermanent = (token) => {
   });
 };
 
-const selectToken = (token, forceReconnect = false) => {
+let latestSelectClickSeq = 0;
+
+const selectToken = async (token, forceReconnect = false) => {
   // 如果有备注正在编辑，保存备注并取消编辑
   if (editingRemark.value) {
     saveCurrentRemark();
@@ -1196,8 +1198,12 @@ const selectToken = (token, forceReconnect = false) => {
     return;
   }
 
-  // 选择token（带智能连接判断）
-  const result = tokenStore.selectToken(token.id, forceReconnect);
+  // 选择token（带跨标签页锁校验与智能连接判断）
+  const clickSeq = ++latestSelectClickSeq;
+  const result = await tokenStore.selectToken(token.id, forceReconnect);
+  if (clickSeq !== latestSelectClickSeq) {
+    return;
+  }
 
   if (result) {
     if (forceReconnect) {
@@ -1691,8 +1697,33 @@ const importTokenFile = () => {
 };
 
 const cleanExpiredTokens = async () => {
-  const count = await tokenStore.cleanExpiredTokens();
-  message.success(`已清理 ${count} 个过期Token`);
+  try {
+    const report =
+      typeof tokenStore.cleanExpiredTokensDetailed === "function"
+        ? await tokenStore.cleanExpiredTokensDetailed()
+        : {
+            ok: true,
+            cleanedCount: await tokenStore.cleanExpiredTokens(),
+            restoredBinCount: 0,
+            failures: [],
+            message: "",
+          };
+    if (!report.ok && report.failures?.length) {
+      const prefix =
+        report.cleanedCount > 0
+          ? `已清理 ${report.cleanedCount} 个过期Token，但有 ${report.failures.length} 项失败：`
+          : "";
+      message.error(
+        `${prefix}${report.message || "清理过期Token失败，请稍后重试或重新导入对应账号"}`,
+      );
+      return;
+    }
+    message.success(
+      report.message || `已清理 ${report.cleanedCount} 个过期Token`,
+    );
+  } catch (error) {
+    message.error(error?.message || "清理过期Token失败，请稍后重试");
+  }
 };
 
 const disconnectAll = () => {
@@ -1763,7 +1794,10 @@ const updateAllTokenInfo = async () => {
 
           try {
             // 连接token获取角色信息
-            await tokenStore.selectToken(token.id);
+            const selected = await tokenStore.selectToken(token.id);
+            if (!selected) {
+              throw new Error("账号已不存在或保存使用状态失败");
+            }
 
             // 等待1秒确保角色信息已获取（可根据实际情况调整）
             await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -1891,9 +1925,17 @@ const openGame = async () => {
 };
 
 // 开始任务管理 - 直接跳转到控制台
-const startTaskManagement = (token) => {
-  // 选择token
-  tokenStore.selectToken(token.id);
+const startTaskManagement = async (token) => {
+  // 选择token（确认账号仍存在且使用时间已写入）
+  const clickSeq = ++latestSelectClickSeq;
+  const selected = await tokenStore.selectToken(token.id);
+  if (clickSeq !== latestSelectClickSeq) {
+    return;
+  }
+  if (!selected) {
+    message.error(`选择Token失败：${token.name}`);
+    return;
+  }
   // 直接跳转到控制台，不等待连接
   message.success(`正在进入 ${token.name} 的控制台`);
   router.push("/admin/dashboard");
@@ -1972,7 +2014,10 @@ const handleUrlParams = async () => {
 
         // 如果auto=true，自动选择并跳转到控制台
         if (props.auto && tokenResult.token) {
-          tokenStore.selectToken(tokenResult.token.id);
+          const selected = await tokenStore.selectToken(tokenResult.token.id);
+          if (!selected) {
+            throw new Error("自动选择账号失败，请手动重新选择");
+          }
           message.success("正在跳转到控制台...");
           setTimeout(() => {
             router.push("/admin/dashboard");

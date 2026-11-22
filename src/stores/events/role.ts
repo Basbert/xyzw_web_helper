@@ -23,10 +23,16 @@ export const RolePlugin = ({ onSome }: EVM) => {
 
       // 只有当服务器信息实际发生变化时才更新，避免循环触发
       if (server && server !== token.server) {
-        // 更新token信息
-        tokenStore.updateToken(tokenId, {
-          server,
-        });
+        // 更新token信息（优先走整表写锁）
+        if (typeof tokenStore.commitMetadataUpdate === "function") {
+          tokenStore.commitMetadataUpdate(tokenId, { server }).catch(() => {
+            // 元信息更新失败时保留已有记录
+          });
+        } else {
+          tokenStore.updateToken(tokenId, {
+            server,
+          });
+        }
 
         gameLogger.verbose(`已更新Token ${tokenId} 的服务器信息`, { server });
       }

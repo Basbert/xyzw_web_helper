@@ -464,7 +464,7 @@ const canSendMessage = computed(() => {
 });
 
 // 方法
-const connectWebSocket = () => {
+const connectWebSocket = async () => {
   if (!selectedTokenId.value) {
     message.error("请先选择一个token");
     return;
@@ -481,7 +481,11 @@ const connectWebSocket = () => {
     });
 
     try {
-      tokenStore.selectToken(selectedTokenId.value);
+      const selected = await tokenStore.selectToken(selectedTokenId.value);
+      if (!selected) {
+        message.error("选择Token失败，请稍后重试");
+        return;
+      }
       message.success("正在建立WebSocket连接...");
     } catch (error) {
       console.error("❌ MessageTester: WebSocket连接失败", error);

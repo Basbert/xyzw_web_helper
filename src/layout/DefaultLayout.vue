@@ -186,13 +186,22 @@ const userMenuOptions = computed(() => {
 });
 
 // 方法
-const handleUserAction = (key) => {
+let latestSwitchClickSeq = 0;
+const handleUserAction = async (key) => {
   if (typeof key === "string" && key.startsWith("switch:")) {
     const targetId = key.slice("switch:".length);
     const target = tokenStore.gameTokens.find((t) => t.id === targetId);
     if (target) {
-      tokenStore.selectToken(target.id);
-      message.success(`已切换到账号：${target.name}`);
+      const clickSeq = ++latestSwitchClickSeq;
+      const selected = await tokenStore.selectToken(target.id);
+      if (clickSeq !== latestSwitchClickSeq) {
+        return;
+      }
+      if (selected) {
+        message.success(`已切换到账号：${selected.name || target.name}`);
+      } else {
+        message.error(`切换账号失败：${target.name}`);
+      }
     }
     return;
   }
