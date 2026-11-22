@@ -1,6 +1,55 @@
 import { normalizeRoleId } from "./accountIdentity.js";
 
 /**
+ * Extract a verified game roleId from authenticated server responses (never
+ * trusting an unverified local filename).
+ */
+export function extractAuthenticatedRoleId(
+  roleTokenJson,
+  { binData = null, serverRoles = null } = {},
+) {
+  if (typeof roleTokenJson === "string" && roleTokenJson.trim()) {
+    try {
+      const parsed = JSON.parse(roleTokenJson);
+      const direct = normalizeRoleId(parsed?.roleId ?? parsed?.role?.roleId);
+      if (direct) return direct;
+    } catch {
+      // Non-JSON token strings do not carry a verified roleId.
+    }
+  } else if (roleTokenJson && typeof roleTokenJson === "object") {
+    const direct = normalizeRoleId(
+      roleTokenJson.roleId ?? roleTokenJson.role?.roleId,
+    );
+    if (direct) return direct;
+  }
+
+  const binServerId = binData?.serverId ?? binData?.body?.serverId;
+  if (
+    binServerId !== undefined &&
+    binServerId !== null &&
+    serverRoles &&
+    typeof serverRoles === "object"
+  ) {
+    const roleEntries = Array.isArray(serverRoles)
+      ? serverRoles
+      : Object.values(serverRoles);
+    const matched = roleEntries.filter(
+      (entry) =>
+        entry &&
+        entry.serverId !== undefined &&
+        entry.serverId !== null &&
+        String(entry.serverId) === String(binServerId),
+    );
+    if (matched.length === 1) {
+      const verified = normalizeRoleId(matched[0].roleId);
+      if (verified) return verified;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Find an existing stored account matching an imported role by token ID or stable game roleId.
  */
 export function findExistingTokenForRole(
@@ -50,9 +99,139 @@ function requiresBinRefreshSource(role) {
   return !hasValidCombUser(role) && BIN_REFRESH_METHODS.has(role?.importMethod);
 }
 
+async function upsertSingleRole({
+  role,
+  tokenStore,
+  getArrayBuffer,
+  storeArrayBuffer,
+  deleteArrayBuffer,
+}) {
+  const needsBin = requiresBinRefreshSource(role);
+  const existing = findExistingTokenForRole(
+    tokenStore.gameTokens || [],
+    role,
+    tokenStore.selectedTokenId,
+  );
+
+  if (existing) {
+    let freshBin = null;
+    let tempBinKey = null;
+
+    if (needsBin) {
+      if (
+        !role.id ||
+        typeof getArrayBuffer !== "function" ||
+        typeof storeArrayBuffer !== "function"
+      ) {
+        throw new Error("导入失败：本地 BIN 凭据存储不可用，已保留原有账号");
+      }
+      freshBin = await getArrayBuffer(role.id);
+      if (
+        !freshBin ||
+        (freshBin instanceof ArrayBuffer && freshBin.byteLength === 0)
+      ) {
+        throw new Error("导入失败：未找到新的 BIN 凭据数据，已保留原有账号");
+      }
+      if (existing.id !== role.id) {
+        tempBinKey = role.id;
+      }
+    }
+
+    const updates = {
+      token: role.token,
+      name: existing.name || role.name,
+      server: role.server || existing.server,
+      roleId: role.roleId ?? existing.roleId,
+      serverId: role.serverId ?? existing.serverId,
+      roleIndex: role.roleIndex ?? existing.roleIndex,
+      wsUrl: role.wsUrl || existing.wsUrl,
+      importMethod: role.importMethod || existing.importMethod,
+      combUser: hasValidCombUser(role) ? role.combUser : null,
+      lastRefreshed: Date.now(),
+      upgradedToPermanent: true,
+    };
+
+    if (typeof tokenStore.commitCredentialUpdate === "function") {
+      const commit = await tokenStore.commitCredentialUpdate(existing.id, {
+        updates,
+        binData: existing.id !== role.id ? freshBin : null,
+        binStorage: {
+          getArrayBuffer,
+          storeArrayBuffer,
+          deleteArrayBuffer,
+        },
+        deleteOldBinKey: tempBinKey,
+        closeActiveConnection: true,
+      });
+      if (!commit?.committed) {
+        if (commit?.reason === "bin_write_failed") {
+          throw new Error(
+            "导入失败：写入账号 BIN 凭据失败，已保留原有账号与连接",
+          );
+        }
+        throw new Error("导入失败：更新已有账号记录失败，已保留原有凭据");
+      }
+      return { status: "updated", tokenId: existing.id };
+    }
+
+    let binMigrated = false;
+    let previousBin = null;
+    if (needsBin && existing.id !== role.id && freshBin) {
+      previousBin = await getArrayBuffer(existing.id);
+      const moved = await storeArrayBuffer(existing.id, freshBin);
+      if (!moved) {
+        throw new Error(
+          "导入失败：写入账号 BIN 凭据失败，已保留原有账号与连接",
+        );
+      }
+      binMigrated = true;
+    }
+
+    const updated = tokenStore.updateToken(existing.id, updates);
+    if (updated === false) {
+      if (binMigrated) {
+        if (previousBin) {
+          await storeArrayBuffer(existing.id, previousBin);
+        } else if (typeof deleteArrayBuffer === "function") {
+          await deleteArrayBuffer(existing.id);
+        }
+      }
+      throw new Error("导入失败：更新已有账号记录失败，已保留原有凭据");
+    }
+
+    if (tempBinKey && typeof deleteArrayBuffer === "function") {
+      await deleteArrayBuffer(tempBinKey);
+    }
+
+    const status = tokenStore.getWebSocketStatus?.(existing.id);
+    if (status && status !== "disconnected") {
+      tokenStore.closeWebSocketConnection?.(existing.id);
+    }
+
+    return { status: "updated", tokenId: existing.id };
+  }
+
+  if (needsBin) {
+    if (!role.id || typeof getArrayBuffer !== "function") {
+      throw new Error("导入失败：本地 BIN 凭据存储不可用");
+    }
+    const freshBin = await getArrayBuffer(role.id);
+    if (
+      !freshBin ||
+      (freshBin instanceof ArrayBuffer && freshBin.byteLength === 0)
+    ) {
+      throw new Error("导入失败：未找到新的 BIN 凭据数据，请重新选择角色");
+    }
+  }
+  const added = tokenStore.addToken({ ...role });
+  return { status: "added", tokenId: added?.id || role.id };
+}
+
 /**
  * Insert new imported roles or update existing matching characters in place,
  * preserving local token IDs, groups, remarks, and daily settings.
+ * When `allowPartial` is true, processes every role independently and returns
+ * per-role outcomes so callers can retain only failed roles for retry.
  */
 export async function upsertImportedRoleTokens({
   roles = [],
@@ -60,109 +239,55 @@ export async function upsertImportedRoleTokens({
   getArrayBuffer,
   storeArrayBuffer,
   deleteArrayBuffer,
+  allowPartial = false,
 }) {
   let addedCount = 0;
   let updatedCount = 0;
   const tokenIds = [];
+  const succeededIndices = [];
+  const failedRoles = [];
+  const results = [];
 
-  for (const role of roles) {
-    const needsBin = requiresBinRefreshSource(role);
-    const existing = findExistingTokenForRole(
-      tokenStore.gameTokens || [],
-      role,
-      tokenStore.selectedTokenId,
-    );
-
-    if (existing) {
-      let binMigrated = false;
-      let previousBin = null;
-      let tempBinKey = null;
-
-      if (needsBin) {
-        if (
-          !role.id ||
-          typeof getArrayBuffer !== "function" ||
-          typeof storeArrayBuffer !== "function"
-        ) {
-          throw new Error("导入失败：本地 BIN 凭据存储不可用，已保留原有账号");
-        }
-        const freshBin = await getArrayBuffer(role.id);
-        if (
-          !freshBin ||
-          (freshBin instanceof ArrayBuffer && freshBin.byteLength === 0)
-        ) {
-          throw new Error("导入失败：未找到新的 BIN 凭据数据，已保留原有账号");
-        }
-        if (existing.id !== role.id) {
-          previousBin = await getArrayBuffer(existing.id);
-          const moved = await storeArrayBuffer(existing.id, freshBin);
-          if (!moved) {
-            throw new Error(
-              "导入失败：写入账号 BIN 凭据失败，已保留原有账号与连接",
-            );
-          }
-          binMigrated = true;
-          tempBinKey = role.id;
-        }
+  for (let index = 0; index < roles.length; index++) {
+    const role = roles[index];
+    try {
+      const outcome = await upsertSingleRole({
+        role,
+        tokenStore,
+        getArrayBuffer,
+        storeArrayBuffer,
+        deleteArrayBuffer,
+      });
+      if (outcome.status === "updated") updatedCount++;
+      else addedCount++;
+      tokenIds.push(outcome.tokenId);
+      succeededIndices.push(index);
+      results.push({ index, role, ...outcome });
+    } catch (error) {
+      failedRoles.push({ index, role, error });
+      results.push({ index, role, status: "failed", error });
+      if (!allowPartial) {
+        error.partialResult = {
+          addedCount,
+          updatedCount,
+          tokenIds,
+          succeededIndices,
+          failedRoles,
+          results,
+        };
+        throw error;
       }
-
-      const updates = {
-        token: role.token,
-        name: existing.name || role.name,
-        server: role.server || existing.server,
-        roleId: role.roleId ?? existing.roleId,
-        serverId: role.serverId ?? existing.serverId,
-        roleIndex: role.roleIndex ?? existing.roleIndex,
-        wsUrl: role.wsUrl || existing.wsUrl,
-        importMethod: role.importMethod || existing.importMethod,
-        combUser: hasValidCombUser(role) ? role.combUser : null,
-        lastRefreshed: Date.now(),
-        upgradedToPermanent: true,
-      };
-
-      const updated = tokenStore.updateToken(existing.id, updates);
-      if (updated === false) {
-        if (binMigrated) {
-          if (previousBin) {
-            await storeArrayBuffer(existing.id, previousBin);
-          } else if (typeof deleteArrayBuffer === "function") {
-            await deleteArrayBuffer(existing.id);
-          }
-        }
-        throw new Error("导入失败：更新已有账号记录失败，已保留原有凭据");
-      }
-
-      if (tempBinKey && typeof deleteArrayBuffer === "function") {
-        await deleteArrayBuffer(tempBinKey);
-      }
-
-      const status = tokenStore.getWebSocketStatus?.(existing.id);
-      if (status && status !== "disconnected") {
-        tokenStore.closeWebSocketConnection?.(existing.id);
-      }
-
-      updatedCount++;
-      tokenIds.push(existing.id);
-    } else {
-      if (needsBin) {
-        if (!role.id || typeof getArrayBuffer !== "function") {
-          throw new Error("导入失败：本地 BIN 凭据存储不可用");
-        }
-        const freshBin = await getArrayBuffer(role.id);
-        if (
-          !freshBin ||
-          (freshBin instanceof ArrayBuffer && freshBin.byteLength === 0)
-        ) {
-          throw new Error("导入失败：未找到新的 BIN 凭据数据，请重新选择角色");
-        }
-      }
-      const added = tokenStore.addToken({ ...role });
-      addedCount++;
-      tokenIds.push(added?.id || role.id);
     }
   }
 
-  return { addedCount, updatedCount, tokenIds };
+  return {
+    addedCount,
+    updatedCount,
+    tokenIds,
+    succeededIndices,
+    failedRoles,
+    results,
+  };
 }
 
 export function formatUpsertImportMessage({

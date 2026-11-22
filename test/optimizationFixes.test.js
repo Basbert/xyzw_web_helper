@@ -12,9 +12,11 @@ import { createConnectionRecovery } from "../src/utils/connectionRecovery.js";
 import {
   createServerTimeSample,
   getEstimatedServerNowSec,
+  sampleFromWebSocketClient,
   updateServerTimeSample,
 } from "../src/utils/serverClock.js";
 import {
+  extractAuthenticatedRoleId,
   formatUpsertImportMessage,
   upsertImportedRoleTokens,
 } from "../src/utils/tokenImportUpsert.js";
@@ -1751,5 +1753,666 @@ describe("Commit 4 review regression fixes (P1 & P2)", () => {
     assert.equal(tokenStatus.value.slow, "completed");
     assert.equal(summary.hasIncomplete, true);
     assert.ok(logs.some((entry) => /fast boom/.test(entry.message)));
+  });
+});
+
+describe("Commit 5 review round-2 regression fixes (4 P1 + 3 P2)", () => {
+  test("Round2 P1-1: extractAuthenticatedRoleId ignores untrusted filenames and SingleBinTokenForm never matches by filename roleId", async () => {
+    // Authenticated response carries role B (222222) even if file is named for role A (111111)
+    assert.equal(
+      extractAuthenticatedRoleId(
+        JSON.stringify({ roleId: 222222, roleToken: "tok-b" }),
+      ),
+      "222222",
+    );
+    // When token JSON lacks roleId, unambiguous serverId match from authenticated serverRoles resolves it
+    assert.equal(
+      extractAuthenticatedRoleId(JSON.stringify({ roleToken: "tok-b" }), {
+        binData: { serverId: 10037 },
+        serverRoles: {
+          10037: { serverId: 10037, roleId: 222222 },
+          10038: { serverId: 10038, roleId: 111111 },
+        },
+      }),
+      "222222",
+    );
+    // When neither auth token nor serverRoles confirms identity, return null (never fall back to filename)
+    assert.equal(
+      extractAuthenticatedRoleId(JSON.stringify({ roleToken: "tok-unknown" })),
+      null,
+    );
+
+    const singleBinSrc = await readFile(
+      new URL(
+        "../src/views/TokenImport/SingleBinTokenForm.vue",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    assert.match(singleBinSrc, /extractAuthenticatedRoleId/);
+    assert.doesNotMatch(singleBinSrc, /roleMeta\.roleId\s*\?\s*\{\s*roleId:/);
+  });
+
+  test("Round2 P1-2: late old-name BIN migration and late manual refresh cannot overwrite freshly QR-imported BIN or Token", async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const logger = new Proxy({}, { get: () => () => {} });
+    const storageMap = new Map();
+    const idbMap = new Map([
+      ["主号", new Uint8Array([1, 1, 1]).buffer], // legacy name-keyed BIN
+      ["temp-qr-id", new Uint8Array([9, 9, 9]).buffer], // fresh QR BIN
+    ]);
+    const clients = [];
+    const recoveryTimers = new Map();
+    let nextRecoveryTimer = 0;
+    let resolveBinTransform;
+    let resolveManualCombRefresh;
+
+    const mod = await loadModule(
+      new URL("../src/stores/tokenStore.ts", import.meta.url),
+      {
+        "@/utils/accountIdentity.js": accountIdentity,
+        "@vueuse/core": { useLocalStorage: (_k, v) => vue.ref(v) },
+        pinia: { defineStore },
+        vue,
+        "@/hooks/useIndexedDB": {
+          default: () => ({
+            getArrayBuffer: async (k) => idbMap.get(k) ?? null,
+            storeArrayBuffer: async (k, buf) => {
+              idbMap.set(k, buf);
+              return true;
+            },
+            deleteArrayBuffer: async (k) => idbMap.delete(k),
+            clearAll: async () => idbMap.clear(),
+          }),
+        },
+        "@/router": {
+          default: { currentRoute: { value: { path: "/dashboard" } } },
+        },
+        "@/utils/accountGameData": accountData,
+        "@/utils/bonProtocol": { g_utils: {} },
+        "@/utils/connectionRecovery": {
+          createConnectionRecovery: (opts) =>
+            createConnectionRecovery({
+              ...opts,
+              setTimer: (fn, delay) => {
+                const id = ++nextRecoveryTimer;
+                recoveryTimers.set(id, { fn, delay });
+                return id;
+              },
+              clearTimer: (id) => recoveryTimers.delete(id),
+            }),
+        },
+        "@/utils/logger": {
+          gameLogger: logger,
+          tokenLogger: logger,
+          wsLogger: logger,
+        },
+        "@/utils/randomSeed": { generateRandomSeed: () => 1 },
+        "@/utils/token": {
+          fetchTokenPayloadFromUrl: async () => ({}),
+          scheduleAuthUserRequest: (fn) => fn(),
+          setAuthUserRateLimiterCallback() {},
+          transformToken: () =>
+            new Promise((resolve) => {
+              resolveBinTransform = resolve;
+            }),
+        },
+        "@/utils/wechatForceLogout": {
+          refreshTokenFromCombUser: () =>
+            new Promise((resolve) => {
+              resolveManualCombRefresh = resolve;
+            }),
+          roleIndexFromServerId: () => 0,
+        },
+        "@/utils/xyzwWebSocket": {
+          XyzwWebSocketClient: class {
+            constructor() {
+              this.socket = { readyState: 1 };
+              clients.push(this);
+            }
+            setMessageListener(fn) {
+              this.listener = fn;
+            }
+            init() {
+              this.onConnect();
+            }
+            disconnect() {
+              if (this.socket) this.socket.readyState = 3;
+              this.socket = null;
+            }
+            send() {}
+            sendHeartbeat() {}
+          },
+        },
+        "./events/index.js": { $emit: { emit() {} }, emitPlus() {} },
+      },
+      {
+        AbortController,
+        WebSocket: { CLOSED: 3 },
+        localStorage: {
+          getItem: (k) => storageMap.get(k) ?? null,
+          setItem: (k, v) => storageMap.set(k, String(v)),
+          removeItem: (k) => storageMap.delete(k),
+        },
+        navigator: { onLine: true },
+        setTimeout,
+        clearTimeout,
+        setInterval: () => 1,
+        clearInterval() {},
+        window: {
+          location: { href: "http://127.0.0.1/" },
+          addEventListener() {},
+          removeEventListener() {},
+        },
+        document: {
+          visibilityState: "visible",
+          addEventListener() {},
+          removeEventListener() {},
+        },
+      },
+    );
+
+    const store = mod.useTokenStore();
+    try {
+      // Case A: old-name BIN auto-refresh loses to concurrent QR upsert; fresh BIN under acc1 must NOT be overwritten
+      mod.gameTokens.value = [
+        {
+          id: "acc1",
+          name: "主号",
+          roleId: "1001",
+          token: "old-bin-token-long",
+          importMethod: "bin",
+          combUser: null,
+          createdAt: "2026-11-01T00:00:00.000Z",
+        },
+      ];
+      mod.selectedTokenId.value = "acc1";
+      await store.createWebSocketConnection("acc1", "old-bin-token-long");
+      await new Promise((r) => setTimeout(r, 10));
+
+      clients[0].listener({ error: "token expired" });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(typeof resolveBinTransform, "function");
+
+      // User completes QR login in place on acc1 while old BIN refresh is in flight
+      await upsertImportedRoleTokens({
+        roles: [
+          {
+            id: "temp-qr-id",
+            roleId: "1001",
+            name: "主号",
+            token: "fresh-qr-token-long",
+            importMethod: "wxQrcode",
+          },
+        ],
+        tokenStore: store,
+        getArrayBuffer: async (k) => idbMap.get(k) ?? null,
+        storeArrayBuffer: async (k, buf) => {
+          idbMap.set(k, buf);
+          return true;
+        },
+        deleteArrayBuffer: async (k) => idbMap.delete(k),
+      });
+
+      // Late old-name BIN refresh resolves -> must NOT overwrite acc1 token OR acc1 BIN!
+      resolveBinTransform("stale-old-bin-token");
+      await new Promise((r) => setTimeout(r, 10));
+
+      assert.equal(mod.gameTokens.value[0].token, "fresh-qr-token-long");
+      assert.deepEqual(
+        Array.from(new Uint8Array(idbMap.get("acc1"))),
+        [9, 9, 9],
+      );
+
+      // Case B: manual refresh from TokenImport.vue is also guarded by credential version
+      mod.gameTokens.value.push({
+        id: "acc2",
+        name: "小号",
+        roleId: "2002",
+        token: "old-comb-token-long",
+        importMethod: "wxForceLogout",
+        combUser: { old: true },
+        serverId: 37,
+        roleIndex: 0,
+        createdAt: "2026-11-01T00:00:00.000Z",
+      });
+      const manualPromise = store.refreshTokenManually("acc2");
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(typeof resolveManualCombRefresh, "function");
+
+      // Concurrent QR update on acc2
+      store.updateToken("acc2", {
+        token: "fresh-acc2-qr-token",
+        importMethod: "wxQrcode",
+        combUser: null,
+      });
+
+      resolveManualCombRefresh({
+        token: "stale-manual-comb-token",
+        role: { serverId: 37, roleId: "2002" },
+      });
+      const manualOutcome = await manualPromise;
+      assert.equal(manualOutcome.status, "stale");
+      assert.equal(mod.gameTokens.value[1].token, "fresh-acc2-qr-token");
+      assert.equal(mod.gameTokens.value[1].importMethod, "wxQrcode");
+    } finally {
+      pinia._e.stop();
+    }
+  });
+
+  test("Round2 P1-3: salt bottle recovery does not duplicate bottlehelper_start on in-flight stop or timeout", async () => {
+    const { DailyTaskRunner } = await loadModule(
+      new URL("../src/utils/dailyTaskRunner.js", import.meta.url),
+      {
+        "@/utils/dailyTaskState":
+          await import("../src/utils/dailyTaskState.js"),
+        "@/utils/dailyTaskSettings":
+          await import("../src/utils/dailyTaskSettings.js"),
+        "./accountConnection.js":
+          await import("../src/utils/accountConnection.js"),
+        "./accountIdentity.js": accountIdentity,
+        "./daily/arena.js": await import("../src/utils/daily/arena.js"),
+        "./daily/dream.js": await import("../src/utils/daily/dream.js"),
+        "./weeklyQuiz.js": await import("../src/utils/weeklyQuiz.js"),
+      },
+    );
+
+    const makeRole = (helperStopTime) => ({
+      dailyTask: {
+        dailyTime: 1700000000,
+        complete: {
+          1: -1,
+          2: -1,
+          3: -1,
+          4: -1,
+          5: -1,
+          6: -1,
+          7: -1,
+          12: -1,
+          13: -1,
+          14: 0,
+        },
+        dailyPoint: 0,
+        dailyReward: {},
+        weekPoint: 0,
+        weekReward: {},
+      },
+      bottleHelpers: { helperStopTime },
+      statistics: {
+        "artifact:normal:lottery:time": 1700000010,
+        "genie:sweep:buy": 3,
+      },
+      statisticsTime: {
+        "genie:sweep:buy": 1700000010,
+        "legion:sign:in": 1700000010,
+        "genie:daily:free:1": 1700000010,
+        "genie:daily:free:2": 1700000010,
+        "genie:daily:free:3": 1700000010,
+        "genie:daily:free:4": 1700000010,
+      },
+    });
+    const config = {
+      tasks: [
+        [1, 1, 1],
+        [2, 2, 1],
+        [3, 3, 3],
+        [4, 4, 2],
+        [5, 5, 5],
+        [6, 6, 3],
+        [7, 7, 3],
+        [8, 13, 1],
+        [9, 12, 1],
+        [10, 14, 1],
+      ].map(([id, completeCondition, completeValue]) => ({
+        id,
+        completeCondition,
+        completeValue,
+      })),
+      dailyRewards: [],
+      weeklyRewards: [],
+    };
+    const bottleOnlySettings = {
+      arenaFormation: 1,
+      bossFormation: 1,
+      bossTimes: 0,
+      claimBottle: true,
+      payRecruit: false,
+      openBox: false,
+      arenaEnable: false,
+      claimHangUp: false,
+      claimLegacy: false,
+      claimEmail: false,
+      weeklyQuizEnabled: false,
+      blackMarketPurchase: false,
+      dreamShopPurchase: false,
+      freeGachaEnable: false,
+    };
+
+    // Subcase A: user requests stop WHILE bottlehelper_start is in flight -> ack resolves -> only 1 start sent!
+    const callsA = [];
+    let stopA = false;
+    const storeA = {
+      gameTokens: [{ id: "acc1", name: "主号" }],
+      selectedToken: { id: "acc1" },
+      wsConnections: { acc1: { client: { serverTime: 1700000100 * 1000 } } },
+      getWebSocketStatus: () => "connected",
+      sendGetRoleInfo: async () => ({ role: makeRole(1700009000) }),
+      sendMessageWithPromise: async (_id, cmd) => {
+        callsA.push(cmd);
+        if (cmd === "bottlehelper_start") {
+          stopA = true; // requested while waiting for bottlehelper_start response
+        }
+        return {};
+      },
+    };
+    const runnerA = new DailyTaskRunner(
+      storeA,
+      { commandDelay: 0, taskDelay: 0 },
+      { loadConfig: async () => config, sleep: async () => {} },
+    );
+    await assert.rejects(
+      runnerA.run("acc1", { shouldStop: () => stopA }, bottleOnlySettings),
+      /任务已停止/,
+    );
+    assert.deepEqual(callsA, ["bottlehelper_stop", "bottlehelper_start"]);
+
+    // Subcase B: bottlehelper_start times out, server query confirms bottle is ALREADY running -> NO 2nd start!
+    const callsB = [];
+    let roleQueriesB = 0;
+    const storeB = {
+      gameTokens: [{ id: "acc1", name: "主号" }],
+      selectedToken: { id: "acc1" },
+      wsConnections: { acc1: { client: { serverTime: 1700000100 * 1000 } } },
+      getWebSocketStatus: () => "connected",
+      sendGetRoleInfo: async () => {
+        roleQueriesB++;
+        return { role: makeRole(1700009000) }; // running!
+      },
+      sendMessageWithPromise: async (_id, cmd) => {
+        callsB.push(cmd);
+        if (cmd === "bottlehelper_start") throw new Error("请求超时");
+        return {};
+      },
+    };
+    const runnerB = new DailyTaskRunner(
+      storeB,
+      { commandDelay: 0, taskDelay: 0 },
+      { loadConfig: async () => config, sleep: async () => {} },
+    );
+    await assert.rejects(
+      runnerB.run("acc1", {}, bottleOnlySettings),
+      /请求超时/,
+    );
+    assert.deepEqual(callsB, ["bottlehelper_stop", "bottlehelper_start"]);
+    assert.ok(roleQueriesB >= 3);
+
+    // Subcase C: bottlehelper_start times out, server query confirms bottle is STILL stopped -> sends 1 recovery start!
+    const callsC = [];
+    let roleQueriesC = 0;
+    let startCountC = 0;
+    const storeC = {
+      gameTokens: [{ id: "acc1", name: "主号" }],
+      selectedToken: { id: "acc1" },
+      wsConnections: { acc1: { client: { serverTime: 1700000100 * 1000 } } },
+      getWebSocketStatus: () => "connected",
+      sendGetRoleInfo: async () => {
+        roleQueriesC++;
+        // Initial snapshots say running; post-timeout verification confirms still stopped!
+        return {
+          role: makeRole(roleQueriesC >= 3 ? 1699999000 : 1700009000),
+        };
+      },
+      sendMessageWithPromise: async (_id, cmd) => {
+        callsC.push(cmd);
+        if (cmd === "bottlehelper_start" && ++startCountC === 1) {
+          throw new Error("请求超时");
+        }
+        return {};
+      },
+    };
+    const runnerC = new DailyTaskRunner(
+      storeC,
+      { commandDelay: 0, taskDelay: 0 },
+      { loadConfig: async () => config, sleep: async () => {} },
+    );
+    await assert.rejects(
+      runnerC.run("acc1", {}, bottleOnlySettings),
+      /请求超时/,
+    );
+    assert.deepEqual(callsC, [
+      "bottlehelper_stop",
+      "bottlehelper_start",
+      "bottlehelper_start",
+    ]);
+  });
+
+  test("Round2 P1-4: BOSS group never fights without confirmed formation even if battleVersion succeeds on a later call", async () => {
+    const { DailyTaskRunner } = await loadModule(
+      new URL("../src/utils/dailyTaskRunner.js", import.meta.url),
+      {
+        "@/utils/dailyTaskState":
+          await import("../src/utils/dailyTaskState.js"),
+        "@/utils/dailyTaskSettings":
+          await import("../src/utils/dailyTaskSettings.js"),
+        "./accountConnection.js":
+          await import("../src/utils/accountConnection.js"),
+        "./accountIdentity.js": accountIdentity,
+        "./daily/arena.js": await import("../src/utils/daily/arena.js"),
+        "./daily/dream.js": await import("../src/utils/daily/dream.js"),
+        "./weeklyQuiz.js": await import("../src/utils/weeklyQuiz.js"),
+      },
+    );
+
+    const calls = [];
+    let versionCalls = 0;
+    const accountDataRef = vue.ref({ battleVersion: null });
+    const role = {
+      dailyTask: {
+        dailyTime: 1700000000,
+        complete: {
+          1: -1,
+          2: -1,
+          3: -1,
+          4: -1,
+          5: -1,
+          6: -1,
+          7: -1,
+          12: -1,
+          13: -1,
+          14: -1,
+        },
+        dailyPoint: 0,
+        dailyReward: {},
+        weekPoint: 0,
+        weekReward: {},
+      },
+      statistics: {
+        "artifact:normal:lottery:time": 1700000010,
+        "genie:sweep:buy": 3,
+      },
+      statisticsTime: {
+        "genie:sweep:buy": 1700000010,
+        "legion:sign:in": 1700000010,
+        "genie:daily:free:1": 1700000010,
+        "genie:daily:free:2": 1700000010,
+        "genie:daily:free:3": 1700000010,
+        "genie:daily:free:4": 1700000010,
+      },
+    };
+    const store = {
+      gameTokens: [{ id: "acc1", name: "主号" }],
+      selectedToken: { id: "acc1" },
+      wsConnections: { acc1: { client: { serverTime: 1700000100 * 1000 } } },
+      getWebSocketStatus: () => "connected",
+      getAccountGameData: () => accountDataRef,
+      ensureBattleVersion: async () => {
+        versionCalls++;
+        // First call fails, subsequent calls would succeed
+        if (versionCalls === 1) return null;
+        accountDataRef.value.battleVersion = 888;
+        return 888;
+      },
+      sendGetRoleInfo: async () => ({ role: structuredClone(role) }),
+      sendMessageWithPromise: async (_id, cmd) => {
+        calls.push(cmd);
+        return {};
+      },
+    };
+    const runner = new DailyTaskRunner(
+      store,
+      { commandDelay: 0, taskDelay: 0 },
+      {
+        loadConfig: async () => ({
+          tasks: [
+            [1, 1, 1],
+            [2, 2, 1],
+            [3, 3, 3],
+            [4, 4, 2],
+            [5, 5, 5],
+            [6, 6, 3],
+            [7, 7, 3],
+            [8, 13, 1],
+            [9, 12, 1],
+            [10, 14, 1],
+          ].map(([id, completeCondition, completeValue]) => ({
+            id,
+            completeCondition,
+            completeValue,
+          })),
+          dailyRewards: [],
+          weeklyRewards: [],
+        }),
+        sleep: async () => {},
+        getCurrentHour: () => 10,
+      },
+    );
+
+    const summary = await runner.run(
+      "acc1",
+      {},
+      {
+        arenaFormation: 1,
+        bossFormation: 2,
+        bossTimes: 0,
+        claimBottle: false,
+        payRecruit: false,
+        openBox: false,
+        arenaEnable: false,
+        claimHangUp: false,
+        claimLegacy: false,
+        claimEmail: false,
+        weeklyQuizEnabled: false,
+        blackMarketPurchase: false,
+        dreamShopPurchase: false,
+        freeGachaEnable: false,
+      },
+    );
+
+    assert.equal(calls.includes("fight_startboss"), false);
+    assert.equal(calls.includes("presetteam_getinfo"), false);
+    assert.ok(summary.deferred >= 3);
+    assert.ok(summary.incomplete >= 3);
+  });
+
+  test("Round2 P2-2: allowPartial returns per-role results so retrying only processes failed roles", async () => {
+    const db = new Map([
+      ["temp-a", new Uint8Array([1, 2]).buffer],
+      ["temp-b", new Uint8Array([3, 4]).buffer],
+    ]);
+    const tokens = [
+      {
+        id: "orig-a",
+        roleId: "1",
+        name: "A",
+        token: "old-a",
+        importMethod: "wxQrcode",
+      },
+      {
+        id: "orig-b",
+        roleId: "2",
+        name: "B",
+        token: "old-b",
+        importMethod: "wxQrcode",
+      },
+    ];
+    let failB = true;
+    const tokenStore = {
+      gameTokens: tokens,
+      selectedTokenId: "orig-a",
+      getWebSocketStatus: () => "disconnected",
+      updateToken: (id, updates) => {
+        const idx = tokens.findIndex((t) => t.id === id);
+        if (idx === -1) return false;
+        tokens[idx] = { ...tokens[idx], ...updates };
+        return true;
+      },
+      addToken: (r) => r,
+    };
+
+    const roles = [
+      {
+        id: "temp-a",
+        roleId: "1",
+        name: "A",
+        token: "new-a",
+        importMethod: "wxQrcode",
+      },
+      {
+        id: "temp-b",
+        roleId: "2",
+        name: "B",
+        token: "new-b",
+        importMethod: "wxQrcode",
+      },
+    ];
+
+    const firstPass = await upsertImportedRoleTokens({
+      roles,
+      tokenStore,
+      getArrayBuffer: async (k) => db.get(k) ?? null,
+      storeArrayBuffer: async (k, buf) => {
+        if (k === "orig-b" && failB) return false;
+        db.set(k, buf);
+        return true;
+      },
+      deleteArrayBuffer: async (k) => db.delete(k),
+      allowPartial: true,
+    });
+
+    assert.equal(firstPass.updatedCount, 1);
+    assert.equal(firstPass.failedRoles.length, 1);
+    assert.equal(firstPass.failedRoles[0].role.id, "temp-b");
+    assert.equal(db.has("temp-a"), false); // A's temp BIN was cleaned up
+    assert.equal(db.has("temp-b"), true); // B's temp BIN still available
+
+    // Storage recovers -> retry ONLY failedRoles
+    failB = false;
+    const retryPass = await upsertImportedRoleTokens({
+      roles: firstPass.failedRoles.map((item) => item.role),
+      tokenStore,
+      getArrayBuffer: async (k) => db.get(k) ?? null,
+      storeArrayBuffer: async (k, buf) => {
+        db.set(k, buf);
+        return true;
+      },
+      deleteArrayBuffer: async (k) => db.delete(k),
+      allowPartial: true,
+    });
+    assert.equal(retryPass.updatedCount, 1);
+    assert.equal(retryPass.failedRoles.length, 0);
+    assert.equal(tokens[1].token, "new-b");
+  });
+
+  test("Round2 P2-3: sampleFromWebSocketClient reuses client.serverTimeSampledAt across remounts without rolling back 90s", () => {
+    const client = {
+      serverTime: 1700000000000,
+      serverTimeSampledAt: 1000,
+    };
+    // Newly mounted component 90 seconds later (monotonic = 91000)
+    const sample = sampleFromWebSocketClient(client, null, 91000);
+    assert.equal(sample.serverTimeMs, 1700000000000);
+    assert.equal(sample.sampledAtMs, 1000);
+    assert.equal(getEstimatedServerNowSec(sample, 0, 91000), 1700000090);
   });
 });

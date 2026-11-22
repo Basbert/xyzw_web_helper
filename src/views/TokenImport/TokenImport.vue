@@ -774,16 +774,8 @@ import {
   selectAllTokenIds,
   toggleTokenSelection,
 } from "@/utils/gameSelection";
-import {
-  fetchTokenPayloadFromUrl,
-  scheduleAuthUserRequest,
-  transformToken,
-} from "@/utils/token";
-import {
-  generateBinFromCombUser,
-  refreshTokenFromCombUser,
-  roleIndexFromServerId,
-} from "@/utils/wechatForceLogout";
+import { fetchTokenPayloadFromUrl } from "@/utils/token";
+import { generateBinFromCombUser } from "@/utils/wechatForceLogout";
 import BinTokenForm from "./BinTokenForm.vue";
 import ManualTokenForm from "./ManualTokenForm.vue";
 import MobileTokenForm from "./MobileTokenForm.vue";
@@ -799,7 +791,7 @@ const props = defineProps({
   api: String,
   auto: Boolean,
 });
-const { getArrayBuffer, storeArrayBuffer, deleteArrayBuffer } = useIndexedDB();
+const { getArrayBuffer } = useIndexedDB();
 const router = useRouter();
 const message = useMessage();
 const dialog = useDialog();
@@ -1019,103 +1011,11 @@ const refreshToken = async (token) => {
   refreshingTokens.value.add(token.id);
 
   try {
-    if (token.importMethod === "url") {
-      // 有源URL的token - 从URL重新获取（使用限流）
-      const data = await scheduleAuthUserRequest(async () => {
-        let response;
-
-        const isLocalUrl =
-          token.sourceUrl.startsWith(window.location.origin) ||
-          token.sourceUrl.startsWith("/") ||
-          token.sourceUrl.startsWith("http://localhost") ||
-          token.sourceUrl.startsWith("http://127.0.0.1");
-
-        if (isLocalUrl) {
-          response = await fetch(token.sourceUrl);
-        } else {
-          try {
-            response = await fetch(token.sourceUrl, {
-              method: "GET",
-              headers: {
-                Accept: "application/json",
-              },
-              mode: "cors",
-            });
-          } catch (corsError) {
-            throw new Error(
-              `跨域请求被阻止。请确保目标服务器支持CORS。错误详情: ${corsError.message}`,
-            );
-          }
-        }
-
-        if (!response.ok) {
-          throw new Error(
-            `请求失败: ${response.status} ${response.statusText}`,
-          );
-        }
-
-        const result = await response.json();
-
-        if (!result.token) {
-          throw new Error("返回数据中未找到token字段");
-        }
-
-        return result;
-      });
-
-      // 更新token信息
-      tokenStore.updateToken(token.id, {
-        token: data.token,
-        server: data.server || token.server,
-        lastRefreshed: Date.now(),
-      });
-
-      message.success("Token刷新成功");
-    } else if (token.combUser || token.importMethod === "wxForceLogout") {
-      if (!token.combUser) {
-        throw new Error("该账号未保存 combUser，无法自动刷新");
-      }
-      const refreshed = await refreshTokenFromCombUser(token.combUser, {
-        serverId: token.serverId,
-        roleIndex: token.roleIndex,
-        roleId: token.roleId,
-      });
-      tokenStore.updateToken(token.id, {
-        token: refreshed.token,
-        serverId: refreshed.role.serverId,
-        roleId: refreshed.role.roleId,
-        roleIndex: roleIndexFromServerId(refreshed.role.serverId),
-        lastRefreshed: Date.now(),
-      });
-      message.success("combUser Token刷新成功");
-    } else if (
-      token.importMethod === "wxQrcode" ||
-      token.importMethod === "bin" ||
-      token.importMethod === "mobile"
-    ) {
-      let userToken = await getArrayBuffer(token.id);
-      let usedOldKey = false;
-      if (!userToken) {
-        userToken = await getArrayBuffer(token.name);
-        usedOldKey = true;
-      }
-      if (userToken) {
-        const newToken = await transformToken(userToken);
-        tokenStore.updateToken(token.id, {
-          token: newToken,
-          lastRefreshed: Date.now(),
-        });
-        if (usedOldKey) {
-          await storeArrayBuffer(token.id, userToken);
-          await deleteArrayBuffer(token.name);
-          console.log("已迁移IndexedDB数据:", token.name, "->", token.id);
-        }
-        message.success("Token刷新成功");
-      }
-    } else {
+    const outcome = await tokenStore.refreshTokenManually(token.id);
+    if (outcome.status === "unsupported") {
       dialog.info({
         title: "重新获取Token",
-        content: `Token "${token.name}" 是通过微信扫码登录导入的，没有配置自动刷新地址。
+        content: `Token "${token.name}" 是通过手动导入或无自动刷新来源导入的，没有配置自动刷新地址。
 
 请选择以下操作：
 1. 重新手动导入新的Token
@@ -1137,10 +1037,13 @@ const refreshToken = async (token) => {
 
           // 尝试重新连接
           setTimeout(() => {
+            const latest =
+              tokenStore.gameTokens.find((item) => item.id === token.id) ||
+              token;
             tokenStore.createWebSocketConnection(
-              token.id,
-              token.token,
-              token.wsUrl,
+              latest.id,
+              latest.token,
+              latest.wsUrl,
             );
             message.info("正在尝试重新连接...");
           }, 500);
@@ -1149,14 +1052,33 @@ const refreshToken = async (token) => {
       return;
     }
 
-    // 如果当前token有连接，需要重新连接
+    if (outcome.status === "stale") {
+      message.info("该账号已通过其他方式更新凭据，已忽略旧的刷新结果");
+      return;
+    }
+
+    if (outcome.status !== "refreshed") {
+      throw new Error(outcome.message || "Token刷新失败");
+    }
+
+    message.success(
+      outcome.method === "combUser"
+        ? "combUser Token刷新成功"
+        : "Token刷新成功",
+    );
+
+    // 如果当前token有连接，使用刷新后的最新凭据重新连接
     if (tokenStore.getWebSocketStatus(token.id) === "connected") {
       tokenStore.closeWebSocketConnection(token.id);
       setTimeout(() => {
+        const latest = tokenStore.gameTokens.find(
+          (item) => item.id === token.id,
+        );
+        if (!latest) return;
         tokenStore.createWebSocketConnection(
-          token.id,
-          token.token,
-          token.wsUrl,
+          latest.id,
+          latest.token,
+          latest.wsUrl,
         );
       }, 500);
     }

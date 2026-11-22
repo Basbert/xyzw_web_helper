@@ -568,17 +568,33 @@ export class DailyTaskRunner {
         condition: 14,
         execute: async () => {
           const freshRole = await this.refreshServerRole(tokenId);
-          const bottleStopTime = freshRole?.bottleHelpers?.helperStopTime;
-          const serverTimeMs =
-            this.tokenStore.wsConnections?.[tokenId]?.client?.serverTime;
-          const confirmedStopped =
-            Number.isFinite(bottleStopTime) &&
-            Number.isFinite(serverTimeMs) &&
-            serverTimeMs > 0 &&
-            bottleStopTime <= serverTimeMs / 1000;
+          const isConfirmedRunning = (roleSnapshot) => {
+            const stopSec = roleSnapshot?.bottleHelpers?.helperStopTime;
+            const srvMs =
+              this.tokenStore.wsConnections?.[tokenId]?.client?.serverTime;
+            return (
+              Number.isFinite(stopSec) &&
+              Number.isFinite(srvMs) &&
+              srvMs > 0 &&
+              stopSec > srvMs / 1000
+            );
+          };
+          const isConfirmedStopped = (roleSnapshot) => {
+            const stopSec = roleSnapshot?.bottleHelpers?.helperStopTime;
+            const srvMs =
+              this.tokenStore.wsConnections?.[tokenId]?.client?.serverTime;
+            return (
+              Number.isFinite(stopSec) &&
+              Number.isFinite(srvMs) &&
+              srvMs > 0 &&
+              stopSec <= srvMs / 1000
+            );
+          };
+          const confirmedStopped = isConfirmedStopped(freshRole);
 
           let stoppedThisStep = false;
-          let startedThisStep = false;
+          let startAttempted = false;
+          let startConfirmed = false;
           try {
             if (!confirmedStopped) {
               this.throwIfInterrupted();
@@ -595,42 +611,73 @@ export class DailyTaskRunner {
               this.throwIfInterrupted();
             }
 
-            await this.executeGameCommand(
+            this.throwIfInterrupted();
+            this.log("执行: 开始盐罐计时");
+            this.roleStateDirty = true;
+            startAttempted = true;
+            await this.tokenStore.sendMessageWithPromise(
               tokenId,
               "bottlehelper_start",
               {},
-              "开始盐罐计时",
+              8000,
             );
-            startedThisStep = true;
+            startConfirmed = true;
+            await this.waitInterruptible(this.delaySettings.commandDelay);
+            this.throwIfInterrupted();
           } finally {
-            if (stoppedThisStep && !startedThisStep) {
-              if (this.connection?.isIntact()) {
+            if (stoppedThisStep && !startConfirmed) {
+              if (!this.connection?.isIntact()) {
+                this.log(
+                  "原连接已断开，盐罐已停止且无法确认重启状态，请重新连接或在游戏内手动检查盐罐",
+                  "error",
+                );
+              } else {
                 this.finishingCriticalStep = true;
                 try {
-                  this.log(
-                    "盐罐已停止，正在原连接上完成盐罐重启收尾...",
-                    "warning",
-                  );
-                  await this.executeGameCommand(
-                    tokenId,
-                    "bottlehelper_start",
-                    {},
-                    "重启盐罐收尾",
-                  );
-                  startedThisStep = true;
+                  let shouldSendRestart = !startAttempted;
+                  if (startAttempted) {
+                    this.log(
+                      "盐罐启动请求已发出但结果未确认，正在原连接查询盐罐状态...",
+                      "warning",
+                    );
+                    const verifyResp = await this.sendRequest(() =>
+                      this.tokenStore.sendGetRoleInfo(tokenId, {}, 0),
+                    );
+                    const verifiedRole = verifyResp?.role;
+                    if (isConfirmedRunning(verifiedRole)) {
+                      startConfirmed = true;
+                      this.log("服务器确认盐罐已在运行，无需重复启动", "info");
+                    } else if (isConfirmedStopped(verifiedRole)) {
+                      shouldSendRestart = true;
+                    } else {
+                      this.log(
+                        "无法从服务器确认盐罐运行状态，为避免重复发包不再自动补发，请在游戏内检查盐罐",
+                        "warning",
+                      );
+                    }
+                  }
+
+                  if (shouldSendRestart) {
+                    this.log(
+                      "盐罐已停止，正在原连接上完成盐罐重启收尾...",
+                      "warning",
+                    );
+                    await this.executeGameCommand(
+                      tokenId,
+                      "bottlehelper_start",
+                      {},
+                      "重启盐罐收尾",
+                    );
+                    startConfirmed = true;
+                  }
                 } catch (restartError) {
                   this.log(
-                    `盐罐已停止但重启未确认，请在游戏内手动检查盐罐状态: ${restartError.message}`,
+                    `盐罐状态核对或重启收尾未确认，请在游戏内手动检查盐罐状态: ${restartError.message}`,
                     "error",
                   );
                 } finally {
                   this.finishingCriticalStep = false;
                 }
-              } else {
-                this.log(
-                  "原连接已断开，盐罐已停止且无法自动重启，请重新连接或在游戏内手动开启盐罐",
-                  "error",
-                );
               }
             }
           }
@@ -677,7 +724,36 @@ export class DailyTaskRunner {
       });
     }
 
-    // 3. BOSS
+    // 3. BOSS（版本确认与阵容确认作为整组战斗的共同前置条件）
+    const combatGroupStatus = new Map();
+    const prepareCombatGroup = async (
+      groupKey,
+      targetFormation,
+      formationLabel,
+    ) => {
+      const state = combatGroupStatus.get(groupKey);
+      if (state === "ready") return true;
+      if (state === "deferred") return false;
+
+      if (!(await this.ensureBattleVersionForCombat(tokenId))) {
+        combatGroupStatus.set(groupKey, "deferred");
+        return false;
+      }
+      try {
+        await this.switchToFormationIfNeeded(
+          tokenId,
+          targetFormation,
+          formationLabel,
+        );
+        combatGroupStatus.set(groupKey, "ready");
+        return true;
+      } catch (error) {
+        if (error?.interrupted) throw error;
+        combatGroupStatus.set(groupKey, "deferred");
+        throw error;
+      }
+    };
+
     if (settings.bossTimes > 0) {
       let alreadyLegionBoss = statistics["legion:boss"] ?? 0;
       if (isTodayAvailable(statisticsTime["legion:boss"])) {
@@ -692,21 +768,24 @@ export class DailyTaskRunner {
         taskList.push({
           name: "军团BOSS阵容检查",
           checkOnly: true,
-          execute: async () => {
-            if (!(await this.ensureBattleVersionForCombat(tokenId)))
-              return false;
-            return this.switchToFormationIfNeeded(
-              tokenId,
+          execute: () =>
+            prepareCombatGroup(
+              "legionBoss",
               settings.bossFormation,
               "BOSS阵容",
-            );
-          },
+            ),
         });
         for (let i = 0; i < remainingLegionBoss; i++) {
           taskList.push({
             name: `军团BOSS ${i + 1}/${remainingLegionBoss}`,
             execute: async () => {
-              if (!(await this.ensureBattleVersionForCombat(tokenId)))
+              if (
+                !(await prepareCombatGroup(
+                  "legionBoss",
+                  settings.bossFormation,
+                  "BOSS阵容",
+                ))
+              )
                 return false;
               return this.executeGameCommand(
                 tokenId,
@@ -725,20 +804,21 @@ export class DailyTaskRunner {
     taskList.push({
       name: "每日BOSS阵容检查",
       checkOnly: true,
-      execute: async () => {
-        if (!(await this.ensureBattleVersionForCombat(tokenId))) return false;
-        return this.switchToFormationIfNeeded(
-          tokenId,
-          settings.bossFormation,
-          "BOSS阵容",
-        );
-      },
+      execute: () =>
+        prepareCombatGroup("dailyBoss", settings.bossFormation, "BOSS阵容"),
     });
     for (let i = 0; i < 3; i++) {
       taskList.push({
         name: `每日BOSS ${i + 1}/3`,
         execute: async () => {
-          if (!(await this.ensureBattleVersionForCombat(tokenId))) return false;
+          if (
+            !(await prepareCombatGroup(
+              "dailyBoss",
+              settings.bossFormation,
+              "BOSS阵容",
+            ))
+          )
+            return false;
           return this.executeGameCommand(
             tokenId,
             "fight_startboss",

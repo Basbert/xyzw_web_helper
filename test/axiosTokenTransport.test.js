@@ -49,7 +49,7 @@ test("real Axios preserves binary login bodies, arraybuffer responses and sequen
       return {
         getData: () =>
           bytes[0] === 1
-            ? { roleId: "synthetic-role" }
+            ? { roleId: "synthetic-role", roleToken: "synthetic-role-token" }
             : { roles: { server1: { name: "synthetic" } } },
       };
     },

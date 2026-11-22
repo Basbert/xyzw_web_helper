@@ -250,9 +250,8 @@ import {
 } from "@/utils/dailyTaskSettings";
 import { convertBinToLx } from "@/utils/gameLauncher";
 import {
-  createServerTimeSample,
   getEstimatedServerNowSec,
-  updateServerTimeSample,
+  sampleFromWebSocketClient,
 } from "@/utils/serverClock";
 
 const router = useRouter();
@@ -397,17 +396,24 @@ watch(
       const id = tokenStore.selectedToken?.id;
       return id ? tokenStore.wsConnections?.[id]?.client?.serverTime : null;
     },
+    () => {
+      const id = tokenStore.selectedToken?.id;
+      return id
+        ? tokenStore.wsConnections?.[id]?.client?.serverTimeSampledAt
+        : null;
+    },
     () => tokenStore.gameData?.roleInfo,
   ],
-  ([tokenId, connected, clientServerTime], [prevTokenId]) => {
+  ([tokenId, connected], [prevTokenId]) => {
     if (!tokenId || !connected) {
       serverTimeSample.value = null;
       return;
     }
-    serverTimeSample.value =
-      tokenId === prevTokenId
-        ? updateServerTimeSample(serverTimeSample.value, clientServerTime)
-        : createServerTimeSample(clientServerTime);
+    const client = tokenStore.wsConnections?.[tokenId]?.client;
+    serverTimeSample.value = sampleFromWebSocketClient(
+      client,
+      tokenId === prevTokenId ? serverTimeSample.value : null,
+    );
   },
   { immediate: true },
 );

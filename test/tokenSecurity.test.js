@@ -110,7 +110,13 @@ test("transformToken and getServerList configure timeouts and omit invalid refer
   const { transformToken, getServerList } = await loadTokenModule({
     post: async (url, _body, config) => {
       requests.push({ url, config });
-      return { data: { roleId: "1", roles: { 1001: {} } } };
+      return {
+        data: {
+          roleId: "1",
+          roleToken: "synthetic-role-token",
+          roles: { 1001: {} },
+        },
+      };
     },
   });
 
@@ -165,6 +171,8 @@ test("transformToken rejects empty objects and payloads without credential field
     {},
     { roleToken: "" },
     { roleToken: "   " },
+    { roleId: "123456" },
+    { uid: "u1", openId: "o1" },
     { foo: "bar" },
   ]) {
     const { transformToken } = await loadTokenModule({

@@ -504,6 +504,7 @@ export class XyzwWebSocketClient {
     this.wireSeq = 0;
     // Latest correlated server response time; never infer completion from the browser clock.
     this.serverTime = undefined;
+    this.serverTimeSampledAt = undefined;
     this.sendQueue = [];
     this.sendQueueTimer = null;
     this.heartbeatTimer = null;
@@ -559,6 +560,7 @@ export class XyzwWebSocketClient {
     const socket = new WebSocket(this.url);
     this.socket = socket;
     this.serverTime = undefined;
+    this.serverTimeSampledAt = undefined;
     this.wireSeq = 0;
     this.ack = 0;
 
@@ -1304,8 +1306,14 @@ export class XyzwWebSocketClient {
       typeof responseId === "number" ||
       (typeof responseId === "string" && /^\d+$/.test(responseId));
     if (hasSequence && !this.promises[responseId]) return;
-    if (Number.isFinite(packet.time) && packet.time > 0)
+    if (Number.isFinite(packet.time) && packet.time > 0) {
       this.serverTime = packet.time;
+      this.serverTimeSampledAt =
+        typeof performance !== "undefined" &&
+        typeof performance.now === "function"
+          ? performance.now()
+          : Date.now();
+    }
 
     // 优先使用resp字段进行响应匹配（新的正确方式）
     if (packet.resp !== undefined && this.promises[packet.resp]) {

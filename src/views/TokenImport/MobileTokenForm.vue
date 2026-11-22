@@ -511,7 +511,20 @@ const handleImport = async () => {
       getArrayBuffer,
       storeArrayBuffer,
       deleteArrayBuffer,
+      allowPartial: true,
     });
+    if (result.failedRoles.length > 0) {
+      roleList.value = result.failedRoles.map((item) => item.role);
+      const firstError =
+        result.failedRoles[0]?.error?.message || "导入失败，请重试";
+      const succeededTotal = result.addedCount + result.updatedCount;
+      message.error(
+        succeededTotal > 0
+          ? `已导入 ${succeededTotal} 个角色，仍有 ${result.failedRoles.length} 个失败：${firstError}`
+          : firstError,
+      );
+      return;
+    }
     roleList.value = [];
     message.success(formatUpsertImportMessage(result));
     emit("ok");

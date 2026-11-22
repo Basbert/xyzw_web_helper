@@ -47,6 +47,24 @@ export function updateServerTimeSample(
   };
 }
 
+export function sampleFromWebSocketClient(
+  client,
+  previousSample = null,
+  monotonicMs = readMonotonicMs(),
+) {
+  if (!client) return null;
+  const serverTimeMs = Number(client.serverTime);
+  if (!Number.isFinite(serverTimeMs) || serverTimeMs <= 0) return null;
+  const clientSampledAt = Number(client.serverTimeSampledAt);
+  if (Number.isFinite(clientSampledAt)) {
+    return {
+      serverTimeMs,
+      sampledAtMs: clientSampledAt,
+    };
+  }
+  return updateServerTimeSample(previousSample, serverTimeMs, monotonicMs);
+}
+
 export function getEstimatedServerNowSec(
   sample,
   fallbackWallClockMs = Date.now(),

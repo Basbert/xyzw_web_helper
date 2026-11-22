@@ -40,9 +40,8 @@ import { useMessage } from "naive-ui";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import {
-  createServerTimeSample,
   getEstimatedServerNowSec,
-  updateServerTimeSample,
+  sampleFromWebSocketClient,
 } from "@/utils/serverClock";
 import { runStandaloneDailyAction } from "@/utils/standaloneDailyActions";
 import MyCard from "../Common/MyCard.vue";
@@ -113,12 +112,11 @@ const syncFromRole = () => {
     resetState();
     return;
   }
-  const clientServerTime =
-    tokenStore.wsConnections?.[tokenId]?.client?.serverTime;
-  serverTimeSample =
-    sampledTokenId === tokenId
-      ? updateServerTimeSample(serverTimeSample, clientServerTime)
-      : createServerTimeSample(clientServerTime);
+  const client = tokenStore.wsConnections?.[tokenId]?.client;
+  serverTimeSample = sampleFromWebSocketClient(
+    client,
+    sampledTokenId === tokenId ? serverTimeSample : null,
+  );
   sampledTokenId = tokenId;
   state.value.stopTime = stopTime;
   recomputeFromTimestamp();
@@ -131,6 +129,10 @@ watch(
     tokenStore.selectedToken?.id
       ? tokenStore.wsConnections?.[tokenStore.selectedToken.id]?.client
           ?.serverTime
+      : null,
+    tokenStore.selectedToken?.id
+      ? tokenStore.wsConnections?.[tokenStore.selectedToken.id]?.client
+          ?.serverTimeSampledAt
       : null,
   ],
   () => syncFromRole(),

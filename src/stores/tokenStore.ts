@@ -291,6 +291,7 @@ export const useTokenStore = defineStore("tokens", () => {
   ]);
   let credentialVersionSeed = 0;
   const tokenCredentialVersions = new Map<string, number>();
+  const credentialOperationQueues = new Map<string, Promise<unknown>>();
   const inFlightBattleVersion = new Map<
     string,
     { client: unknown; socket: unknown; promise: Promise<number | null> }
@@ -301,6 +302,135 @@ export const useTokenStore = defineStore("tokens", () => {
     const next = ++credentialVersionSeed;
     tokenCredentialVersions.set(tokenId, next);
     return next;
+  };
+  const runWithCredentialLock = <T>(
+    tokenId: string,
+    task: () => Promise<T>,
+  ): Promise<T> => {
+    const previous =
+      credentialOperationQueues.get(tokenId) || Promise.resolve();
+    const next = previous.then(task, task);
+    const tail = next.then(
+      () => {},
+      () => {},
+    );
+    credentialOperationQueues.set(tokenId, tail);
+    tail.finally(() => {
+      if (credentialOperationQueues.get(tokenId) === tail) {
+        credentialOperationQueues.delete(tokenId);
+      }
+    });
+    return next;
+  };
+
+  interface CredentialBinStorage {
+    getArrayBuffer: (key: string) => Promise<ArrayBuffer | null>;
+    storeArrayBuffer: (key: string, data: ArrayBuffer) => Promise<boolean>;
+    deleteArrayBuffer?: (key: string) => Promise<boolean>;
+  }
+
+  interface CommitCredentialOptions {
+    updates: Partial<TokenData>;
+    expectedVersion?: number;
+    expectedToken?: string;
+    expectedCreatedAt?: string;
+    binData?: ArrayBuffer | null;
+    binStorage?: CredentialBinStorage;
+    deleteOldBinKey?: string | null;
+    closeActiveConnection?: boolean;
+  }
+
+  /**
+   * Atomically serialize per-account BIN writes and token metadata updates
+   * under a credential lock with optional optimistic version verification.
+   */
+  const commitCredentialUpdate = async (
+    tokenId: string,
+    options: CommitCredentialOptions,
+  ) => {
+    return runWithCredentialLock(tokenId, async () => {
+      const latest = gameTokens.value.find((t) => t.id === tokenId);
+      if (!latest) {
+        return {
+          committed: false,
+          stale: false,
+          reason: "token_missing" as const,
+        };
+      }
+
+      if (options.expectedVersion !== undefined) {
+        const versionMismatch =
+          getCredentialVersion(tokenId) !== options.expectedVersion;
+        const tokenMismatch =
+          options.expectedToken !== undefined &&
+          latest.token !== options.expectedToken;
+        const createdAtMismatch =
+          Boolean(options.expectedCreatedAt) &&
+          latest.createdAt !== options.expectedCreatedAt;
+        if (versionMismatch || tokenMismatch || createdAtMismatch) {
+          return { committed: false, stale: true, reason: "stale" as const };
+        }
+      }
+
+      const storage: CredentialBinStorage = options.binStorage || {
+        getArrayBuffer,
+        storeArrayBuffer,
+        deleteArrayBuffer,
+      };
+      let binWritten = false;
+      let previousBin: ArrayBuffer | null = null;
+
+      if (options.binData) {
+        previousBin = await storage.getArrayBuffer(tokenId);
+        const saved = await storage.storeArrayBuffer(tokenId, options.binData);
+        if (!saved) {
+          return {
+            committed: false,
+            stale: false,
+            reason: "bin_write_failed" as const,
+          };
+        }
+        binWritten = true;
+      }
+
+      const updated = updateToken(tokenId, options.updates);
+      if (!updated) {
+        if (binWritten) {
+          if (previousBin) {
+            await storage.storeArrayBuffer(tokenId, previousBin);
+          } else if (typeof storage.deleteArrayBuffer === "function") {
+            await storage.deleteArrayBuffer(tokenId);
+          }
+        }
+        return {
+          committed: false,
+          stale: false,
+          reason: "token_missing" as const,
+        };
+      }
+
+      if (
+        options.deleteOldBinKey &&
+        options.deleteOldBinKey !== tokenId &&
+        typeof storage.deleteArrayBuffer === "function"
+      ) {
+        await storage.deleteArrayBuffer(options.deleteOldBinKey);
+      }
+
+      if (options.closeActiveConnection) {
+        const status = getWebSocketStatus(tokenId);
+        if (status && status !== "disconnected") {
+          closeWebSocketConnection(tokenId);
+        }
+      }
+
+      return {
+        committed: true,
+        stale: false,
+        reason: null,
+        token: gameTokens.value.find((t) => t.id === tokenId) || null,
+      };
+    });
   };
 
   /**
@@ -450,29 +580,42 @@ export const useTokenStore = defineStore("tokens", () => {
   // Token刷新尝试记录
   const tokenRefreshAttempts = ref<Record<string, number>>({});
 
-  // 尝试自动刷新Token
-  const attemptTokenRefresh = async (
+  type CredentialRefreshOutcome =
+    | {
+        status: "refreshed";
+        method: "url" | "combUser" | "bin";
+        token: TokenData | null;
+      }
+    | { status: "stale" }
+    | { status: "unsupported" }
+    | { status: "cooldown" }
+    | { status: "failed"; message: string };
+
+  const executeCredentialRefresh = async (
     tokenId: string,
-    forceReconnect = false,
-    deferReconnect = false,
-  ) => {
-    // 检查冷却时间 (10秒)
-    const lastAttempt = tokenRefreshAttempts.value[tokenId] || 0;
-    const now = Date.now();
-    if (now - lastAttempt < 10000) {
-      wsLogger.warn(`Token刷新过于频繁，跳过 [${tokenId}]`);
-      return false;
+    options: { respectCooldown?: boolean } = {},
+  ): Promise<CredentialRefreshOutcome> => {
+    if (options.respectCooldown) {
+      const lastAttempt = tokenRefreshAttempts.value[tokenId] || 0;
+      const now = Date.now();
+      if (now - lastAttempt < 10000) {
+        wsLogger.warn(`Token刷新过于频繁，跳过 [${tokenId}]`);
+        return { status: "cooldown" };
+      }
+      tokenRefreshAttempts.value[tokenId] = now;
     }
-    tokenRefreshAttempts.value[tokenId] = now;
 
     const gameToken = gameTokens.value.find((t) => t.id === tokenId);
-    if (!gameToken) return false;
+    if (!gameToken) {
+      return { status: "failed", message: "账号不存在" };
+    }
 
     const startVersion = getCredentialVersion(tokenId);
     const startToken = gameToken.token;
     const startCreatedAt = gameToken.createdAt;
     const refreshInput = {
       name: gameToken.name,
+      server: gameToken.server,
       importMethod: gameToken.importMethod,
       sourceUrl: gameToken.sourceUrl,
       combUser: gameToken.combUser,
@@ -489,33 +632,49 @@ export const useTokenStore = defineStore("tokens", () => {
       return true;
     };
 
-    wsLogger.info(`尝试自动刷新Token [${tokenId}]`);
-    let refreshSuccess = false;
+    wsLogger.info(`尝试刷新Token [${tokenId}]`);
 
     try {
+      let method: "url" | "combUser" | "bin" | null = null;
+      let updates: Partial<TokenData> | null = null;
+      let binData: ArrayBuffer | null = null;
+      let deleteOldBinKey: string | null = null;
+
       if (refreshInput.importMethod === "url" && refreshInput.sourceUrl) {
-        // URL形式token刷新
-        const token = await scheduleAuthUserRequest(async () => {
-          const data = await fetchTokenPayloadFromUrl(refreshInput.sourceUrl!, {
+        const data = await scheduleAuthUserRequest(async () => {
+          return await fetchTokenPayloadFromUrl(refreshInput.sourceUrl!, {
             timeoutMs: 10000,
           });
-          if (typeof data.token === "string" && data.token.trim()) {
-            return data.token;
-          }
-          return null;
         });
         if (!isRefreshStillCurrent()) {
-          wsLogger.info(
-            `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
-          );
-          return false;
+          return { status: "stale" };
         }
-        if (token) {
-          updateToken(tokenId, { token, lastRefreshed: Date.now() });
-          wsLogger.info(`从URL获取token成功: ${refreshInput.name}`);
-          refreshSuccess = true;
+        const token =
+          typeof data?.token === "string" && data.token.trim()
+            ? data.token
+            : null;
+        if (!token) {
+          return { status: "failed", message: "返回数据中未找到有效的 token" };
         }
-      } else if (refreshInput.combUser) {
+        method = "url";
+        updates = {
+          token,
+          ...(typeof data.server === "string" && data.server.trim()
+            ? { server: data.server }
+            : {}),
+          lastRefreshed: Date.now(),
+        };
+      } else if (
+        refreshInput.combUser ||
+        refreshInput.importMethod === "wxForceLogout"
+      ) {
+        if (!refreshInput.combUser) {
+          wsLogger.error(`Token刷新失败: 未保存 combUser [${tokenId}]`);
+          return {
+            status: "failed",
+            message: "该账号未保存 combUser，无法自动刷新",
+          };
+        }
         const refreshed = await refreshTokenFromCombUser(
           refreshInput.combUser as Parameters<
             typeof refreshTokenFromCombUser
@@ -527,31 +686,25 @@ export const useTokenStore = defineStore("tokens", () => {
           },
         );
         if (!isRefreshStillCurrent()) {
-          wsLogger.info(
-            `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
-          );
-          return false;
+          return { status: "stale" };
         }
-        updateToken(tokenId, {
+        method = "combUser";
+        updates = {
           token: refreshed.token,
           serverId: refreshed.role.serverId,
           roleId: refreshed.role.roleId,
           roleIndex: roleIndexFromServerId(refreshed.role.serverId),
           lastRefreshed: Date.now(),
-        });
-        refreshSuccess = true;
-      } else if (refreshInput.importMethod === "wxForceLogout") {
-        wsLogger.error(`Token刷新失败: 未保存 combUser [${tokenId}]`);
+        };
       } else if (
         refreshInput.importMethod === "bin" ||
         refreshInput.importMethod === "wxQrcode" ||
         refreshInput.importMethod === "mobile"
       ) {
-        // Bin形式token刷新
         let userToken: ArrayBuffer | null = await getArrayBuffer(tokenId);
         let usedOldKey = false;
 
-        if (!userToken) {
+        if (!userToken && refreshInput.name) {
           const tokenByName = await getArrayBuffer(refreshInput.name);
           if (tokenByName) {
             userToken = tokenByName;
@@ -559,43 +712,89 @@ export const useTokenStore = defineStore("tokens", () => {
           }
         }
 
-        if (userToken) {
-          const token = await transformToken(userToken);
-          if (!isRefreshStillCurrent()) {
-            wsLogger.info(
-              `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
-            );
-            return false;
-          }
-          if (usedOldKey) {
-            const saved = await storeArrayBuffer(tokenId, userToken);
-            if (!isRefreshStillCurrent()) {
-              wsLogger.info(
-                `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
-              );
-              return false;
-            }
-            if (saved) {
-              await deleteArrayBuffer(refreshInput.name);
-            }
-          }
-          if (!isRefreshStillCurrent()) {
-            wsLogger.info(
-              `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
-            );
-            return false;
-          }
-          updateToken(tokenId, { token, lastRefreshed: Date.now() });
-          refreshSuccess = true;
-        } else {
+        if (!userToken) {
           wsLogger.error(`Token刷新失败: 未找到BIN数据 [${tokenId}]`);
+          return {
+            status: "failed",
+            message: "未找到该账号的本地 BIN 凭据，请重新登录",
+          };
         }
+
+        const token = await transformToken(userToken);
+        if (!isRefreshStillCurrent()) {
+          return { status: "stale" };
+        }
+        method = "bin";
+        updates = { token, lastRefreshed: Date.now() };
+        if (usedOldKey) {
+          binData = userToken;
+          deleteOldBinKey = refreshInput.name;
+        }
+      } else {
+        return { status: "unsupported" };
       }
+
+      const commit = await commitCredentialUpdate(tokenId, {
+        expectedVersion: startVersion,
+        expectedToken: startToken,
+        expectedCreatedAt: startCreatedAt,
+        updates: updates!,
+        binData,
+        deleteOldBinKey,
+      });
+
+      if (commit.stale) {
+        wsLogger.info(
+          `Token刷新结果已过期（账号凭据已更新），忽略旧结果 [${tokenId}]`,
+        );
+        return { status: "stale" };
+      }
+      if (!commit.committed) {
+        return {
+          status: "failed",
+          message:
+            commit.reason === "bin_write_failed"
+              ? "迁移本地 BIN 凭据失败，已保留原凭据"
+              : "更新账号凭据失败",
+        };
+      }
+      return {
+        status: "refreshed",
+        method: method!,
+        token: commit.token ?? null,
+      };
     } catch (error) {
       wsLogger.error(`Token刷新过程出错 [${tokenId}]:`, error);
+      if (!isRefreshStillCurrent()) {
+        return { status: "stale" };
+      }
+      return {
+        status: "failed",
+        message: getErrorMessage(error) || "Token刷新失败",
+      };
+    }
+  };
+
+  // 手动刷新入口（与自动刷新、扫码导入共用同一凭据版本校验与串行锁）
+  const refreshTokenManually = async (tokenId: string) => {
+    return executeCredentialRefresh(tokenId, { respectCooldown: false });
+  };
+
+  // 尝试自动刷新Token
+  const attemptTokenRefresh = async (
+    tokenId: string,
+    forceReconnect = false,
+    deferReconnect = false,
+  ) => {
+    const outcome = await executeCredentialRefresh(tokenId, {
+      respectCooldown: true,
+    });
+
+    if (outcome.status === "cooldown" || outcome.status === "stale") {
+      return false;
     }
 
-    if (refreshSuccess) {
+    if (outcome.status === "refreshed") {
       wsLogger.info(`Token刷新成功 [${tokenId}]`);
 
       const currentPath = router.currentRoute.value.path;
@@ -612,27 +811,22 @@ export const useTokenStore = defineStore("tokens", () => {
         gameTokens.value.some((t) => t.id === tokenId)
       ) {
         wsLogger.info(`触发自动重连 [${tokenId}]`);
-        // 重置重连状态以允许立即重连
         if (wsConnections.value[tokenId]) {
           wsConnections.value[tokenId].reconnectAttempts = 0;
         }
         selectToken(tokenId, true);
       }
       return true;
-    } else {
-      if (!isRefreshStillCurrent()) {
-        wsLogger.info(`Token刷新失败但账号凭据已更新，忽略旧错误 [${tokenId}]`);
-        return false;
-      }
-      if (wsConnections.value[tokenId]) {
-        wsConnections.value[tokenId].lastError = {
-          timestamp: new Date().toISOString(),
-          error: "登录凭据已失效，请前往账号管理重新登录",
-        };
-      }
-      wsLogger.error(`Token刷新失败，请手动重新导入 [${tokenId}]`);
-      return false;
     }
+
+    if (wsConnections.value[tokenId]) {
+      wsConnections.value[tokenId].lastError = {
+        timestamp: new Date().toISOString(),
+        error: "登录凭据已失效，请前往账号管理重新登录",
+      };
+    }
+    wsLogger.error(`Token刷新失败，请手动重新导入 [${tokenId}]`);
+    return false;
   };
 
   // 游戏消息处理
@@ -2429,6 +2623,8 @@ export const useTokenStore = defineStore("tokens", () => {
     // Token管理方法
     addToken,
     updateToken,
+    commitCredentialUpdate,
+    refreshTokenManually,
     removeToken,
     selectToken,
 
