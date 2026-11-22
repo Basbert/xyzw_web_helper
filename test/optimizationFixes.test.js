@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { describe, test } from "node:test";
+import { after, before, describe, test } from "node:test";
 import vm from "node:vm";
 import * as vueUseCore from "@vueuse/core";
 import { createPinia, defineStore, setActivePinia } from "pinia";
@@ -3709,6 +3709,59 @@ describe("Commit 7 review round-4 regression fixes (2 P1 + 3 P2)", () => {
 });
 
 describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
+  let prevStorageDescriptor;
+  let prevStorageEventDescriptor;
+  let installedStorageShim = false;
+  let installedStorageEventShim = false;
+
+  before(() => {
+    if (typeof globalThis.Storage === "undefined") {
+      prevStorageDescriptor = Object.getOwnPropertyDescriptor(
+        globalThis,
+        "Storage",
+      );
+      globalThis.Storage = class MockStorage {};
+      installedStorageShim = true;
+    }
+    if (typeof globalThis.StorageEvent === "undefined") {
+      prevStorageEventDescriptor = Object.getOwnPropertyDescriptor(
+        globalThis,
+        "StorageEvent",
+      );
+      globalThis.StorageEvent = class MockStorageEvent extends Event {
+        constructor(type, init = {}) {
+          super(type);
+          this.key = init.key ?? null;
+          this.oldValue = init.oldValue ?? null;
+          this.newValue = init.newValue ?? null;
+          this.storageArea = init.storageArea ?? null;
+        }
+      };
+      installedStorageEventShim = true;
+    }
+  });
+
+  after(() => {
+    if (installedStorageShim) {
+      if (prevStorageDescriptor) {
+        Object.defineProperty(globalThis, "Storage", prevStorageDescriptor);
+      } else {
+        delete globalThis.Storage;
+      }
+    }
+    if (installedStorageEventShim) {
+      if (prevStorageEventDescriptor) {
+        Object.defineProperty(
+          globalThis,
+          "StorageEvent",
+          prevStorageEventDescriptor,
+        );
+      } else {
+        delete globalThis.StorageEvent;
+      }
+    }
+  });
+
   const createLockManager = () => {
     const tails = new Map();
     return {
@@ -4077,7 +4130,10 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       assert.equal(diskAfterFail[0].token, "old-persisted-token");
       assert.deepEqual(diskAfterFail[0].combUser, { legacy: true });
       assert.equal(tab.store.gameTokens[0].token, "old-persisted-token");
-      assert.deepEqual(tab.store.gameTokens[0].combUser, { legacy: true });
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(tab.store.gameTokens[0].combUser)),
+        { legacy: true },
+      );
       assert.equal(tab.store.getCredentialVersion("acc1"), 0);
       // Old BIN restored at acc1, temp BIN preserved, active connection untouched
       assert.deepEqual(
@@ -4233,6 +4289,479 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     } finally {
       tabA.pinia._e.stop();
       tabB.pinia._e.stop();
+    }
+  });
+
+  test("Round6 P1-2: first-time import fails explicitly when gameTokens key does not exist yet and localStorage rejects writes", async () => {
+    // Subcase A: localStorage.setItem throws QuotaExceededError on brand-new storage (no "gameTokens" key yet)
+    const emptyStorageA = new Map();
+    const idbA = new Map([["temp-brand-new", new Uint8Array([3, 4]).buffer]]);
+    const locksA = createLockManager();
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage: emptyStorageA,
+      sharedIdb: idbA,
+      sharedLocks: locksA,
+      shouldFailSetItem: (key) => key === "gameTokens",
+    });
+
+    try {
+      assert.equal(emptyStorageA.has("gameTokens"), false);
+      await assert.rejects(
+        upsertImportedRoleTokens({
+          roles: [
+            {
+              id: "temp-brand-new",
+              roleId: "3001",
+              name: "首导角色",
+              token: "first-import-token",
+              importMethod: "bin",
+            },
+          ],
+          tokenStore: tabA.store,
+          getArrayBuffer: async (k) => idbA.get(k) ?? null,
+          storeArrayBuffer: async (k, buf) => {
+            idbA.set(k, buf);
+            return true;
+          },
+          deleteArrayBuffer: async (k) => idbA.delete(k),
+        }),
+        /保存账号列表到本地存储失败/,
+      );
+      assert.equal(tabA.store.gameTokens.length, 0);
+      assert.equal(emptyStorageA.has("gameTokens"), false);
+      assert.equal(idbA.has("temp-brand-new"), true);
+
+      // Direct commitNewToken must also fail explicitly instead of silently keeping in-memory state
+      await assert.rejects(
+        tabA.store.commitNewToken({
+          id: "manual-1",
+          name: "手动号",
+          token: "manual-token-long",
+        }),
+        /保存账号列表到本地存储失败/,
+      );
+      assert.equal(tabA.store.gameTokens.length, 0);
+    } finally {
+      tabA.pinia._e.stop();
+    }
+
+    // Subcase B: silent read-only localStorage (setItem drops writes without throwing)
+    const droppedStorage = new Map();
+    const idbB = new Map([["temp-silent", new Uint8Array([5, 6]).buffer]]);
+    const locksB = createLockManager();
+    const piniaB = createPinia();
+    setActivePinia(piniaB);
+    const noopLogger = {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+      verbose() {},
+      gameMessage() {},
+    };
+    const silentReadOnlyStorage = {
+      getItem: (k) => (droppedStorage.has(k) ? droppedStorage.get(k) : null),
+      setItem: () => {
+        // Silently ignore write
+      },
+      removeItem: (k) => droppedStorage.delete(k),
+    };
+    const modB = await loadModule(
+      new URL("../src/stores/tokenStore.ts", import.meta.url),
+      {
+        "@/utils/accountIdentity.js": accountIdentity,
+        "@vueuse/core": {
+          useLocalStorage: (key, initial, opts) =>
+            vueUseCore.useStorage(key, initial, silentReadOnlyStorage, opts),
+        },
+        pinia: { defineStore },
+        vue,
+        "@/hooks/useIndexedDB": {
+          default: () => ({
+            getArrayBuffer: async (k) => idbB.get(k) ?? null,
+            storeArrayBuffer: async (k, buf) => {
+              idbB.set(k, buf);
+              return true;
+            },
+            deleteArrayBuffer: async (k) => {
+              idbB.delete(k);
+              return true;
+            },
+            clearAll: async () => {
+              idbB.clear();
+              return true;
+            },
+          }),
+        },
+        "@/router": {
+          default: { currentRoute: { value: { path: "/tokens" } } },
+        },
+        "@/utils/accountGameData": accountData,
+        "@/utils/bonProtocol": { g_utils: {} },
+        "@/utils/connectionRecovery": {
+          createConnectionRecovery: (opts) =>
+            createConnectionRecovery({
+              ...opts,
+              setTimer: () => 1,
+              clearTimer: () => {},
+            }),
+        },
+        "@/utils/logger": {
+          gameLogger: noopLogger,
+          tokenLogger: noopLogger,
+          wsLogger: noopLogger,
+        },
+        "@/utils/randomSeed": { generateRandomSeed: () => 1 },
+        "@/utils/token": {
+          fetchTokenPayloadFromUrl: async () => ({}),
+          scheduleAuthUserRequest: (fn) => fn(),
+          setAuthUserRateLimiterCallback() {},
+          transformToken: async () => "{}",
+        },
+        "@/utils/wechatForceLogout": {
+          refreshTokenFromCombUser: async () => ({}),
+          roleIndexFromServerId: () => 0,
+        },
+        "@/utils/xyzwWebSocket": {
+          XyzwWebSocketClient: class {},
+        },
+        "./events/index.js": { $emit: { emit() {} }, emitPlus() {} },
+      },
+      {
+        AbortController,
+        WebSocket: { CLOSED: 3 },
+        localStorage: silentReadOnlyStorage,
+        navigator: { onLine: true, locks: locksB },
+        setTimeout,
+        clearTimeout,
+        setInterval: () => 1,
+        clearInterval() {},
+        window: {
+          location: { href: "http://127.0.0.1/" },
+          addEventListener() {},
+          removeEventListener() {},
+          dispatchEvent() {},
+        },
+        document: {
+          visibilityState: "visible",
+          addEventListener() {},
+          removeEventListener() {},
+        },
+      },
+    );
+    const storeB = modB.useTokenStore();
+    try {
+      await assert.rejects(
+        upsertImportedRoleTokens({
+          roles: [
+            {
+              id: "temp-silent",
+              roleId: "3002",
+              name: "静默只读角色",
+              token: "silent-token",
+              importMethod: "bin",
+            },
+          ],
+          tokenStore: storeB,
+          getArrayBuffer: async (k) => idbB.get(k) ?? null,
+          storeArrayBuffer: async (k, buf) => {
+            idbB.set(k, buf);
+            return true;
+          },
+          deleteArrayBuffer: async (k) => idbB.delete(k),
+        }),
+        /保存账号列表到本地存储失败/,
+      );
+      assert.equal(storeB.gameTokens.length, 0);
+      assert.equal(idbB.has("temp-silent"), true);
+    } finally {
+      piniaB._e.stop();
+    }
+  });
+
+  test("Round6 P1-3: removeToken and clearAllTokens verify both localStorage and IndexedDB, preserve BIN on list failure, and return retryable failure state", async () => {
+    const initialTokens = [
+      {
+        id: "acc1",
+        name: "主号",
+        roleId: "1001",
+        token: "tok-1",
+        importMethod: "bin",
+        createdAt: "2026-11-01T00:00:00.000Z",
+      },
+    ];
+    const sharedStorage = new Map([
+      ["gameTokens", JSON.stringify(initialTokens)],
+      ["selectedTokenId", "acc1"],
+    ]);
+    const sharedIdb = new Map([["acc1", new Uint8Array([8, 9]).buffer]]);
+    const sharedLocks = createLockManager();
+    let failGameTokensWrite = false;
+    let failIdbDelete = false;
+    let clearAllCalled = 0;
+
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const noopLogger = {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+      verbose() {},
+      gameMessage() {},
+    };
+    const storageAdapter = {
+      getItem: (k) => (sharedStorage.has(k) ? sharedStorage.get(k) : null),
+      setItem: (k, v) => {
+        if (failGameTokensWrite && k === "gameTokens") {
+          throw new Error("QuotaExceededError");
+        }
+        sharedStorage.set(k, String(v));
+      },
+      removeItem: (k) => sharedStorage.delete(k),
+    };
+
+    const mod = await loadModule(
+      new URL("../src/stores/tokenStore.ts", import.meta.url),
+      {
+        "@/utils/accountIdentity.js": accountIdentity,
+        "@vueuse/core": {
+          useLocalStorage: (key, initial, opts) =>
+            vueUseCore.useStorage(key, initial, storageAdapter, opts),
+        },
+        pinia: { defineStore },
+        vue,
+        "@/hooks/useIndexedDB": {
+          default: () => ({
+            getArrayBuffer: async (k) => sharedIdb.get(k) ?? null,
+            storeArrayBuffer: async (k, buf) => {
+              sharedIdb.set(k, buf);
+              return true;
+            },
+            deleteArrayBuffer: async (k) => {
+              if (failIdbDelete) return false;
+              sharedIdb.delete(k);
+              return true;
+            },
+            clearAll: async () => {
+              clearAllCalled += 1;
+              if (failIdbDelete) return false;
+              sharedIdb.clear();
+              return true;
+            },
+          }),
+        },
+        "@/router": {
+          default: { currentRoute: { value: { path: "/tokens" } } },
+        },
+        "@/utils/accountGameData": accountData,
+        "@/utils/bonProtocol": { g_utils: {} },
+        "@/utils/connectionRecovery": {
+          createConnectionRecovery: (opts) =>
+            createConnectionRecovery({
+              ...opts,
+              setTimer: () => 1,
+              clearTimer: () => {},
+            }),
+        },
+        "@/utils/logger": {
+          gameLogger: noopLogger,
+          tokenLogger: noopLogger,
+          wsLogger: noopLogger,
+        },
+        "@/utils/randomSeed": { generateRandomSeed: () => 1 },
+        "@/utils/token": {
+          fetchTokenPayloadFromUrl: async () => ({}),
+          scheduleAuthUserRequest: (fn) => fn(),
+          setAuthUserRateLimiterCallback() {},
+          transformToken: async () => "{}",
+        },
+        "@/utils/wechatForceLogout": {
+          refreshTokenFromCombUser: async () => ({}),
+          roleIndexFromServerId: () => 0,
+        },
+        "@/utils/xyzwWebSocket": { XyzwWebSocketClient: class {} },
+        "./events/index.js": { $emit: { emit() {} }, emitPlus() {} },
+      },
+      {
+        AbortController,
+        WebSocket: { CLOSED: 3 },
+        localStorage: storageAdapter,
+        navigator: { onLine: true, locks: sharedLocks },
+        setTimeout,
+        clearTimeout,
+        setInterval: () => 1,
+        clearInterval() {},
+        window: {
+          location: { href: "http://127.0.0.1/" },
+          addEventListener() {},
+          removeEventListener() {},
+          dispatchEvent() {},
+        },
+        document: {
+          visibilityState: "visible",
+          addEventListener() {},
+          removeEventListener() {},
+        },
+      },
+    );
+    const store = mod.useTokenStore();
+
+    try {
+      // Case A: clearAllTokens fails when localStorage rejects write -> MUST NOT call clearAll() and MUST keep BIN & account
+      failGameTokensWrite = true;
+      const clearStorageFail = await store.clearAllTokens();
+      assert.equal(clearStorageFail.ok, false);
+      assert.equal(clearStorageFail.retryable, true);
+      assert.equal(clearStorageFail.reason, "storage_write_failed");
+      assert.equal(clearAllCalled, 0);
+      assert.equal(sharedIdb.has("acc1"), true);
+      assert.equal(store.gameTokens.length, 1);
+      assert.equal(JSON.parse(sharedStorage.get("gameTokens")).length, 1);
+
+      // Case B: removeToken fails when localStorage rejects write -> keeps account & BIN intact
+      const removeStorageFail = await store.removeToken("acc1");
+      assert.equal(removeStorageFail.ok, false);
+      assert.equal(removeStorageFail.retryable, true);
+      assert.equal(removeStorageFail.reason, "storage_write_failed");
+      assert.equal(sharedIdb.has("acc1"), true);
+      assert.equal(store.gameTokens.length, 1);
+
+      // Case C: clearAllTokens fails when IndexedDB clearAll() returns false -> rolls back list and returns retryable error
+      failGameTokensWrite = false;
+      failIdbDelete = true;
+      const clearIdbFail = await store.clearAllTokens();
+      assert.equal(clearIdbFail.ok, false);
+      assert.equal(clearIdbFail.binCleared, false);
+      assert.equal(clearIdbFail.retryable, true);
+      assert.equal(clearIdbFail.reason, "bin_delete_failed");
+      assert.equal(sharedIdb.has("acc1"), true);
+      assert.equal(store.gameTokens.length, 1);
+      assert.equal(JSON.parse(sharedStorage.get("gameTokens")).length, 1);
+
+      // Case D: removeToken fails when IndexedDB deleteArrayBuffer() returns false -> rolls back list and returns retryable error
+      const removeIdbFail = await store.removeToken("acc1");
+      assert.equal(removeIdbFail.ok, false);
+      assert.equal(removeIdbFail.binCleared, false);
+      assert.equal(removeIdbFail.retryable, true);
+      assert.equal(removeIdbFail.reason, "bin_delete_failed");
+      assert.equal(sharedIdb.has("acc1"), true);
+      assert.equal(store.gameTokens.length, 1);
+
+      // Case E: Retry after IndexedDB recovers succeeds cleanly across both layers
+      failIdbDelete = false;
+      const clearRetryOk = await store.clearAllTokens();
+      assert.equal(clearRetryOk.ok, true);
+      assert.equal(clearRetryOk.listCleared, true);
+      assert.equal(clearRetryOk.binCleared, true);
+      assert.equal(store.gameTokens.length, 0);
+      assert.equal(JSON.parse(sharedStorage.get("gameTokens")).length, 0);
+      assert.equal(sharedIdb.has("acc1"), false);
+    } finally {
+      pinia._e.stop();
+    }
+
+    // Verify TokenImport.vue and DefaultLayout.vue inspect deletion outcomes and prevent false success toasts
+    const tokenImportSrc = await readFile(
+      new URL("../src/views/TokenImport/TokenImport.vue", import.meta.url),
+      "utf8",
+    );
+    assert.match(
+      tokenImportSrc,
+      /const result = await tokenStore\.removeToken\(token\.id\);\s*if \(result === false \|\| \(result && result\.ok === false\)\)/,
+    );
+    assert.match(
+      tokenImportSrc,
+      /const result = await tokenStore\.clearAllTokens\(\);\s*if \(result === false \|\| \(result && result\.ok === false\)\)/,
+    );
+    const defaultLayoutSrc = await readFile(
+      new URL("../src/layout/DefaultLayout.vue", import.meta.url),
+      "utf8",
+    );
+    assert.match(
+      defaultLayoutSrc,
+      /const result = await tokenStore\.clearAllTokens\(\);\s*if \(result === false \|\| \(result && result\.ok === false\)\)/,
+    );
+  });
+
+  test("Round6 P2-1: when BIN rollback fails after localStorage write failure, commit reports rollback failure explicitly instead of claiming original data was preserved", async () => {
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc1",
+            name: "主号",
+            roleId: "1001",
+            token: "old-token",
+            importMethod: "wxQrcode",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdb = new Map([
+      ["acc1", new Uint8Array([1, 1]).buffer],
+      ["temp-new-bin", new Uint8Array([9, 9]).buffer],
+    ]);
+    const sharedLocks = createLockManager();
+    let storeCallCount = 0;
+
+    const tab = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+      shouldFailSetItem: (key) => key === "gameTokens",
+    });
+
+    try {
+      let caughtError = null;
+      try {
+        await upsertImportedRoleTokens({
+          roles: [
+            {
+              id: "temp-new-bin",
+              roleId: "1001",
+              name: "主号",
+              token: "new-token",
+              importMethod: "wxQrcode",
+            },
+          ],
+          tokenStore: tab.store,
+          getArrayBuffer: async (k) => sharedIdb.get(k) ?? null,
+          storeArrayBuffer: async (k, buf) => {
+            storeCallCount += 1;
+            if (storeCallCount === 1) {
+              // First write (new BIN to acc1) succeeds
+              sharedIdb.set(k, buf);
+              return true;
+            }
+            // Second write (rollback restoring old BIN to acc1) fails!
+            return false;
+          },
+          deleteArrayBuffer: async (k) => sharedIdb.delete(k),
+        });
+      } catch (err) {
+        caughtError = err;
+      }
+
+      assert.ok(caughtError instanceof Error);
+      assert.match(caughtError.message, /恢复原账号 BIN 凭据失败/);
+      assert.match(caughtError.message, /已保留暂存凭据/);
+      assert.doesNotMatch(caughtError.message, /已保留原有账号/);
+      // Temp BIN MUST remain preserved for retry
+      assert.deepEqual(
+        Array.from(new Uint8Array(sharedIdb.get("temp-new-bin"))),
+        [9, 9],
+      );
+      // Disk and memory still have old token
+      assert.equal(tab.store.gameTokens[0].token, "old-token");
+      assert.equal(
+        JSON.parse(sharedStorage.get("gameTokens"))[0].token,
+        "old-token",
+      );
+    } finally {
+      tab.pinia._e.stop();
     }
   });
 });

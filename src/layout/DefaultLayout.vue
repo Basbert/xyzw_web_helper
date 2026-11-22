@@ -209,9 +209,16 @@ const handleUserAction = (key) => {
         positiveText: "确定清除",
         negativeText: "取消",
         onPositiveClick: async () => {
-          await tokenStore.clearAllTokens();
+          const result = await tokenStore.clearAllTokens();
+          if (result === false || (result && result.ok === false)) {
+            message.error(
+              result?.message || "清除所有Token失败，请关闭其他标签页后重试",
+            );
+            return false;
+          }
           message.success("已清除所有Token");
           router.push("/tokens");
+          return true;
         },
       });
       break;

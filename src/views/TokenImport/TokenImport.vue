@@ -1473,8 +1473,15 @@ const deleteToken = (token) => {
     positiveText: "确定删除",
     negativeText: "取消",
     onPositiveClick: async () => {
-      await tokenStore.removeToken(token.id);
+      const result = await tokenStore.removeToken(token.id);
+      if (result === false || (result && result.ok === false)) {
+        message.error(
+          result?.message || "删除Token失败，请检查浏览器存储状态后重试",
+        );
+        return false;
+      }
       message.success("Token已删除");
+      return true;
     },
   });
 };
@@ -1656,8 +1663,15 @@ const clearAllTokens = () => {
     positiveText: "确定清除",
     negativeText: "取消",
     onPositiveClick: async () => {
-      await tokenStore.clearAllTokens();
+      const result = await tokenStore.clearAllTokens();
+      if (result === false || (result && result.ok === false)) {
+        message.error(
+          result?.message || "清除所有Token失败，请关闭其他标签页后重试",
+        );
+        return false;
+      }
       message.success("所有Token已清除");
+      return true;
     },
   });
 };

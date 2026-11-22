@@ -136,6 +136,16 @@ async function upsertSingleRole({
             : "导入失败：未找到新的 BIN 凭据数据，请重新选择角色",
         );
       }
+      if (commit?.binRolledBack === false) {
+        if (commit?.reason === "storage_write_failed") {
+          throw new Error(
+            "导入失败：保存账号列表到本地存储失败，且恢复原账号 BIN 凭据失败（本地可能残留新 BIN 与旧 Token 不一致），已保留暂存凭据，请释放存储空间后重试或重新登录",
+          );
+        }
+        throw new Error(
+          "导入失败：更新已有账号记录失败，且恢复原账号 BIN 凭据失败（本地凭据可能不一致），已保留暂存凭据，请重试或重新登录",
+        );
+      }
       if (commit?.reason === "bin_write_failed") {
         throw new Error(
           "导入失败：写入账号 BIN 凭据失败，已保留原有账号与连接",
@@ -212,6 +222,16 @@ async function upsertSingleRole({
         closeActiveConnection: true,
       });
       if (!commit?.committed) {
+        if (commit?.binRolledBack === false) {
+          if (commit?.reason === "storage_write_failed") {
+            throw new Error(
+              "导入失败：保存账号列表到本地存储失败，且恢复原账号 BIN 凭据失败（本地可能残留新 BIN 与旧 Token 不一致），已保留暂存凭据，请释放存储空间后重试或重新登录",
+            );
+          }
+          throw new Error(
+            "导入失败：更新已有账号记录失败，且恢复原账号 BIN 凭据失败（本地凭据可能不一致），已保留暂存凭据，请重试或重新登录",
+          );
+        }
         if (commit?.reason === "bin_write_failed") {
           throw new Error(
             "导入失败：写入账号 BIN 凭据失败，已保留原有账号与连接",
@@ -242,12 +262,26 @@ async function upsertSingleRole({
 
     const updated = tokenStore.updateToken(existing.id, updates);
     if (updated === false) {
+      let binRolledBack = true;
       if (binMigrated) {
-        if (previousBin) {
-          await storeArrayBuffer(existing.id, previousBin);
-        } else if (typeof deleteArrayBuffer === "function") {
-          await deleteArrayBuffer(existing.id);
+        try {
+          if (previousBin) {
+            binRolledBack = Boolean(
+              await storeArrayBuffer(existing.id, previousBin),
+            );
+          } else if (typeof deleteArrayBuffer === "function") {
+            binRolledBack = (await deleteArrayBuffer(existing.id)) !== false;
+          } else {
+            binRolledBack = false;
+          }
+        } catch {
+          binRolledBack = false;
         }
+      }
+      if (!binRolledBack) {
+        throw new Error(
+          "导入失败：更新已有账号记录失败，且恢复原账号 BIN 凭据失败（本地凭据可能不一致），已保留暂存凭据，请重试或重新登录",
+        );
       }
       throw new Error("导入失败：更新已有账号记录失败，已保留原有凭据");
     }
