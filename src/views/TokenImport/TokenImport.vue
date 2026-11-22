@@ -966,10 +966,18 @@ const handleDrop = async (index, event) => {
   currentTokens.splice(index, 0, draggedItem);
 
   // 更新 store（在跨标签页锁内读取最新列表按顺序重排，避免覆盖其他标签页的新凭据）
-  if (typeof tokenStore.reorderTokens === "function") {
-    await tokenStore.reorderTokens(currentTokens.map((item) => item.id));
-  } else {
-    tokenStore.gameTokens = currentTokens;
+  try {
+    if (typeof tokenStore.reorderTokens === "function") {
+      await tokenStore.reorderTokens(currentTokens.map((item) => item.id));
+    } else {
+      tokenStore.gameTokens = currentTokens;
+    }
+  } catch (error) {
+    dragIndex.value = null;
+    message.error(
+      error?.message || "保存 Token 顺序失败，请检查浏览器存储空间",
+    );
+    return;
   }
 
   // 切换到手动排序模式，防止自动排序打乱顺序
@@ -1344,12 +1352,22 @@ const saveEdit = async () => {
         );
         return;
       }
+      if (commit?.reason === "storage_write_failed") {
+        message.error(
+          "保存失败：浏览器本地存储空间不足或不可写，已保留原有数据",
+        );
+        return;
+      }
       if (!commit?.committed) {
         message.error("账号不存在或更新失败，请刷新后重试");
         return;
       }
     } else {
-      tokenStore.updateToken(tokenId, payload.updates);
+      const ok = tokenStore.updateToken(tokenId, payload.updates);
+      if (!ok) {
+        message.error("保存失败，请检查浏览器本地存储后重试");
+        return;
+      }
     }
 
     message.success("Token信息已更新");
@@ -1421,13 +1439,21 @@ const saveCurrentRemark = async () => {
       updates: { remark },
     });
     if (!commit?.committed) {
-      message.error("账号不存在或保存备注失败，请刷新后重试");
+      message.error(
+        commit?.reason === "storage_write_failed"
+          ? "保存备注失败：浏览器本地存储空间不足或不可写，已保留原有数据"
+          : "账号不存在或保存备注失败，请刷新后重试",
+      );
       return;
     }
   } else {
-    tokenStore.updateToken(editingTokenId, {
+    const ok = tokenStore.updateToken(editingTokenId, {
       remark,
     });
+    if (!ok) {
+      message.error("保存备注失败，请检查浏览器本地存储后重试");
+      return;
+    }
   }
   message.success("备注已保存");
 };

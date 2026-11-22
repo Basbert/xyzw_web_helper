@@ -107,6 +107,53 @@ async function upsertSingleRole({
   deleteArrayBuffer,
 }) {
   const needsBin = requiresBinRefreshSource(role);
+
+  if (typeof tokenStore.commitRoleUpsert === "function") {
+    const commit = await tokenStore.commitRoleUpsert({
+      role,
+      needsBin,
+      hasValidCombUser: hasValidCombUser(role),
+      findExisting: (tokens, selectedId) =>
+        findExistingTokenForRole(tokens, role, selectedId),
+      binStorage: {
+        getArrayBuffer,
+        storeArrayBuffer,
+        deleteArrayBuffer,
+      },
+    });
+    if (!commit?.committed) {
+      if (commit?.reason === "bin_storage_unavailable") {
+        throw new Error(
+          commit?.status === "updated"
+            ? "导入失败：本地 BIN 凭据存储不可用，已保留原有账号"
+            : "导入失败：本地 BIN 凭据存储不可用",
+        );
+      }
+      if (commit?.reason === "bin_missing") {
+        throw new Error(
+          commit?.status === "updated"
+            ? "导入失败：未找到新的 BIN 凭据数据，已保留原有账号"
+            : "导入失败：未找到新的 BIN 凭据数据，请重新选择角色",
+        );
+      }
+      if (commit?.reason === "bin_write_failed") {
+        throw new Error(
+          "导入失败：写入账号 BIN 凭据失败，已保留原有账号与连接",
+        );
+      }
+      if (commit?.reason === "storage_write_failed") {
+        throw new Error(
+          "导入失败：保存账号列表到本地存储失败（可能存储空间不足），已保留原有账号与暂存凭据",
+        );
+      }
+      throw new Error("导入失败：更新已有账号记录失败，已保留原有凭据");
+    }
+    return {
+      status: commit.status || "updated",
+      tokenId: commit.tokenId || role.id,
+    };
+  }
+
   tokenStore.syncGameTokensFromStorage?.();
   const existing = findExistingTokenForRole(
     tokenStore.gameTokens || [],
@@ -168,6 +215,11 @@ async function upsertSingleRole({
         if (commit?.reason === "bin_write_failed") {
           throw new Error(
             "导入失败：写入账号 BIN 凭据失败，已保留原有账号与连接",
+          );
+        }
+        if (commit?.reason === "storage_write_failed") {
+          throw new Error(
+            "导入失败：保存账号列表到本地存储失败（可能存储空间不足），已保留原有账号与暂存凭据",
           );
         }
         throw new Error("导入失败：更新已有账号记录失败，已保留原有凭据");

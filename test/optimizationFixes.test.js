@@ -3707,3 +3707,532 @@ describe("Commit 7 review round-4 regression fixes (2 P1 + 3 P2)", () => {
     }
   });
 });
+
+describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
+  const createLockManager = () => {
+    const tails = new Map();
+    return {
+      request(name, optionsOrCb, maybeCb) {
+        const cb = typeof optionsOrCb === "function" ? optionsOrCb : maybeCb;
+        const prev = tails.get(name) || Promise.resolve();
+        let releaseCurrent;
+        const held = new Promise((resolve) => {
+          releaseCurrent = resolve;
+        });
+        tails.set(
+          name,
+          prev.then(() => held),
+        );
+        return prev.then(async () => {
+          try {
+            return await cb({ name });
+          } finally {
+            releaseCurrent();
+          }
+        });
+      },
+    };
+  };
+
+  const loadVueUseTabWithWindow = async ({
+    sharedStorage,
+    sharedIdb,
+    sharedLocks,
+    shouldFailSetItem = () => false,
+    getArrayBufferImpl = null,
+    storeArrayBufferImpl = null,
+    deleteArrayBufferImpl = null,
+  }) => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const logger = {
+      debug() {},
+      info() {},
+      warn() {},
+      error() {},
+      verbose() {},
+      gameMessage() {},
+    };
+    const windowListeners = new Map();
+    const mockWindow = {
+      location: { href: "http://127.0.0.1/" },
+      addEventListener(type, fn) {
+        if (!windowListeners.has(type)) windowListeners.set(type, new Set());
+        windowListeners.get(type).add(fn);
+      },
+      removeEventListener(type, fn) {
+        windowListeners.get(type)?.delete(fn);
+      },
+      dispatchEvent(ev) {
+        for (const fn of windowListeners.get(ev.type) || []) {
+          fn(ev);
+        }
+      },
+    };
+    const storageAdapter = {
+      getItem: (k) => (sharedStorage.has(k) ? sharedStorage.get(k) : null),
+      setItem: (k, v) => {
+        if (shouldFailSetItem(k, String(v))) {
+          const err = new Error("QuotaExceededError");
+          err.name = "QuotaExceededError";
+          throw err;
+        }
+        sharedStorage.set(k, String(v));
+      },
+      removeItem: (k) => sharedStorage.delete(k),
+    };
+    const recoveryTimers = new Map();
+    let nextTimer = 0;
+
+    const mod = await loadModule(
+      new URL("../src/stores/tokenStore.ts", import.meta.url),
+      {
+        "@/utils/accountIdentity.js": accountIdentity,
+        "@vueuse/core": {
+          useLocalStorage: (key, initial, opts) =>
+            vueUseCore.useStorage(key, initial, storageAdapter, {
+              ...opts,
+              window: mockWindow,
+            }),
+        },
+        pinia: { defineStore },
+        vue,
+        "@/hooks/useIndexedDB": {
+          default: () => ({
+            getArrayBuffer:
+              getArrayBufferImpl || (async (k) => sharedIdb.get(k) ?? null),
+            storeArrayBuffer:
+              storeArrayBufferImpl ||
+              (async (k, buf) => {
+                sharedIdb.set(k, buf);
+                return true;
+              }),
+            deleteArrayBuffer:
+              deleteArrayBufferImpl ||
+              (async (k) => {
+                sharedIdb.delete(k);
+                return true;
+              }),
+            clearAll: async () => {
+              sharedIdb.clear();
+              return true;
+            },
+          }),
+        },
+        "@/router": {
+          default: { currentRoute: { value: { path: "/tokens" } } },
+        },
+        "@/utils/accountGameData": accountData,
+        "@/utils/bonProtocol": { g_utils: {} },
+        "@/utils/connectionRecovery": {
+          createConnectionRecovery: (opts) =>
+            createConnectionRecovery({
+              ...opts,
+              setTimer: (fn, delay) => {
+                const id = ++nextTimer;
+                recoveryTimers.set(id, { fn, delay });
+                return id;
+              },
+              clearTimer: (id) => recoveryTimers.delete(id),
+            }),
+        },
+        "@/utils/logger": {
+          gameLogger: logger,
+          tokenLogger: logger,
+          wsLogger: logger,
+        },
+        "@/utils/randomSeed": { generateRandomSeed: () => 1 },
+        "@/utils/token": {
+          fetchTokenPayloadFromUrl: async () => ({}),
+          scheduleAuthUserRequest: (fn) => fn(),
+          setAuthUserRateLimiterCallback() {},
+          transformToken: async () =>
+            JSON.stringify({ roleId: "1001", roleToken: "refreshed-tok" }),
+        },
+        "@/utils/wechatForceLogout": {
+          refreshTokenFromCombUser: async () => ({}),
+          roleIndexFromServerId: () => 0,
+        },
+        "@/utils/xyzwWebSocket": {
+          XyzwWebSocketClient: class {
+            constructor() {
+              this.socket = { readyState: 1 };
+            }
+            setMessageListener() {}
+            init() {
+              this.onConnect();
+            }
+            disconnect() {
+              if (this.socket) this.socket.readyState = 3;
+              this.socket = null;
+            }
+            send() {}
+            sendHeartbeat() {}
+          },
+        },
+        "./events/index.js": { $emit: { emit() {} }, emitPlus() {} },
+      },
+      {
+        AbortController,
+        WebSocket: { CLOSED: 3 },
+        localStorage: storageAdapter,
+        navigator: { onLine: true, locks: sharedLocks },
+        setTimeout,
+        clearTimeout,
+        setInterval: () => 1,
+        clearInterval() {},
+        window: mockWindow,
+        document: {
+          visibilityState: "visible",
+          addEventListener() {},
+          removeEventListener() {},
+        },
+      },
+    );
+    return {
+      pinia,
+      mod,
+      store: mod.useTokenStore(),
+      mockWindow,
+      storageAdapter,
+    };
+  };
+
+  test("Round5 P1-1: late storage event never reverts memory to stale tokens and locked writes always reconcile memory against live disk", async () => {
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "accA",
+            name: "账号A",
+            roleId: "101",
+            token: "old-token-A",
+            remark: "",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+          {
+            id: "accB",
+            name: "账号B",
+            roleId: "102",
+            token: "old-token-B",
+            remark: "",
+            importMethod: "bin",
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdb = new Map();
+    const sharedLocks = createLockManager();
+
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+    const tabB = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+
+    try {
+      // Step 1: Tab A updates accA -> capture the earlier storage payload that would be queued as a storage event
+      await tabA.store.commitCredentialUpdate("accA", {
+        updates: { token: "fresh-token-A" },
+      });
+      const earlierEventNewValue = sharedStorage.get("gameTokens");
+
+      // Step 2: Tab B updates accB before receiving Tab A's storage event -> disk now has BOTH fresh tokens
+      await tabB.store.commitCredentialUpdate("accB", {
+        updates: { token: "fresh-token-B" },
+      });
+      const diskBeforeLateEvent = JSON.parse(sharedStorage.get("gameTokens"));
+      assert.equal(
+        diskBeforeLateEvent.find((t) => t.id === "accA")?.token,
+        "fresh-token-A",
+      );
+      assert.equal(
+        diskBeforeLateEvent.find((t) => t.id === "accB")?.token,
+        "fresh-token-B",
+      );
+
+      // Step 3A: Deliver the stale queued storage event to Tab B -> our listener reads live disk instead of event.newValue!
+      tabB.mockWindow.dispatchEvent({
+        type: "storage",
+        key: "gameTokens",
+        newValue: earlierEventNewValue,
+        storageArea: tabB.storageAdapter,
+      });
+      assert.equal(
+        tabB.store.gameTokens.find((t) => t.id === "accB")?.token,
+        "fresh-token-B",
+      );
+
+      // Step 3B: Even if memory somehow still reverted to the stale snapshot while disk stays fresh (raw === lastKnown),
+      // the next locked remark-only edit MUST reconcile memory against live disk instead of writing old Token back!
+      const diskJsonBeforeRevert = sharedStorage.get("gameTokens");
+      tabB.mod.gameTokens.value = JSON.parse(earlierEventNewValue);
+      // Restore disk back to [fresh-A, fresh-B] to simulate VueUse reverting memory without writing disk
+      sharedStorage.set("gameTokens", diskJsonBeforeRevert);
+      assert.equal(
+        tabB.store.gameTokens.find((t) => t.id === "accB")?.token,
+        "old-token-B",
+      );
+
+      const remarkRes = await tabB.store.commitCredentialUpdate("accA", {
+        updates: { remark: "仅修改备注" },
+      });
+      assert.equal(remarkRes.committed, true);
+
+      const diskAfterRemark = JSON.parse(sharedStorage.get("gameTokens"));
+      assert.equal(
+        diskAfterRemark.find((t) => t.id === "accA")?.token,
+        "fresh-token-A",
+      );
+      assert.equal(
+        diskAfterRemark.find((t) => t.id === "accA")?.remark,
+        "仅修改备注",
+      );
+      assert.equal(
+        diskAfterRemark.find((t) => t.id === "accB")?.token,
+        "fresh-token-B",
+      );
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+  });
+
+  test("Round5 P1-2: localStorage write failure fails commit explicitly, rolls back memory/BIN/version, and preserves temp BIN and connection", async () => {
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc1",
+            name: "主号",
+            roleId: "1001",
+            token: "old-persisted-token",
+            importMethod: "wxQrcode",
+            combUser: { legacy: true },
+            createdAt: "2026-11-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdb = new Map([
+      ["acc1", new Uint8Array([1, 2]).buffer],
+      ["temp-relogin-bin", new Uint8Array([9, 8, 7]).buffer],
+      ["temp-first-bin", new Uint8Array([4, 4]).buffer],
+    ]);
+    const sharedLocks = createLockManager();
+    let rejectGameTokensWrite = false;
+
+    const tab = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+      shouldFailSetItem: (key) => rejectGameTokensWrite && key === "gameTokens",
+    });
+
+    try {
+      // Simulate an active WebSocket connection on acc1
+      tab.store.wsConnections.acc1 = {
+        status: "connected",
+        client: { disconnect() {} },
+        tokenId: "acc1",
+      };
+
+      // Turn on quota error for localStorage["gameTokens"]
+      rejectGameTokensWrite = true;
+
+      // Subcase A: Re-login updating existing acc1 fails cleanly, rolls back BIN & memory & version, keeps temp BIN & connection
+      await assert.rejects(
+        upsertImportedRoleTokens({
+          roles: [
+            {
+              id: "temp-relogin-bin",
+              roleId: "1001",
+              name: "主号",
+              token: "new-relogin-token",
+              importMethod: "wxQrcode",
+            },
+          ],
+          tokenStore: tab.store,
+          getArrayBuffer: async (k) => sharedIdb.get(k) ?? null,
+          storeArrayBuffer: async (k, buf) => {
+            sharedIdb.set(k, buf);
+            return true;
+          },
+          deleteArrayBuffer: async (k) => sharedIdb.delete(k),
+        }),
+        /保存账号列表到本地存储失败/,
+      );
+
+      // Disk AND memory both retain old Token and old combUser
+      const diskAfterFail = JSON.parse(sharedStorage.get("gameTokens"));
+      assert.equal(diskAfterFail[0].token, "old-persisted-token");
+      assert.deepEqual(diskAfterFail[0].combUser, { legacy: true });
+      assert.equal(tab.store.gameTokens[0].token, "old-persisted-token");
+      assert.deepEqual(tab.store.gameTokens[0].combUser, { legacy: true });
+      assert.equal(tab.store.getCredentialVersion("acc1"), 0);
+      // Old BIN restored at acc1, temp BIN preserved, active connection untouched
+      assert.deepEqual(
+        Array.from(new Uint8Array(sharedIdb.get("acc1"))),
+        [1, 2],
+      );
+      assert.deepEqual(
+        Array.from(new Uint8Array(sharedIdb.get("temp-relogin-bin"))),
+        [9, 8, 7],
+      );
+      assert.equal(tab.store.wsConnections.acc1.status, "connected");
+
+      // Subcase B: First-time import of a brand-new role also fails cleanly without polluting memory or deleting temp BIN
+      await assert.rejects(
+        upsertImportedRoleTokens({
+          roles: [
+            {
+              id: "temp-first-bin",
+              roleId: "2002",
+              name: "新小号",
+              token: "new-role-token",
+              importMethod: "bin",
+            },
+          ],
+          tokenStore: tab.store,
+          getArrayBuffer: async (k) => sharedIdb.get(k) ?? null,
+          storeArrayBuffer: async (k, buf) => {
+            sharedIdb.set(k, buf);
+            return true;
+          },
+          deleteArrayBuffer: async (k) => sharedIdb.delete(k),
+        }),
+        /保存账号列表到本地存储失败/,
+      );
+      assert.equal(tab.store.gameTokens.length, 1);
+      assert.equal(JSON.parse(sharedStorage.get("gameTokens")).length, 1);
+      assert.equal(sharedIdb.has("temp-first-bin"), true);
+
+      // Subcase C: Remark-only edit under quota failure returns storage_write_failed and restores memory
+      const editOutcome = await tab.store.commitCredentialUpdate("acc1", {
+        updates: { remark: "配额不足备注" },
+      });
+      assert.equal(editOutcome.committed, false);
+      assert.equal(editOutcome.reason, "storage_write_failed");
+      assert.equal(tab.store.gameTokens[0].remark ?? "", "");
+    } finally {
+      tab.pinia._e.stop();
+    }
+  });
+
+  test("Round5 P2-1: two tabs concurrently importing the same BIN for the first time perform matching and upsert inside one lock without duplicates", async () => {
+    const sharedStorage = new Map([["gameTokens", JSON.stringify([])]]);
+    const sharedIdb = new Map([
+      ["bin-hash-same", new Uint8Array([7, 7, 7]).buffer],
+      ["bin-role2-a", new Uint8Array([2, 1]).buffer],
+      ["bin-role2-b", new Uint8Array([2, 2]).buffer],
+    ]);
+    const sharedLocks = createLockManager();
+
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+    const tabB = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+    });
+
+    try {
+      const sameBinRole = {
+        id: "bin-hash-same",
+        roleId: "1001",
+        name: "同BIN角色",
+        token: "same-bin-token",
+        importMethod: "bin",
+      };
+      const slowGet = async (k) => {
+        await new Promise((r) => setTimeout(r, 10));
+        return sharedIdb.get(k) ?? null;
+      };
+      const storeBin = async (k, buf) => {
+        sharedIdb.set(k, buf);
+        return true;
+      };
+      const deleteBin = async (k) => sharedIdb.delete(k);
+
+      // Subcase A: Two tabs concurrently import the exact same BIN for the first time
+      const [resA, resB] = await Promise.all([
+        upsertImportedRoleTokens({
+          roles: [{ ...sameBinRole }],
+          tokenStore: tabA.store,
+          getArrayBuffer: slowGet,
+          storeArrayBuffer: storeBin,
+          deleteArrayBuffer: deleteBin,
+        }),
+        upsertImportedRoleTokens({
+          roles: [{ ...sameBinRole }],
+          tokenStore: tabB.store,
+          getArrayBuffer: slowGet,
+          storeArrayBuffer: storeBin,
+          deleteArrayBuffer: deleteBin,
+        }),
+      ]);
+      assert.equal(resA.addedCount + resB.addedCount, 1);
+      assert.equal(resA.updatedCount + resB.updatedCount, 1);
+
+      const persistedAfterSame = JSON.parse(sharedStorage.get("gameTokens"));
+      assert.equal(persistedAfterSame.length, 1);
+      assert.equal(persistedAfterSame[0].id, "bin-hash-same");
+      assert.equal(sharedIdb.has("bin-hash-same"), true);
+
+      // Subcase B: Two tabs concurrently import two different BINs for the same roleId for the first time
+      await Promise.all([
+        upsertImportedRoleTokens({
+          roles: [
+            {
+              id: "bin-role2-a",
+              roleId: "2002",
+              name: "角色二",
+              token: "tok-2a",
+              importMethod: "wxQrcode",
+            },
+          ],
+          tokenStore: tabA.store,
+          getArrayBuffer: slowGet,
+          storeArrayBuffer: storeBin,
+          deleteArrayBuffer: deleteBin,
+        }),
+        upsertImportedRoleTokens({
+          roles: [
+            {
+              id: "bin-role2-b",
+              roleId: "2002",
+              name: "角色二",
+              token: "tok-2b",
+              importMethod: "wxQrcode",
+            },
+          ],
+          tokenStore: tabB.store,
+          getArrayBuffer: slowGet,
+          storeArrayBuffer: storeBin,
+          deleteArrayBuffer: deleteBin,
+        }),
+      ]);
+
+      const persistedAfterRole2 = JSON.parse(sharedStorage.get("gameTokens"));
+      const role2Entries = persistedAfterRole2.filter(
+        (t) => String(t.roleId) === "2002",
+      );
+      assert.equal(role2Entries.length, 1);
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+  });
+});

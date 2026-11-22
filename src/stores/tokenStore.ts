@@ -111,6 +111,8 @@ declare interface TokenGroup {
 
 export const gameTokens = useLocalStorage<TokenData[]>("gameTokens", [], {
   flush: "sync",
+  listenToStorageChanges: false,
+  onError: () => {},
 });
 const readRawGameTokensJson = (): string | null => {
   if (typeof localStorage === "undefined" || !localStorage?.getItem) {
@@ -127,7 +129,18 @@ let lastKnownPersistedGameTokensJson: string | null = readRawGameTokensJson();
 
 const syncGameTokensFromStorage = (): boolean => {
   const raw = readRawGameTokensJson();
-  if (!raw || raw === lastKnownPersistedGameTokensJson) {
+  if (!raw) {
+    if (storageBackedGameTokens && gameTokens.value.length > 0) {
+      lastKnownPersistedGameTokensJson = null;
+      gameTokens.value = [];
+      return true;
+    }
+    return false;
+  }
+  // For real storage-backed stores, always reconcile memory against the live
+  // localStorage payload even if raw === lastKnown, so a late storage event
+  // that reverted in-memory state can never write stale tokens back to disk.
+  if (!storageBackedGameTokens && raw === lastKnownPersistedGameTokensJson) {
     return false;
   }
   try {
@@ -142,30 +155,65 @@ const syncGameTokensFromStorage = (): boolean => {
     lastKnownPersistedGameTokensJson = raw;
     if (currentJson !== raw) {
       gameTokens.value = parsed;
+      return true;
     }
-    return true;
+    return false;
   } catch {
     return false;
   }
 };
 
-const persistGameTokensToStorage = () => {
+if (
+  storageBackedGameTokens &&
+  typeof window !== "undefined" &&
+  typeof window.addEventListener === "function"
+) {
+  window.addEventListener(
+    "storage",
+    (event: StorageEvent) => {
+      if (
+        event?.storageArea &&
+        typeof localStorage !== "undefined" &&
+        event.storageArea !== localStorage
+      ) {
+        return;
+      }
+      if (event?.key != null && event.key !== "gameTokens") {
+        return;
+      }
+      // Read live localStorage rather than trusting a possibly stale
+      // event.newValue from an earlier cross-tab write.
+      syncGameTokensFromStorage();
+    },
+    { passive: true },
+  );
+}
+
+const persistGameTokensToStorage = (): { ok: boolean; error?: unknown } => {
   if (typeof localStorage === "undefined" || !localStorage?.setItem) {
-    return;
+    return { ok: true };
   }
   const shouldPersist =
     storageBackedGameTokens || readRawGameTokensJson() !== null;
   if (!shouldPersist) {
-    return;
+    return { ok: true };
   }
   try {
     const serialized = JSON.stringify(gameTokens.value);
     if (localStorage.getItem("gameTokens") !== serialized) {
       localStorage.setItem("gameTokens", serialized);
     }
+    const verified = localStorage.getItem("gameTokens");
+    if (verified !== serialized) {
+      return {
+        ok: false,
+        error: new Error("保存账号列表到本地存储失败，写入校验不一致"),
+      };
+    }
     lastKnownPersistedGameTokensJson = serialized;
-  } catch {
-    // Ignore storage write errors (e.g. quota exceeded).
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error };
   }
 };
 
@@ -303,15 +351,13 @@ export const useTokenStore = defineStore("tokens", () => {
   };
 
   // Token管理
-  /**
-   * Persist a token record under its existing byte-derived identity.
-   * @param {Partial<TokenData> & Pick<TokenData, "name" | "token">} tokenData Imported credential and role metadata.
-   * @returns {TokenData} Stored token record.
-   */
-  const addToken = (
+  const applyAddToken = (
     tokenData: Partial<TokenData> & Pick<TokenData, "name" | "token">,
-  ) => {
+  ):
+    | { ok: true; token: TokenData }
+    | { ok: false; reason: "storage_write_failed"; error?: unknown } => {
     syncGameTokensFromStorage();
+    const previousTokens = [...gameTokens.value];
     const id =
       tokenData.id ||
       `token_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -338,8 +384,31 @@ export const useTokenStore = defineStore("tokens", () => {
     };
 
     gameTokens.value.push(newToken);
-    persistGameTokensToStorage();
-    return newToken;
+    const persisted = persistGameTokensToStorage();
+    if (!persisted.ok) {
+      gameTokens.value = previousTokens;
+      return {
+        ok: false,
+        reason: "storage_write_failed",
+        error: persisted.error,
+      };
+    }
+    return { ok: true, token: newToken };
+  };
+
+  /**
+   * Persist a token record under its existing byte-derived identity.
+   * @param {Partial<TokenData> & Pick<TokenData, "name" | "token">} tokenData Imported credential and role metadata.
+   * @returns {TokenData} Stored token record.
+   */
+  const addToken = (
+    tokenData: Partial<TokenData> & Pick<TokenData, "name" | "token">,
+  ) => {
+    const result = applyAddToken(tokenData);
+    if (!result.ok) {
+      throw new Error("保存账号列表到本地存储失败（可能存储空间不足）");
+    }
+    return result.token;
   };
 
   const CREDENTIAL_UPDATE_KEYS = new Set([
@@ -520,8 +589,8 @@ export const useTokenStore = defineStore("tokens", () => {
   };
 
   interface CredentialBinStorage {
-    getArrayBuffer: (key: string) => Promise<ArrayBuffer | null>;
-    storeArrayBuffer: (key: string, data: ArrayBuffer) => Promise<boolean>;
+    getArrayBuffer?: (key: string) => Promise<ArrayBuffer | null>;
+    storeArrayBuffer?: (key: string, data: ArrayBuffer) => Promise<boolean>;
     deleteArrayBuffer?: (key: string) => Promise<boolean>;
   }
 
@@ -537,6 +606,308 @@ export const useTokenStore = defineStore("tokens", () => {
     lockWaitTimeoutMs?: number;
   }
 
+  interface CommitRoleUpsertOptions {
+    role: Partial<TokenData> & Pick<TokenData, "name" | "token">;
+    needsBin?: boolean;
+    hasValidCombUser?: boolean;
+    findExisting?: (
+      tokens: TokenData[],
+      selectedId: string,
+    ) => TokenData | null;
+    binStorage?: CredentialBinStorage;
+    lockWaitTimeoutMs?: number;
+  }
+
+  const readStoredCredentialVersionRaw = (tokenId: string): string | null => {
+    if (typeof localStorage === "undefined" || !localStorage?.getItem) {
+      return null;
+    }
+    try {
+      return localStorage.getItem(`${CRED_VERSION_KEY_PREFIX}${tokenId}`);
+    } catch {
+      return null;
+    }
+  };
+
+  const restoreCredentialVersionState = (
+    tokenId: string,
+    previousMemVersion: number | undefined,
+    previousSeed: number,
+    previousStoredRaw: string | null,
+  ) => {
+    credentialVersionSeed = previousSeed;
+    if (previousMemVersion === undefined) {
+      tokenCredentialVersions.delete(tokenId);
+    } else {
+      tokenCredentialVersions.set(tokenId, previousMemVersion);
+    }
+    if (typeof localStorage !== "undefined") {
+      try {
+        const key = `${CRED_VERSION_KEY_PREFIX}${tokenId}`;
+        if (previousStoredRaw === null) {
+          localStorage.removeItem?.(key);
+        } else {
+          localStorage.setItem?.(key, previousStoredRaw);
+        }
+      } catch {
+        // Ignore best-effort rollback errors on secondary version key.
+      }
+    }
+  };
+
+  const findMatchingTokenInList = (
+    tokens: TokenData[],
+    role: Partial<TokenData>,
+    selectedId: string,
+  ): TokenData | null => {
+    if (role.id) {
+      const byId = tokens.find((token) => token.id === role.id);
+      if (byId) return byId;
+    }
+    const targetRoleId = normalizeRoleId(role.roleId);
+    if (!targetRoleId) return null;
+    const sameRoleTokens = tokens.filter(
+      (token) => normalizeRoleId(token.roleId) === targetRoleId,
+    );
+    if (sameRoleTokens.length === 0) return null;
+    if (sameRoleTokens.length === 1) return sameRoleTokens[0] || null;
+    const selectedMatch = sameRoleTokens.find(
+      (token) => selectedId && token.id === selectedId,
+    );
+    if (selectedMatch) return selectedMatch;
+    const serverMatch = sameRoleTokens.find(
+      (token) => role.server && token.server === role.server,
+    );
+    return serverMatch || sameRoleTokens[0] || null;
+  };
+
+  const applyTokenUpdate = (
+    tokenId: string,
+    updates: Partial<TokenData>,
+  ):
+    | { ok: true; token: TokenData }
+    | {
+        ok: false;
+        reason: "token_missing" | "storage_write_failed";
+        error?: unknown;
+      } => {
+    syncGameTokensFromStorage();
+    const index = gameTokens.value.findIndex((token) => token.id === tokenId);
+    const existing = gameTokens.value[index];
+    if (index === -1 || !existing) {
+      return { ok: false, reason: "token_missing" };
+    }
+
+    const previousExisting = { ...existing };
+    const previousMemVersion = tokenCredentialVersions.get(tokenId);
+    const previousSeed = credentialVersionSeed;
+    const previousStoredVer = readStoredCredentialVersionRaw(tokenId);
+
+    const touchesCredential = Object.keys(updates).some((key) =>
+      CREDENTIAL_UPDATE_KEYS.has(key),
+    );
+    const nextCredentialVersion = touchesCredential
+      ? bumpCredentialVersion(tokenId)
+      : existing.credentialVersion;
+    const nextToken: TokenData = {
+      ...existing,
+      ...updates,
+      ...(nextCredentialVersion !== undefined
+        ? { credentialVersion: nextCredentialVersion }
+        : {}),
+      updatedAt: new Date().toISOString(),
+    };
+    gameTokens.value[index] = nextToken;
+
+    const persisted = persistGameTokensToStorage();
+    if (!persisted.ok) {
+      gameTokens.value[index] = previousExisting;
+      restoreCredentialVersionState(
+        tokenId,
+        previousMemVersion,
+        previousSeed,
+        previousStoredVer,
+      );
+      return {
+        ok: false,
+        reason: "storage_write_failed",
+        error: persisted.error,
+      };
+    }
+    return { ok: true, token: nextToken };
+  };
+
+  const executeCredentialUpdateLocked = async (
+    tokenId: string,
+    options: CommitCredentialOptions,
+    isActive: () => boolean,
+  ) => {
+    const checkCommitValidity = () => {
+      if (!isActive()) {
+        return { ok: false as const, stale: true, reason: "stale" as const };
+      }
+      syncGameTokensFromStorage();
+      const latest = gameTokens.value.find((t) => t.id === tokenId);
+      if (!latest) {
+        return {
+          ok: false as const,
+          stale: false,
+          reason: "token_missing" as const,
+        };
+      }
+      if (options.expectedVersion !== undefined) {
+        const { hasList, token: persisted } = readPersistedTokenState(tokenId);
+        if (hasList && !persisted) {
+          return {
+            ok: false as const,
+            stale: true,
+            reason: "token_missing" as const,
+          };
+        }
+        const versionMismatch =
+          getCredentialVersion(tokenId) !== options.expectedVersion;
+        const tokenMismatch =
+          options.expectedToken !== undefined &&
+          (latest.token !== options.expectedToken ||
+            (persisted !== null && persisted.token !== options.expectedToken));
+        const createdAtMismatch =
+          Boolean(options.expectedCreatedAt) &&
+          (latest.createdAt !== options.expectedCreatedAt ||
+            (persisted !== null &&
+              persisted.createdAt !== options.expectedCreatedAt));
+        if (versionMismatch || tokenMismatch || createdAtMismatch) {
+          return {
+            ok: false as const,
+            stale: true,
+            reason: "stale" as const,
+          };
+        }
+      }
+      return { ok: true as const };
+    };
+
+    const initialCheck = checkCommitValidity();
+    if (!initialCheck.ok) {
+      return {
+        committed: false,
+        stale: initialCheck.stale,
+        reason: initialCheck.reason,
+      };
+    }
+
+    const storage: CredentialBinStorage = options.binStorage ?? {
+      getArrayBuffer,
+      storeArrayBuffer,
+      deleteArrayBuffer,
+    };
+    let binWritten = false;
+    let previousBin: ArrayBuffer | null = null;
+
+    const rollbackBin = async () => {
+      if (!binWritten) return;
+      syncGameTokensFromStorage();
+      const { hasList, token: persisted } = readPersistedTokenState(tokenId);
+      const stillExistsInMem = gameTokens.value.some((t) => t.id === tokenId);
+      const stillExists = stillExistsInMem && (!hasList || persisted !== null);
+      if (!stillExists) {
+        if (typeof storage.deleteArrayBuffer === "function") {
+          await storage.deleteArrayBuffer(tokenId);
+        }
+        return;
+      }
+      if (previousBin && typeof storage.storeArrayBuffer === "function") {
+        await storage.storeArrayBuffer(tokenId, previousBin);
+      } else if (typeof storage.deleteArrayBuffer === "function") {
+        await storage.deleteArrayBuffer(tokenId);
+      }
+    };
+
+    if (options.binData) {
+      if (
+        typeof storage.getArrayBuffer !== "function" ||
+        typeof storage.storeArrayBuffer !== "function"
+      ) {
+        return {
+          committed: false,
+          stale: false,
+          reason: "bin_write_failed" as const,
+        };
+      }
+      previousBin = await storage.getArrayBuffer(tokenId);
+      const beforeWriteCheck = checkCommitValidity();
+      if (!beforeWriteCheck.ok) {
+        return {
+          committed: false,
+          stale: beforeWriteCheck.stale,
+          reason: beforeWriteCheck.reason,
+        };
+      }
+      const saved = await storage.storeArrayBuffer(tokenId, options.binData);
+      if (!saved) {
+        return {
+          committed: false,
+          stale: false,
+          reason: "bin_write_failed" as const,
+        };
+      }
+      binWritten = true;
+
+      // Re-verify credential version right before committing token metadata
+      // in case a concurrent write updated or deleted the token during IndexedDB I/O.
+      const afterWriteCheck = checkCommitValidity();
+      if (!afterWriteCheck.ok) {
+        await rollbackBin();
+        return {
+          committed: false,
+          stale: afterWriteCheck.stale,
+          reason: afterWriteCheck.reason,
+        };
+      }
+    }
+
+    const applyResult = applyTokenUpdate(tokenId, options.updates);
+    if (!applyResult.ok) {
+      await rollbackBin();
+      return {
+        committed: false,
+        stale: false,
+        reason: applyResult.reason,
+        ...(applyResult.reason === "storage_write_failed"
+          ? { error: applyResult.error }
+          : {}),
+      };
+    }
+
+    if (
+      options.deleteOldBinKey &&
+      options.deleteOldBinKey !== tokenId &&
+      typeof storage.deleteArrayBuffer === "function"
+    ) {
+      try {
+        await storage.deleteArrayBuffer(options.deleteOldBinKey);
+      } catch (cleanupError) {
+        wsLogger.warn(
+          `清理旧 BIN 键失败 [${options.deleteOldBinKey}]:`,
+          cleanupError,
+        );
+      }
+    }
+
+    if (options.closeActiveConnection) {
+      const status = getWebSocketStatus(tokenId);
+      if (status && status !== "disconnected") {
+        closeWebSocketConnection(tokenId);
+      }
+    }
+
+    return {
+      committed: true,
+      stale: false,
+      reason: null,
+      token: applyResult.token,
+    };
+  };
+
   /**
    * Atomically serialize BIN writes and whole-list token persistence across
    * tabs (store-wide Web Lock + sync-from-storage merge + persistent
@@ -547,161 +918,141 @@ export const useTokenStore = defineStore("tokens", () => {
     tokenId: string,
     options: CommitCredentialOptions,
   ) => {
+    return withStoreWriteLease(
+      (isActive) => executeCredentialUpdateLocked(tokenId, options, isActive),
+      options.lockWaitTimeoutMs,
+    );
+  };
+
+  /**
+   * Atomically match an imported role against the latest persisted account list
+   * and either update it in place or append a new account within a single
+   * store-wide cross-tab Web Lock.
+   */
+  const commitRoleUpsert = async (options: CommitRoleUpsertOptions) => {
     return withStoreWriteLease(async (isActive) => {
-      const checkCommitValidity = () => {
-        if (!isActive()) {
-          return { ok: false as const, stale: true, reason: "stale" as const };
-        }
-        syncGameTokensFromStorage();
-        const latest = gameTokens.value.find((t) => t.id === tokenId);
-        if (!latest) {
-          return {
-            ok: false as const,
-            stale: false,
-            reason: "token_missing" as const,
-          };
-        }
-        if (options.expectedVersion !== undefined) {
-          const { hasList, token: persisted } =
-            readPersistedTokenState(tokenId);
-          if (hasList && !persisted) {
-            return {
-              ok: false as const,
-              stale: true,
-              reason: "token_missing" as const,
-            };
-          }
-          const versionMismatch =
-            getCredentialVersion(tokenId) !== options.expectedVersion;
-          const tokenMismatch =
-            options.expectedToken !== undefined &&
-            (latest.token !== options.expectedToken ||
-              (persisted !== null &&
-                persisted.token !== options.expectedToken));
-          const createdAtMismatch =
-            Boolean(options.expectedCreatedAt) &&
-            (latest.createdAt !== options.expectedCreatedAt ||
-              (persisted !== null &&
-                persisted.createdAt !== options.expectedCreatedAt));
-          if (versionMismatch || tokenMismatch || createdAtMismatch) {
-            return {
-              ok: false as const,
-              stale: true,
-              reason: "stale" as const,
-            };
-          }
-        }
-        return { ok: true as const };
-      };
-
-      const initialCheck = checkCommitValidity();
-      if (!initialCheck.ok) {
-        return {
-          committed: false,
-          stale: initialCheck.stale,
-          reason: initialCheck.reason,
-        };
-      }
-
-      const storage: CredentialBinStorage = options.binStorage || {
+      syncGameTokensFromStorage();
+      const role = options.role;
+      const needsBin = Boolean(options.needsBin);
+      const storage: CredentialBinStorage = options.binStorage ?? {
         getArrayBuffer,
         storeArrayBuffer,
         deleteArrayBuffer,
       };
-      let binWritten = false;
-      let previousBin: ArrayBuffer | null = null;
+      const existing = options.findExisting
+        ? options.findExisting(gameTokens.value, selectedTokenId.value)
+        : findMatchingTokenInList(
+            gameTokens.value,
+            role,
+            selectedTokenId.value,
+          );
 
-      const rollbackBin = async () => {
-        if (!binWritten) return;
-        syncGameTokensFromStorage();
-        const { hasList, token: persisted } = readPersistedTokenState(tokenId);
-        const stillExistsInMem = gameTokens.value.some((t) => t.id === tokenId);
-        const stillExists =
-          stillExistsInMem && (!hasList || persisted !== null);
-        if (!stillExists) {
-          if (typeof storage.deleteArrayBuffer === "function") {
-            await storage.deleteArrayBuffer(tokenId);
+      if (existing) {
+        let freshBin: ArrayBuffer | null = null;
+        let tempBinKey: string | null = null;
+
+        if (needsBin) {
+          if (
+            !role.id ||
+            typeof storage.getArrayBuffer !== "function" ||
+            typeof storage.storeArrayBuffer !== "function"
+          ) {
+            return {
+              committed: false,
+              stale: false,
+              status: "updated" as const,
+              reason: "bin_storage_unavailable" as const,
+            };
           }
-          return;
+          freshBin = await storage.getArrayBuffer(role.id);
+          if (
+            !freshBin ||
+            (freshBin instanceof ArrayBuffer && freshBin.byteLength === 0)
+          ) {
+            return {
+              committed: false,
+              stale: false,
+              status: "updated" as const,
+              reason: "bin_missing" as const,
+            };
+          }
+          if (existing.id !== role.id) {
+            tempBinKey = role.id;
+          }
         }
-        if (previousBin) {
-          await storage.storeArrayBuffer(tokenId, previousBin);
-        } else if (typeof storage.deleteArrayBuffer === "function") {
-          await storage.deleteArrayBuffer(tokenId);
-        }
-      };
 
-      if (options.binData) {
-        previousBin = await storage.getArrayBuffer(tokenId);
-        const beforeWriteCheck = checkCommitValidity();
-        if (!beforeWriteCheck.ok) {
-          return {
-            committed: false,
-            stale: beforeWriteCheck.stale,
-            reason: beforeWriteCheck.reason,
-          };
-        }
-        const saved = await storage.storeArrayBuffer(tokenId, options.binData);
-        if (!saved) {
+        const updates: Partial<TokenData> = {
+          token: role.token,
+          name: existing.name || role.name,
+          server: role.server || existing.server,
+          roleId: role.roleId ?? existing.roleId,
+          serverId: role.serverId ?? existing.serverId,
+          roleIndex: role.roleIndex ?? existing.roleIndex,
+          wsUrl: role.wsUrl || existing.wsUrl,
+          importMethod: role.importMethod || existing.importMethod,
+          combUser: options.hasValidCombUser ? (role.combUser ?? null) : null,
+          lastRefreshed: Date.now(),
+          upgradedToPermanent: true,
+        };
+
+        const commit = await executeCredentialUpdateLocked(
+          existing.id,
+          {
+            updates,
+            binData: existing.id !== role.id ? freshBin : null,
+            binStorage: storage,
+            deleteOldBinKey: tempBinKey,
+            closeActiveConnection: true,
+          },
+          isActive,
+        );
+        return {
+          ...commit,
+          status: "updated" as const,
+          tokenId: existing.id,
+        };
+      }
+
+      if (needsBin) {
+        if (!role.id || typeof storage.getArrayBuffer !== "function") {
           return {
             committed: false,
             stale: false,
-            reason: "bin_write_failed" as const,
+            status: "added" as const,
+            reason: "bin_storage_unavailable" as const,
           };
         }
-        binWritten = true;
-
-        // Re-verify credential version right before committing token metadata
-        // in case a concurrent write updated or deleted the token during IndexedDB I/O.
-        const afterWriteCheck = checkCommitValidity();
-        if (!afterWriteCheck.ok) {
-          await rollbackBin();
+        const freshBin = await storage.getArrayBuffer(role.id);
+        if (
+          !freshBin ||
+          (freshBin instanceof ArrayBuffer && freshBin.byteLength === 0)
+        ) {
           return {
             committed: false,
-            stale: afterWriteCheck.stale,
-            reason: afterWriteCheck.reason,
+            stale: false,
+            status: "added" as const,
+            reason: "bin_missing" as const,
           };
         }
       }
 
-      const updated = updateToken(tokenId, options.updates);
-      if (!updated) {
-        await rollbackBin();
+      const added = applyAddToken({ ...role });
+      if (!added.ok) {
         return {
           committed: false,
           stale: false,
-          reason: "token_missing" as const,
+          status: "added" as const,
+          reason: added.reason,
+          error: added.error,
         };
       }
-      persistGameTokensToStorage();
-
-      if (
-        options.deleteOldBinKey &&
-        options.deleteOldBinKey !== tokenId &&
-        typeof storage.deleteArrayBuffer === "function"
-      ) {
-        try {
-          await storage.deleteArrayBuffer(options.deleteOldBinKey);
-        } catch (cleanupError) {
-          wsLogger.warn(
-            `清理旧 BIN 键失败 [${options.deleteOldBinKey}]:`,
-            cleanupError,
-          );
-        }
-      }
-
-      if (options.closeActiveConnection) {
-        const status = getWebSocketStatus(tokenId);
-        if (status && status !== "disconnected") {
-          closeWebSocketConnection(tokenId);
-        }
-      }
-
       return {
         committed: true,
         stale: false,
         reason: null,
-        token: gameTokens.value.find((t) => t.id === tokenId) || null,
+        status: "added" as const,
+        tokenId: added.token.id,
+        token: added.token,
       };
     }, options.lockWaitTimeoutMs);
   };
@@ -711,15 +1062,30 @@ export const useTokenStore = defineStore("tokens", () => {
   ) => {
     return withStoreWriteLease(async () => {
       syncGameTokensFromStorage();
-      const created = addToken(tokenData);
-      persistGameTokensToStorage();
-      return created;
+      if (tokenData.id) {
+        const existing = gameTokens.value.find(
+          (token) => token.id === tokenData.id,
+        );
+        if (existing) {
+          const updated = applyTokenUpdate(existing.id, tokenData);
+          if (!updated.ok) {
+            throw new Error("保存账号列表到本地存储失败（可能存储空间不足）");
+          }
+          return updated.token;
+        }
+      }
+      const created = applyAddToken(tokenData);
+      if (!created.ok) {
+        throw new Error("保存账号列表到本地存储失败（可能存储空间不足）");
+      }
+      return created.token;
     });
   };
 
   const reorderTokens = async (orderedIds: string[]) => {
     return withStoreWriteLease(async () => {
       syncGameTokensFromStorage();
+      const previousTokens = [...gameTokens.value];
       const byId = new Map(gameTokens.value.map((token) => [token.id, token]));
       const reordered: TokenData[] = [];
       for (const id of orderedIds) {
@@ -733,7 +1099,11 @@ export const useTokenStore = defineStore("tokens", () => {
         reordered.push(remaining);
       }
       gameTokens.value = reordered;
-      persistGameTokensToStorage();
+      const persisted = persistGameTokensToStorage();
+      if (!persisted.ok) {
+        gameTokens.value = previousTokens;
+        throw new Error("保存账号顺序失败：浏览器本地存储空间不足或不可写");
+      }
       return reordered;
     });
   };
@@ -745,28 +1115,7 @@ export const useTokenStore = defineStore("tokens", () => {
    * @returns {boolean} Whether the token was found and updated.
    */
   const updateToken = (tokenId: string, updates: Partial<TokenData>) => {
-    syncGameTokensFromStorage();
-    const index = gameTokens.value.findIndex((token) => token.id === tokenId);
-    const existing = gameTokens.value[index];
-    if (index !== -1 && existing) {
-      const touchesCredential = Object.keys(updates).some((key) =>
-        CREDENTIAL_UPDATE_KEYS.has(key),
-      );
-      const nextCredentialVersion = touchesCredential
-        ? bumpCredentialVersion(tokenId)
-        : existing.credentialVersion;
-      gameTokens.value[index] = {
-        ...existing,
-        ...updates,
-        ...(nextCredentialVersion !== undefined
-          ? { credentialVersion: nextCredentialVersion }
-          : {}),
-        updatedAt: new Date().toISOString(),
-      };
-      persistGameTokensToStorage();
-      return true;
-    }
-    return false;
+    return applyTokenUpdate(tokenId, updates).ok;
   };
 
   // A newly imported token can change, but the game role ID remains stable.
@@ -800,20 +1149,29 @@ export const useTokenStore = defineStore("tokens", () => {
       await closeWebSocketConnectionAsync(tokenId);
     }
 
-    await withStoreWriteLease(async () => {
+    const removed = await withStoreWriteLease(async () => {
       syncGameTokensFromStorage();
+      const previousTokens = [...gameTokens.value];
       bumpCredentialVersion(tokenId);
       gameTokens.value = gameTokens.value.filter(
         (token) => token.id !== tokenId,
       );
-      persistGameTokensToStorage();
+      const persisted = persistGameTokensToStorage();
+      if (!persisted.ok) {
+        gameTokens.value = previousTokens;
+        return false;
+      }
 
       accountGameData.remove(tokenId);
       cleanupInvalidTokens();
 
       // 同时删除IndexedDB中的数据（与凭据提交串行执行，避免旧回滚写回已删账号BIN）
       await deleteArrayBuffer(tokenId);
+      return true;
     });
+    if (!removed) {
+      return false;
+    }
 
     delete activeConnections.value[tokenId];
     Object.keys(connectionLocks.value).forEach((lockKey) => {
@@ -1113,7 +1471,9 @@ export const useTokenStore = defineStore("tokens", () => {
           message:
             commit.reason === "bin_write_failed"
               ? "迁移本地 BIN 凭据失败，已保留原凭据"
-              : "更新账号凭据失败",
+              : commit.reason === "storage_write_failed"
+                ? "保存账号列表到本地存储失败（可能存储空间不足），已保留原凭据"
+                : "更新账号凭据失败",
         };
       }
       return {
@@ -2389,13 +2749,21 @@ export const useTokenStore = defineStore("tokens", () => {
     try {
       if (data.tokens && Array.isArray(data.tokens)) {
         syncGameTokensFromStorage();
-        const previousIds = gameTokens.value.map((token) => token.id);
+        const previousTokens = [...gameTokens.value];
+        const previousIds = previousTokens.map((token) => token.id);
         gameTokens.value = data.tokens;
+        const persisted = persistGameTokensToStorage();
+        if (!persisted.ok) {
+          gameTokens.value = previousTokens;
+          return {
+            success: false,
+            message: "导入失败：浏览器本地存储空间不足或不可写",
+          };
+        }
         previousIds.forEach((id) => bumpCredentialVersion(id));
         data.tokens.forEach((token: any) => {
           if (token?.id) bumpCredentialVersion(token.id);
         });
-        persistGameTokensToStorage();
         return {
           success: true,
           message: `成功导入 ${data.tokens.length} 个Token`,
@@ -3006,6 +3374,7 @@ export const useTokenStore = defineStore("tokens", () => {
     // Token管理方法
     addToken,
     commitNewToken,
+    commitRoleUpsert,
     updateToken,
     commitCredentialUpdate,
     getCredentialVersion,
