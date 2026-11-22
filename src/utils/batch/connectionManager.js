@@ -538,17 +538,90 @@ export function createConnectionManager({
  * 活动状态辅助函数
  * @returns {object} - 活动状态
  */
-export const getActivityStatus = () => {
-  const now = new Date();
-  const day = now.getDay();
-  const hour = now.getHours();
+/**
+ * Run a per-account batch workflow with snapshotted account IDs, guaranteed
+ * running-flag cleanup, missing-token guards, and optional completion summary.
+ */
+export async function runBatchForAccounts(
+  {
+    selectedTokens,
+    tokens,
+    tokenStatus,
+    isRunning,
+    shouldStop,
+    currentRunningTokenId,
+    addLog,
+    message,
+    label,
+    notifyOnFinish = false,
+    notifyMessage,
+  },
+  runAccount,
+) {
+  if (isRunning.value || selectedTokens.value.length === 0) return null;
+  const tokenIds = [...selectedTokens.value];
+  isRunning.value = true;
+  shouldStop.value = false;
+  tokenIds.forEach((id) => {
+    tokenStatus.value[id] = "waiting";
+  });
+
+  try {
+    await Promise.all(
+      tokenIds.map(async (tokenId) => {
+        if (shouldStop.value) {
+          tokenStatus.value[tokenId] = "stopped";
+          return;
+        }
+        tokenStatus.value[tokenId] = "running";
+        const token = tokens.value.find((item) => item.id === tokenId);
+        if (!token) {
+          tokenStatus.value[tokenId] = "failed";
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `账号已不存在，跳过${label}`,
+            type: "error",
+          });
+          return;
+        }
+        await runAccount({ tokenId, token });
+      }),
+    );
+  } finally {
+    isRunning.value = false;
+    currentRunningTokenId.value = null;
+  }
+
+  const hasIncomplete =
+    shouldStop.value ||
+    tokenIds.some((id) => tokenStatus.value[id] !== "completed");
+  if (notifyOnFinish && message) {
+    if (typeof notifyMessage === "function") {
+      notifyMessage({ tokenIds, hasIncomplete });
+    } else if (hasIncomplete) {
+      message.warning(`批量${label}已结束，部分账号未完成，请查看日志`);
+    } else {
+      message.success(`批量${label}完成`);
+    }
+  }
+  return { tokenIds, hasIncomplete };
+}
+
+/**
+ * 活动开放时间检查（统一按北京时间 UTC+8 计算）
+ */
+export const getActivityStatus = (nowMs = Date.now()) => {
+  const shanghaiOffsetMs = 8 * 60 * 60 * 1000;
+  const shanghai = new Date(Number(nowMs) + shanghaiOffsetMs);
+  const day = shanghai.getUTCDay();
+  const hour = shanghai.getUTCHours();
 
   // 计算当前活动周
-  const start = new Date("2025-12-12T12:00:00"); // 起始时间：黑市周开始
+  const startMs = Date.parse("2025-12-12T12:00:00+08:00"); // 起始时间：黑市周开始
   const weekDuration = 7 * 24 * 60 * 60 * 1000; // 一周毫秒数
   const cycleDuration = 3 * weekDuration; // 三周期毫秒数
 
-  const elapsed = now - start;
+  const elapsed = Number(nowMs) - startMs;
   let currentActivityWeek = null;
 
   if (elapsed >= 0) {

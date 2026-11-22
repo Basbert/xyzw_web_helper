@@ -3,7 +3,10 @@
  * 包含: batchLegacyClaim, batchLegacyGiftSendEnhanced
  */
 import { runWithDailyTaskLock } from "@/utils/dailyTaskState";
-import { withManagedConnection } from "./connectionManager.js";
+import {
+  runBatchForAccounts,
+  withManagedConnection,
+} from "./connectionManager.js";
 
 /**
  * 创建功法类任务执行器
@@ -34,89 +37,78 @@ export function createTasksLegacy(deps) {
   /**
    * 批量领取功法残卷
    */
-  const batchLegacyClaim = async () => {
-    if (isRunning.value || selectedTokens.value.length === 0) return;
-    const tokenIds = [...selectedTokens.value];
-    isRunning.value = true;
-    shouldStop.value = false;
-
-    tokenIds.forEach((id) => {
-      tokenStatus.value[id] = "waiting";
-    });
-
-    const taskPromises = tokenIds.map(async (tokenId) => {
-      if (shouldStop.value) return;
-      tokenStatus.value[tokenId] = "running";
-
-      const token = tokens.value.find((t) => t.id === tokenId);
-      if (!token) {
-        tokenStatus.value[tokenId] = "failed";
-        return;
-      }
-      try {
-        await runWithDailyTaskLock(tokenId, async () => {
+  const batchLegacyClaim = () =>
+    runBatchForAccounts(
+      {
+        selectedTokens,
+        tokens,
+        tokenStatus,
+        isRunning,
+        shouldStop,
+        currentRunningTokenId,
+        addLog,
+        message,
+        label: "领取功法残卷",
+        notifyOnFinish: true,
+        notifyMessage: ({ hasIncomplete }) => {
+          if (hasIncomplete) {
+            message.warning("批量领取功法残卷未全部完成，请查看日志");
+          } else {
+            message.success("批量领取功法残卷结束");
+          }
+        },
+      },
+      async ({ tokenId, token }) => {
+        try {
+          await runWithDailyTaskLock(tokenId, async () => {
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: `=== 开始领取功法残卷: ${token.name} ===`,
+              type: "info",
+            });
+            await withManagedConnection(
+              {
+                tokenId,
+                tokenName: token.name,
+                ensureConnection,
+                releaseConnectionSlot,
+                connectionQueue,
+                batchSettings,
+                tokenStore,
+                shouldStop,
+                addLog,
+                logOnClose: false,
+                maxRetries: 2,
+              },
+              async ({ check }) => {
+                check();
+                const response = await tokenStore.sendMessageWithPromise(
+                  tokenId,
+                  "legacy_claimhangup",
+                  {},
+                  5000,
+                );
+                const received = response?.reward?.[0]?.value;
+                const total = response?.role?.items?.[37007]?.quantity;
+                addLog({
+                  time: new Date().toLocaleTimeString(),
+                  message: `=== ${token.name} 已领取功法残卷${received == null ? "" : ` ${received}`} ${total == null ? "" : `，共有 ${total} 个`} ===`,
+                  type: "success",
+                });
+                tokenStatus.value[tokenId] = "completed";
+              },
+            );
+          });
+        } catch (error) {
+          tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
           addLog({
             time: new Date().toLocaleTimeString(),
-            message: `=== 开始领取功法残卷: ${token.name} ===`,
-            type: "info",
+            message: `=== ${token.name} 领取功法残卷失败: ${error.message || "未知错误"}`,
+            type: error.interrupted ? "warning" : "error",
           });
-          await withManagedConnection(
-            {
-              tokenId,
-              tokenName: token.name,
-              ensureConnection,
-              releaseConnectionSlot,
-              connectionQueue,
-              batchSettings,
-              tokenStore,
-              shouldStop,
-              addLog,
-              logOnClose: false,
-              retries: 2,
-            },
-            async ({ check }) => {
-              check();
-              const response = await tokenStore.sendMessageWithPromise(
-                tokenId,
-                "legacy_claimhangup",
-                {},
-                5000,
-              );
-              const received = response?.reward?.[0]?.value;
-              const total = response?.role?.items?.[37007]?.quantity;
-              addLog({
-                time: new Date().toLocaleTimeString(),
-                message: `=== ${token.name} 已领取功法残卷${received == null ? "" : ` ${received}`} ${total == null ? "" : `，共有 ${total} 个`} ===`,
-                type: "success",
-              });
-              tokenStatus.value[tokenId] = "completed";
-            },
-          );
-        });
-      } catch (error) {
-        tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== ${token.name} 领取功法残卷失败: ${error.message || "未知错误"}`,
-          type: error.interrupted ? "warning" : "error",
-        });
-      }
-    });
-    try {
-      await Promise.all(taskPromises);
-    } finally {
-      isRunning.value = false;
-      currentRunningTokenId.value = null;
-    }
-    if (
-      shouldStop.value ||
-      tokenIds.some((id) => tokenStatus.value[id] !== "completed")
-    ) {
-      message.warning("批量领取功法残卷未全部完成，请查看日志");
-    } else {
-      message.success("批量领取功法残卷结束");
-    }
-  };
+        }
+      },
+    );
 
   /**
    * 增强版批量赠送功法残卷（含完善的验证和错误处理）

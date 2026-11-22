@@ -662,7 +662,6 @@
 <script setup>
 import { Copy, Flash, Refresh } from "@vicons/ionicons5";
 
-import html2canvas from "html2canvas";
 import {
   NAvatar,
   NButton,
@@ -2115,6 +2114,7 @@ const handleExportImage = async () => {
     const rect = root.getBoundingClientRect();
     const exportHeight = Math.ceil(rect.height);
 
+    const { default: html2canvas } = await import("html2canvas");
     const canvas = await html2canvas(root, {
       scale: 2,
       useCORS: true,

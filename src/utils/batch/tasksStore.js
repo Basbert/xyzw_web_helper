@@ -9,7 +9,10 @@ import {
   normalizeBlackMarketPurchaseList,
   toStorePurchaseItemList,
 } from "./blackMarketConfig";
-import { withManagedConnection } from "./connectionManager.js";
+import {
+  runBatchForAccounts,
+  withManagedConnection,
+} from "./connectionManager.js";
 
 /**
  * 创建商店类任务执行器
@@ -165,442 +168,205 @@ export function createTasksStore(deps) {
     });
   };
 
+  const runStoreBatch = ({ label, startLabel, onExecute, onError }) =>
+    runBatchForAccounts(
+      {
+        selectedTokens,
+        tokens,
+        tokenStatus,
+        isRunning,
+        shouldStop,
+        currentRunningTokenId,
+        addLog,
+        label,
+      },
+      async ({ tokenId, token }) => {
+        try {
+          addLog({
+            time: new Date().toLocaleTimeString(),
+            message: `=== 开始${startLabel || label}: ${token.name} ===`,
+            type: "info",
+          });
+
+          await withManagedConnection(
+            {
+              tokenId,
+              tokenName: token.name,
+              ensureConnection,
+              releaseConnectionSlot,
+              connectionQueue,
+              batchSettings,
+              tokenStore,
+              shouldStop,
+              addLog,
+              logOnClose: true,
+            },
+            async ({ check }) => {
+              await onExecute({ tokenId, token, check });
+              tokenStatus.value[tokenId] = "completed";
+            },
+          );
+        } catch (error) {
+          if (onError) {
+            onError(tokenId, token.name, error);
+          } else {
+            tokenStatus.value[tokenId] = error?.interrupted
+              ? "stopped"
+              : "failed";
+            addLog({
+              time: new Date().toLocaleTimeString(),
+              message: error?.interrupted
+                ? `${token.name} ${label}已停止`
+                : `${token.name} ${label}失败: ${error.message}`,
+              type: error?.interrupted ? "warning" : "error",
+            });
+          }
+        }
+      },
+    );
+
   /**
    * 一键购买四圣碎片
    */
-  const legion_storebuygoods = async () => {
-    if (isRunning.value || selectedTokens.value.length === 0) return;
-
-    isRunning.value = true;
-    shouldStop.value = false;
-
-    selectedTokens.value.forEach((id) => {
-      tokenStatus.value[id] = "waiting";
-    });
-
-    const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) {
-        tokenStatus.value[tokenId] = "stopped";
-        return;
-      }
-
-      tokenStatus.value[tokenId] = "running";
-      const token = tokens.value.find((t) => t.id === tokenId);
-      if (!token) {
-        tokenStatus.value[tokenId] = "failed";
+  const legion_storebuygoods = () =>
+    runStoreBatch({
+      label: "购买四圣碎片",
+      onExecute: async ({ tokenId, token, check }) => {
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `账号已不存在，跳过购买四圣碎片`,
-          type: "error",
-        });
-        return;
-      }
-
-      try {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== 开始购买四圣碎片: ${token.name} ===`,
+          message: `${token.name} 发送购买请求...`,
           type: "info",
         });
 
-        await withManagedConnection(
-          {
-            tokenId,
-            tokenName: token.name,
-            ensureConnection,
-            releaseConnectionSlot,
-            connectionQueue,
-            batchSettings,
-            tokenStore,
-            shouldStop,
-            addLog,
-            logOnClose: true,
-          },
-          async ({ check }) => {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 发送购买请求...`,
-              type: "info",
-            });
-
-            await tokenStore.sendMessageWithPromise(
-              tokenId,
-              "legion_storebuygoods",
-              { id: 6 },
-              5000,
-            );
-            check();
-
-            await sleep(delayConfig.action);
-
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 购买成功，获得四圣碎片`,
-              type: "success",
-            });
-            tokenStatus.value[tokenId] = "completed";
-          },
+        await tokenStore.sendMessageWithPromise(
+          tokenId,
+          "legion_storebuygoods",
+          { id: 6 },
+          5000,
         );
-      } catch (error) {
-        handleLegionStoreError(tokenId, token.name, "四圣碎片", error);
-      }
+        check();
+
+        await sleep(delayConfig.action);
+
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `${token.name} 购买成功，获得四圣碎片`,
+          type: "success",
+        });
+      },
+      onError: (tokenId, tokenName, error) =>
+        handleLegionStoreError(tokenId, tokenName, "四圣碎片", error),
     });
-
-    await Promise.all(taskPromises);
-
-    currentRunningTokenId.value = null;
-    isRunning.value = false;
-  };
 
   /**
    * 一键购买俱乐部5皮肤币
    */
-  const legionStoreBuySkinCoins = async () => {
-    if (isRunning.value || selectedTokens.value.length === 0) return;
-
-    isRunning.value = true;
-    shouldStop.value = false;
-
-    selectedTokens.value.forEach((id) => {
-      tokenStatus.value[id] = "waiting";
-    });
-
-    const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) {
-        tokenStatus.value[tokenId] = "stopped";
-        return;
-      }
-
-      tokenStatus.value[tokenId] = "running";
-      const token = tokens.value.find((t) => t.id === tokenId);
-      if (!token) {
-        tokenStatus.value[tokenId] = "failed";
+  const legionStoreBuySkinCoins = () =>
+    runStoreBatch({
+      label: "购买皮肤币",
+      startLabel: "购买俱乐部5皮肤币",
+      onExecute: async ({ tokenId, token, check }) => {
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `账号已不存在，跳过购买皮肤币`,
-          type: "error",
-        });
-        return;
-      }
-
-      try {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== 开始购买俱乐部5皮肤币: ${token.name} ===`,
+          message: `${token.name} 发送购买请求...`,
           type: "info",
         });
 
-        await withManagedConnection(
-          {
+        for (let i = 0; i < 5; i++) {
+          check();
+          await tokenStore.sendMessageWithPromise(
             tokenId,
-            tokenName: token.name,
-            ensureConnection,
-            releaseConnectionSlot,
-            connectionQueue,
-            batchSettings,
-            tokenStore,
-            shouldStop,
-            addLog,
-            logOnClose: true,
-          },
-          async ({ check }) => {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 发送购买请求...`,
-              type: "info",
-            });
+            "legion_storebuygoods",
+            { id: 1 },
+            5000,
+          );
+          await sleep(delayConfig.action);
+        }
 
-            for (let i = 0; i < 5; i++) {
-              check();
-              await tokenStore.sendMessageWithPromise(
-                tokenId,
-                "legion_storebuygoods",
-                { id: 1 },
-                5000,
-              );
-              await sleep(delayConfig.action);
-            }
-
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 购买成功，获得皮肤币`,
-              type: "success",
-            });
-            tokenStatus.value[tokenId] = "completed";
-          },
-        );
-      } catch (error) {
-        handleLegionStoreError(tokenId, token.name, "皮肤币", error);
-      }
+        addLog({
+          time: new Date().toLocaleTimeString(),
+          message: `${token.name} 购买成功，获得皮肤币`,
+          type: "success",
+        });
+      },
+      onError: (tokenId, tokenName, error) =>
+        handleLegionStoreError(tokenId, tokenName, "皮肤币", error),
     });
-
-    await Promise.all(taskPromises);
-
-    currentRunningTokenId.value = null;
-    isRunning.value = false;
-  };
 
   /**
    * 免费领取珍宝阁每日奖励
    */
-  const collection_claimfreereward = async () => {
-    if (isRunning.value || selectedTokens.value.length === 0) return;
-
-    isRunning.value = true;
-    shouldStop.value = false;
-
-    selectedTokens.value.forEach((id) => {
-      tokenStatus.value[id] = "waiting";
-    });
-
-    const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) {
-        tokenStatus.value[tokenId] = "stopped";
-        return;
-      }
-
-      tokenStatus.value[tokenId] = "running";
-      const token = tokens.value.find((t) => t.id === tokenId);
-      if (!token) {
-        tokenStatus.value[tokenId] = "failed";
+  const collection_claimfreereward = () =>
+    runStoreBatch({
+      label: "珍宝阁领取",
+      startLabel: "免费领取珍宝阁",
+      onExecute: async ({ tokenId, token, check }) => {
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `账号已不存在，跳过珍宝阁领取`,
-          type: "error",
-        });
-        return;
-      }
-
-      try {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== 开始免费领取珍宝阁: ${token.name} ===`,
+          message: `${token.name} 发送珍宝阁免费领取请求...`,
           type: "info",
         });
 
-        await withManagedConnection(
-          {
-            tokenId,
-            tokenName: token.name,
-            ensureConnection,
-            releaseConnectionSlot,
-            connectionQueue,
-            batchSettings,
-            tokenStore,
-            shouldStop,
-            addLog,
-            logOnClose: true,
-          },
-          async ({ check }) => {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 发送珍宝阁免费领取请求...`,
-              type: "info",
-            });
-
-            await tokenStore.sendMessageWithPromise(
-              tokenId,
-              "collection_claimfreereward",
-              {},
-              5000,
-            );
-            check();
-
-            await sleep(delayConfig.action);
-
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 珍宝阁领取成功`,
-              type: "success",
-            });
-            tokenStatus.value[tokenId] = "completed";
-          },
+        await tokenStore.sendMessageWithPromise(
+          tokenId,
+          "collection_claimfreereward",
+          {},
+          5000,
         );
-      } catch (error) {
-        tokenStatus.value[tokenId] = error?.interrupted ? "stopped" : "failed";
+        check();
+
+        await sleep(delayConfig.action);
+
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: error?.interrupted
-            ? `${token.name} 珍宝阁领取已停止`
-            : `${token.name} 珍宝阁领取过程出错: ${error.message}`,
-          type: error?.interrupted ? "warning" : "error",
+          message: `${token.name} 珍宝阁领取成功`,
+          type: "success",
         });
-      }
+      },
     });
-
-    await Promise.all(taskPromises);
-
-    currentRunningTokenId.value = null;
-    isRunning.value = false;
-  };
 
   /**
    * 一键配置黑市采购清单
    */
-  const store_syncpurchaseconfig = async () => {
-    if (isRunning.value || selectedTokens.value.length === 0) return;
-
-    isRunning.value = true;
-    shouldStop.value = false;
-
-    selectedTokens.value.forEach((id) => {
-      tokenStatus.value[id] = "waiting";
+  const store_syncpurchaseconfig = () =>
+    runStoreBatch({
+      label: "配置黑市采购清单",
+      onExecute: async ({ tokenId, token }) => {
+        await updateBlackMarketPurchaseConfig(tokenId, token.name);
+      },
     });
-
-    const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) {
-        tokenStatus.value[tokenId] = "stopped";
-        return;
-      }
-
-      tokenStatus.value[tokenId] = "running";
-      const token = tokens.value.find((t) => t.id === tokenId);
-      if (!token) {
-        tokenStatus.value[tokenId] = "failed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `账号已不存在，跳过配置黑市采购清单`,
-          type: "error",
-        });
-        return;
-      }
-
-      try {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== 开始配置黑市采购清单: ${token.name} ===`,
-          type: "info",
-        });
-
-        await withManagedConnection(
-          {
-            tokenId,
-            tokenName: token.name,
-            ensureConnection,
-            releaseConnectionSlot,
-            connectionQueue,
-            batchSettings,
-            tokenStore,
-            shouldStop,
-            addLog,
-            logOnClose: true,
-          },
-          async () => {
-            await updateBlackMarketPurchaseConfig(tokenId, token.name);
-            tokenStatus.value[tokenId] = "completed";
-          },
-        );
-      } catch (error) {
-        tokenStatus.value[tokenId] = error?.interrupted ? "stopped" : "failed";
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: error?.interrupted
-            ? `${token.name} 配置黑市采购清单已停止`
-            : `${token.name} 配置黑市采购清单失败: ${error.message}`,
-          type: error?.interrupted ? "warning" : "error",
-        });
-      }
-    });
-
-    await Promise.all(taskPromises);
-
-    currentRunningTokenId.value = null;
-    isRunning.value = false;
-  };
 
   /**
    * 黑市一键采购
    */
-  const store_purchase = async () => {
-    if (isRunning.value || selectedTokens.value.length === 0) return;
-
-    isRunning.value = true;
-    shouldStop.value = false;
-
-    selectedTokens.value.forEach((id) => {
-      tokenStatus.value[id] = "waiting";
-    });
-
-    const taskPromises = selectedTokens.value.map(async (tokenId) => {
-      if (shouldStop.value) {
-        tokenStatus.value[tokenId] = "stopped";
-        return;
-      }
-
-      tokenStatus.value[tokenId] = "running";
-      const token = tokens.value.find((t) => t.id === tokenId);
-      if (!token) {
-        tokenStatus.value[tokenId] = "failed";
+  const store_purchase = () =>
+    runStoreBatch({
+      label: "黑市采购",
+      startLabel: "黑市一键采购",
+      onExecute: async ({ tokenId, token, check }) => {
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: `账号已不存在，跳过黑市采购`,
-          type: "error",
-        });
-        return;
-      }
-
-      try {
-        addLog({
-          time: new Date().toLocaleTimeString(),
-          message: `=== 开始黑市一键采购: ${token.name} ===`,
+          message: `${token.name} 发送黑市采购请求...`,
           type: "info",
         });
 
-        await withManagedConnection(
-          {
-            tokenId,
-            tokenName: token.name,
-            ensureConnection,
-            releaseConnectionSlot,
-            connectionQueue,
-            batchSettings,
-            tokenStore,
-            shouldStop,
-            addLog,
-            logOnClose: true,
-          },
-          async ({ check }) => {
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 发送黑市采购请求...`,
-              type: "info",
-            });
-
-            await tokenStore.sendMessageWithPromise(
-              tokenId,
-              "store_purchase",
-              {},
-              5000,
-            );
-            check();
-
-            await sleep(delayConfig.action);
-
-            addLog({
-              time: new Date().toLocaleTimeString(),
-              message: `${token.name} 黑市采购成功`,
-              type: "success",
-            });
-            tokenStatus.value[tokenId] = "completed";
-          },
+        await tokenStore.sendMessageWithPromise(
+          tokenId,
+          "store_purchase",
+          {},
+          5000,
         );
-      } catch (error) {
-        tokenStatus.value[tokenId] = error?.interrupted ? "stopped" : "failed";
+        check();
+
+        await sleep(delayConfig.action);
+
         addLog({
           time: new Date().toLocaleTimeString(),
-          message: error?.interrupted
-            ? `${token.name} 黑市采购已停止`
-            : `${token.name} 黑市采购过程出错: ${error.message}`,
-          type: error?.interrupted ? "warning" : "error",
+          message: `${token.name} 黑市采购成功`,
+          type: "success",
         });
-      }
+      },
     });
-
-    await Promise.all(taskPromises);
-
-    currentRunningTokenId.value = null;
-    isRunning.value = false;
-  };
 
   return {
     legion_storebuygoods,

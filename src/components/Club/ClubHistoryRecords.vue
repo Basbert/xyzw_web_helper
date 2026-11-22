@@ -54,7 +54,6 @@
 
 <script setup>
 import { Copy, Refresh } from "@vicons/ionicons5";
-import html2canvas from "html2canvas";
 import { NButton, NDataTable, NIcon, NTag, useMessage } from "naive-ui";
 import { computed, h, nextTick, onMounted, ref } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
@@ -303,6 +302,7 @@ const handleExportImage = async () => {
     }
 
     // 用html2canvas渲染DOM为Canvas
+    const { default: html2canvas } = await import("html2canvas");
     const canvas = await html2canvas(exportDom.value, {
       scale: 2, // 放大2倍，解决图片模糊问题
       useCORS: true, // 允许跨域图片

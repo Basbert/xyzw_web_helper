@@ -171,7 +171,6 @@ import {
   MapOutline,
   RefreshOutline,
 } from "@vicons/ionicons5";
-import html2canvas from "html2canvas";
 import { useMessage } from "naive-ui";
 import { storeToRefs } from "pinia";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
@@ -218,6 +217,7 @@ const exportImage = async () => {
 
   exporting.value = true;
   try {
+    const { default: html2canvas } = await import("html2canvas");
     const canvas = await html2canvas(element, {
       useCORS: true,
       scale: 2, // Higher quality

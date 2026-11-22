@@ -605,7 +605,6 @@
 <script setup>
 import { Copy, Refresh } from "@vicons/ionicons5";
 
-import html2canvas from "html2canvas";
 import {
   NAvatar,
   NButton,
@@ -1220,6 +1219,7 @@ const exportToImage = async () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     // 5. 用html2canvas渲染DOM为Canvas
+    const { default: html2canvas } = await import("html2canvas");
     const canvas = await html2canvas(exportDom.value, {
       scale: 2, // 放大2倍，解决图片模糊问题
       useCORS: true, // 允许跨域图片（若DOM内有远程图片，需开启）

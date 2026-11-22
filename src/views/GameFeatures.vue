@@ -30,8 +30,7 @@
       </div>
     </div>
 
-    <!-- 反馈提示区域 -->
-    <div v-if="showFeedback" class="feedback-section" />
+    <!-- 恢复提示区域 -->
     <p v-if="recoveryNote" class="container recovery-note" role="status">
       {{ recoveryNote }}
     </p>
@@ -66,10 +65,6 @@
             <span>当前Token:</span>
             <span>{{ tokenStore.selectedToken.name }}</span>
           </div>
-          <div v-if="lastActivity" class="status-item">
-            <span>最后活动:</span>
-            <span>{{ lastActivity }}</span>
-          </div>
         </div>
       </div>
     </details>
@@ -88,8 +83,6 @@ const message = useMessage();
 const tokenStore = useTokenStore();
 
 // 响应式数据
-const showFeedback = ref(true);
-const lastActivity = ref(null);
 const connectingAccount = ref(null);
 let connectionAttempt = 0;
 let pageUnmounted = false;
@@ -436,11 +429,6 @@ onUnmounted(() => {
   }
 }
 
-// 反馈提示区域
-.feedback-section {
-  display: none;
-}
-
 // 功能模块网格
 .features-grid-section {
   padding: var(--spacing-md) 0;
@@ -450,165 +438,6 @@ onUnmounted(() => {
   padding: 8px 0;
   color: var(--text-secondary);
   cursor: pointer;
-}
-
-.features-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: var(--spacing-lg);
-}
-
-.feature-card {
-  background: var(--bg-primary);
-  border-radius: var(--border-radius-xl);
-  padding: var(--spacing-lg);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-  transition: all var(--transition-normal);
-  border-left: 4px solid var(--primary-color);
-
-  &:hover {
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
-    transform: translateY(-2px);
-  }
-
-  // 不同功能的主题色
-  &.team-challenge {
-    border-left-color: #2080f0;
-  }
-
-  &.daily-tasks {
-    border-left-color: #f0a020;
-  }
-
-  &.salt-robot {
-    border-left-color: #18a058;
-  }
-
-  &.idle-time {
-    border-left-color: #d03050;
-  }
-
-  &.power-switch {
-    border-left-color: #7c3aed;
-  }
-
-  &.club-ranking {
-    border-left-color: #f59e0b;
-  }
-
-  &.club-checkin {
-    border-left-color: #10b981;
-  }
-
-  &.tower-challenge {
-    border-left-color: #6366f1;
-  }
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-md);
-  margin-bottom: var(--spacing-lg);
-}
-
-.feature-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: var(--border-radius-medium);
-  background: var(--primary-color-light);
-  color: var(--primary-color);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-
-  :deep(svg) {
-    width: 24px;
-    height: 24px;
-  }
-}
-
-.feature-title {
-  flex: 1;
-
-  h3 {
-    font-size: var(--font-size-lg);
-    font-weight: var(--font-weight-semibold);
-    color: var(--text-primary);
-    margin: 0 0 var(--spacing-xs) 0;
-  }
-}
-
-.feature-subtitle {
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-}
-
-.feature-badge,
-.feature-status {
-  flex-shrink: 0;
-  padding: var(--spacing-xs) var(--spacing-sm);
-  border-radius: var(--border-radius-small);
-  font-size: var(--font-size-xs);
-  font-weight: var(--font-weight-medium);
-}
-
-.feature-status {
-  &.in-progress {
-    background: rgba(240, 160, 32, 0.1);
-    color: var(--warning-color);
-  }
-
-  &.completed {
-    background: rgba(24, 160, 88, 0.1);
-    color: var(--success-color);
-  }
-
-  &.waiting {
-    background: rgba(32, 128, 240, 0.1);
-    color: var(--info-color);
-  }
-}
-
-.card-content {
-  margin-bottom: var(--spacing-lg);
-}
-
-.progress-info {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: var(--spacing-sm);
-
-  .stage-text {
-    font-weight: var(--font-weight-medium);
-    color: var(--text-primary);
-  }
-
-  .progress-text {
-    font-weight: var(--font-weight-medium);
-    color: var(--text-secondary);
-  }
-}
-
-.time-display {
-  font-size: var(--font-size-xl);
-  font-weight: var(--font-weight-bold);
-  color: var(--text-primary);
-  text-align: center;
-  margin-bottom: var(--spacing-sm);
-  font-family: "SF Mono", "Monaco", "Inconsolata", "Roboto Mono", monospace;
-}
-
-.task-description {
-  color: var(--text-secondary);
-  font-size: var(--font-size-sm);
-  line-height: 1.5;
-}
-
-.card-actions {
-  margin-top: var(--spacing-lg);
 }
 
 // WebSocket状态区域
@@ -674,12 +503,6 @@ onUnmounted(() => {
 }
 
 // 响应式设计
-@media (max-width: 1024px) {
-  .features-grid {
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  }
-}
-
 @media (max-width: 768px) {
   .container {
     padding: 0 var(--spacing-md);
@@ -689,20 +512,6 @@ onUnmounted(() => {
     flex-direction: row;
     gap: var(--spacing-sm);
     text-align: left;
-  }
-
-  .features-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .feature-card {
-    padding: var(--spacing-md);
-  }
-
-  .card-header {
-    flex-direction: column;
-    text-align: center;
-    gap: var(--spacing-sm);
   }
 }
 </style>

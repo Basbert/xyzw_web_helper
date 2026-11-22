@@ -455,3 +455,60 @@ describe("Commit 2 daily player UX checks", () => {
     assert.equal(storeCall?.params?.goodsId, 1);
   });
 });
+
+describe("Commit 3 performance and batch helper consolidation", () => {
+  test("GameStatus lazy-loads ClubInfo", async () => {
+    const src = await readFile(
+      new URL("../src/components/GameStatus.vue", import.meta.url),
+      "utf8",
+    );
+    assert.match(
+      src,
+      /const ClubInfo = lazySection\(\(\) => import\("\.\/Club\/ClubInfo\.vue"\)\)/,
+    );
+  });
+
+  test("runBatchForAccounts snapshots selections, cleans up isRunning on throw, and warns on failure", async () => {
+    const { runBatchForAccounts } =
+      await import("../src/utils/batch/connectionManager.js");
+    const notices = [];
+    const selectedTokens = { value: ["a", "b"] };
+    const tokenStatus = { value: {} };
+    const isRunning = { value: false };
+    const shouldStop = { value: false };
+    const currentRunningTokenId = { value: "a" };
+
+    const result = await runBatchForAccounts(
+      {
+        selectedTokens,
+        tokens: {
+          value: [
+            { id: "a", name: "A" },
+            { id: "b", name: "B" },
+          ],
+        },
+        tokenStatus,
+        isRunning,
+        shouldStop,
+        currentRunningTokenId,
+        addLog() {},
+        message: {
+          success: (t) => notices.push(["success", t]),
+          warning: (t) => notices.push(["warning", t]),
+        },
+        label: "测试任务",
+        notifyOnFinish: true,
+      },
+      async ({ tokenId }) => {
+        selectedTokens.value = [];
+        tokenStatus.value[tokenId] = tokenId === "a" ? "completed" : "failed";
+      },
+    );
+
+    assert.equal(isRunning.value, false);
+    assert.equal(currentRunningTokenId.value, null);
+    assert.deepEqual(result.tokenIds, ["a", "b"]);
+    assert.equal(result.hasIncomplete, true);
+    assert.equal(notices[0][0], "warning");
+  });
+});

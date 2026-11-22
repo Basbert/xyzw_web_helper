@@ -1,5 +1,8 @@
 import { runWithDailyTaskLock } from "@/utils/dailyTaskState";
-import { withManagedConnection } from "./connectionManager.js";
+import {
+  runBatchForAccounts,
+  withManagedConnection,
+} from "./connectionManager.js";
 
 /** Create the batch actions for resetting and claiming salt jars. */
 export function createTasksBottle(deps) {
@@ -22,77 +25,55 @@ export function createTasksBottle(deps) {
   const log = (text, type = "info") =>
     addLog({ time: new Date().toLocaleTimeString(), message: text, type });
 
-  const runBatch = async (label, execute) => {
-    if (isRunning.value || selectedTokens.value.length === 0) return;
-    const ids = [...selectedTokens.value];
-    isRunning.value = true;
-    shouldStop.value = false;
-    ids.forEach((id) => {
-      tokenStatus.value[id] = "waiting";
-    });
-
-    try {
-      await Promise.all(
-        ids.map(async (tokenId) => {
-          if (shouldStop.value) {
-            tokenStatus.value[tokenId] = "stopped";
-            return;
-          }
-          tokenStatus.value[tokenId] = "running";
-          const token = tokens.value.find((item) => item.id === tokenId);
-          if (!token) {
-            tokenStatus.value[tokenId] = "failed";
-            log(`账号已不存在，跳过${label}`, "error");
-            return;
-          }
-
-          try {
-            await runWithDailyTaskLock(tokenId, async () => {
-              await withManagedConnection(
-                {
-                  tokenId,
-                  tokenName: token.name,
-                  ensureConnection,
-                  releaseConnectionSlot,
-                  connectionQueue,
-                  batchSettings,
-                  tokenStore,
-                  shouldStop,
-                  addLog,
-                  logOnClose: true,
-                },
-                async ({ check }) => {
-                  check();
-                  log(`=== 开始${label}: ${token.name} ===`);
-                  await execute(tokenId, token.name, check);
-                  check();
-                  tokenStatus.value[tokenId] = "completed";
-                  log(`=== ${token.name} ${label}完成 ===`, "success");
-                },
-              );
-            });
-          } catch (error) {
-            tokenStatus.value[tokenId] = error.interrupted
-              ? "stopped"
-              : "failed";
-            log(
-              `${token.name} ${label}未完成: ${error.message || "未知错误"}`,
-              error.interrupted ? "warning" : "error",
+  const runBatch = (label, execute) =>
+    runBatchForAccounts(
+      {
+        selectedTokens,
+        tokens,
+        tokenStatus,
+        isRunning,
+        shouldStop,
+        currentRunningTokenId,
+        addLog,
+        message,
+        label,
+        notifyOnFinish: true,
+      },
+      async ({ tokenId, token }) => {
+        try {
+          await runWithDailyTaskLock(tokenId, async () => {
+            await withManagedConnection(
+              {
+                tokenId,
+                tokenName: token.name,
+                ensureConnection,
+                releaseConnectionSlot,
+                connectionQueue,
+                batchSettings,
+                tokenStore,
+                shouldStop,
+                addLog,
+                logOnClose: true,
+              },
+              async ({ check }) => {
+                check();
+                log(`=== 开始${label}: ${token.name} ===`);
+                await execute(tokenId, token.name, check);
+                check();
+                tokenStatus.value[tokenId] = "completed";
+                log(`=== ${token.name} ${label}完成 ===`, "success");
+              },
             );
-          }
-        }),
-      );
-    } finally {
-      isRunning.value = false;
-      currentRunningTokenId.value = null;
-    }
-
-    if (ids.some((id) => tokenStatus.value[id] !== "completed")) {
-      message.warning(`批量${label}已结束，部分账号未完成，请查看日志`);
-    } else {
-      message.success(`批量${label}完成`);
-    }
-  };
+          });
+        } catch (error) {
+          tokenStatus.value[tokenId] = error.interrupted ? "stopped" : "failed";
+          log(
+            `${token.name} ${label}未完成: ${error.message || "未知错误"}`,
+            error.interrupted ? "warning" : "error",
+          );
+        }
+      },
+    );
 
   const resetBottles = () =>
     runBatch("重置罐子", async (tokenId, tokenName) => {

@@ -142,7 +142,9 @@
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
+import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
+import { getCurrentActivityWeek as resolveCurrentActivityWeek } from "@/utils/batch/viewHelpers";
 import { legacycolor as rawLegacyColor } from "@/utils/HeroList";
 
 defineProps<{ visible?: boolean; embedded?: boolean }>();
@@ -338,25 +340,10 @@ const legionCoinFromItems = computed(() => getItemCount(items.value, 1014)); // 
 const wrenchFromItems = computed(() => getItemCount(items.value, 1026)); // 扳手
 const cheerCoinFromItems = computed(() => getItemCount(items.value, 2101)); // 助威币
 
-const getCurrentActivityWeek = computed(() => {
-  const now = new Date();
-  const start = new Date("2025-12-12T12:00:00"); // 起始时间：黑市周开始
-  const weekDuration = 7 * 24 * 60 * 60 * 1000; // 一周毫秒数
-  const cycleDuration = 3 * weekDuration; // 三周期毫秒数
-
-  const elapsed = now - start;
-  if (elapsed < 0) return null; // 活动开始前
-
-  const cyclePosition = elapsed % cycleDuration;
-
-  if (cyclePosition < weekDuration) {
-    return "黑市周";
-  } else if (cyclePosition < 2 * weekDuration) {
-    return "招募周";
-  } else {
-    return "宝箱周";
-  }
-});
+const shanghaiNow = useShanghaiClock();
+const getCurrentActivityWeek = computed(() =>
+  resolveCurrentActivityWeek(shanghaiNow.value),
+);
 
 // 兼容旧字段（fishing.*）作为回退
 const normalRod = computed(() => {

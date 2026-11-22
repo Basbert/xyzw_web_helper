@@ -512,6 +512,7 @@ const CampChallenge = lazySection(() => import("./Club/CampChallenge.vue"));
 const ClubBattleRecords = lazySection(
   () => import("./Club/ClubBattleRecords.vue"),
 );
+const ClubInfo = lazySection(() => import("./Club/ClubInfo.vue"));
 const ClubMonthBattleRecords = lazySection(
   () => import("./Club/ClubMonthBattleRecords.vue"),
 );
