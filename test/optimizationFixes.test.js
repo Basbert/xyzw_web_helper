@@ -3829,6 +3829,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     clearAllImpl = null,
     idbErrorRef = null,
     idbReadyRef = null,
+    idbOverride = null,
+    disableWebLocks = false,
     wsClientClass = null,
     onStorageWrite = null,
   }) => {
@@ -3941,7 +3943,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
         pinia: { defineStore },
         vue,
         "@/hooks/useIndexedDB": {
-          default: () => idbApi,
+          default: () => idbOverride || idbApi,
         },
         "@/router": {
           default: { currentRoute: { value: { path: "/tokens" } } },
@@ -4002,7 +4004,9 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
         AbortController,
         WebSocket: { CLOSED: 3 },
         localStorage: storageAdapter,
-        navigator: { onLine: true, locks: sharedLocks },
+        navigator: disableWebLocks
+          ? { onLine: true }
+          : { onLine: true, locks: sharedLocks },
         setTimeout,
         clearTimeout,
         setInterval: () => 1,
@@ -6874,6 +6878,757 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     } finally {
       tabA.pinia._e.stop();
       tabB.pinia._e.stop();
+    }
+  });
+
+  test("Round10 P1: without Web Locks, expiry cleanup uses atomic IndexedDB conditional delete by version/writeToken, skips delete when previousBin is null, and skips auto-cleanup without Web Locks", async () => {
+    const expiredIso = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
+
+    // Helper: create a real transactional idb mock backed by a shared Map
+    const createSharedTransactionalIdb = async () => {
+      const records = new Map();
+      const fakeDb = {
+        put: async (_storeName, item) => {
+          records.set(item.id, item);
+        },
+        get: async (_storeName, key) => records.get(key),
+        getAllKeys: async () => Array.from(records.keys()),
+        delete: async (_storeName, key) => {
+          records.delete(key);
+        },
+        clear: async () => {
+          records.clear();
+        },
+        getAll: async () => Array.from(records.values()),
+        transaction: (_storeName, _mode) => ({
+          objectStore: () => ({
+            get: async (key) => records.get(key),
+            put: async (item) => {
+              records.set(item.id, item);
+            },
+            delete: async (key) => {
+              records.delete(key);
+            },
+          }),
+          done: Promise.resolve(),
+        }),
+      };
+      const { default: useIndexedDB } = await loadModule(
+        new URL("../src/hooks/useIndexedDB.ts", import.meta.url),
+        {
+          idb: { openDB: async () => fakeDb },
+          vue,
+        },
+        {
+          console: { log() {}, warn() {}, error() {} },
+          setTimeout,
+          clearTimeout,
+        },
+      );
+      return { records, createInstance: () => useIndexedDB() };
+    };
+
+    // Subcase A: Real useIndexedDB.deleteArrayBufferIfUnchanged protects newly re-logged-in BIN even when Tab A already passed Check #1 with no Web Locks
+    {
+      const sharedIdbEnv = await createSharedTransactionalIdb();
+      const idbA = sharedIdbEnv.createInstance();
+      const idbB = sharedIdbEnv.createInstance();
+      await idbA.storeArrayBuffer("acc-nolock", new Uint8Array([1, 1]).buffer, {
+        credentialVersion: 0,
+      });
+
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc-nolock",
+              name: "无锁重登号",
+              roleId: "9601",
+              token: "valid-old-nolock-0001",
+              importMethod: "manual",
+              createdAt: expiredIso,
+              lastUsed: expiredIso,
+            },
+          ]),
+        ],
+      ]);
+
+      let releaseBeforeCondDelete;
+      let condDeleteEntered;
+      const condDeleteStarted = new Promise((r) => {
+        condDeleteEntered = r;
+      });
+      const wrappedIdbA = {
+        ...idbA,
+        deleteArrayBufferIfUnchanged: async (key, expected) => {
+          condDeleteEntered();
+          await new Promise((r) => {
+            releaseBeforeCondDelete = r;
+          });
+          return idbA.deleteArrayBufferIfUnchanged(key, expected);
+        },
+      };
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: wrappedIdbA,
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: idbB,
+      });
+
+      try {
+        const cleanPromise = tabA.store.cleanExpiredTokensDetailed();
+        await condDeleteStarted;
+
+        // Tab A has ALREADY passed Check #1 and is about to run conditional delete.
+        // Without Web Locks, Tab B re-logs in acc-nolock with new Token and new BIN [9, 9].
+        const relogin = await tabB.store.commitCredentialUpdate("acc-nolock", {
+          updates: {
+            token: "valid-new-nolock-0002",
+            importMethod: "wxQrcode",
+            upgradedToPermanent: true,
+          },
+          binData: new Uint8Array([9, 9]).buffer,
+        });
+        assert.equal(relogin.committed, true);
+
+        // Resume Tab A's atomic IndexedDB conditional delete -> must detect change and NOT delete [9, 9]!
+        releaseBeforeCondDelete();
+        const report = await cleanPromise;
+        assert.equal(report.ok, true);
+        assert.equal(report.cleanedCount, 0);
+        const disk = JSON.parse(sharedStorage.get("gameTokens"));
+        assert.equal(disk.length, 1);
+        assert.equal(disk[0].token, "valid-new-nolock-0002");
+        const remainingBin = await idbB.getArrayBuffer("acc-nolock");
+        assert.ok(
+          remainingBin,
+          "new BIN must NOT be deleted by stale expiry cleanup",
+        );
+        assert.deepEqual(Array.from(new Uint8Array(remainingBin)), [9, 9]);
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+      }
+    }
+
+    // Subcase B: Expired manual account had NO BIN (previousBin === null) -> cleanup never invokes deleteArrayBuffer even if Tab B writes [9, 9] mid-cleanup
+    {
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc-nobin",
+              name: "纯手动号",
+              roleId: "9602",
+              token: "valid-old-nobin-0001",
+              importMethod: "manual",
+              createdAt: expiredIso,
+              lastUsed: expiredIso,
+            },
+          ]),
+        ],
+      ]);
+      const sharedIdb = new Map();
+      let releaseGetBin;
+      let getBinEntered;
+      const getBinStarted = new Promise((r) => {
+        getBinEntered = r;
+      });
+      let deleteCalls = 0;
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks: null,
+        disableWebLocks: true,
+        getArrayBufferImpl: async (k) => {
+          getBinEntered();
+          await new Promise((r) => {
+            releaseGetBin = r;
+          });
+          return sharedIdb.get(k) ?? null;
+        },
+        deleteArrayBufferImpl: async (k) => {
+          deleteCalls += 1;
+          sharedIdb.delete(k);
+          return true;
+        },
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks: null,
+        disableWebLocks: true,
+      });
+
+      try {
+        const cleanPromise = tabA.store.cleanExpiredTokensDetailed();
+        await getBinStarted;
+
+        const relogin = await tabB.store.commitCredentialUpdate("acc-nobin", {
+          updates: {
+            token: "valid-new-nobin-0002",
+            importMethod: "wxQrcode",
+            upgradedToPermanent: true,
+          },
+          binData: new Uint8Array([9, 9]).buffer,
+        });
+        assert.equal(relogin.committed, true);
+
+        releaseGetBin();
+        const report = await cleanPromise;
+        assert.equal(report.ok, true);
+        assert.equal(report.cleanedCount, 0);
+        assert.equal(deleteCalls, 0);
+        assert.deepEqual(
+          Array.from(new Uint8Array(sharedIdb.get("acc-nobin"))),
+          [9, 9],
+        );
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+      }
+    }
+
+    // Subcase C: Without Web Locks and without deleteArrayBufferIfUnchanged, initTokenStore skips automatic expiry cleanup and removeToken skips unsafe non-atomic BIN delete
+    {
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc-unsafe",
+              name: "无锁旧模拟号",
+              roleId: "9603",
+              token: "valid-old-unsafe-0001",
+              importMethod: "manual",
+              createdAt: expiredIso,
+              lastUsed: expiredIso,
+            },
+          ]),
+        ],
+      ]);
+      const sharedIdb = new Map([
+        ["acc-unsafe", new Uint8Array([3, 3]).buffer],
+      ]);
+      let deleteCalls = 0;
+
+      const tab = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks: null,
+        disableWebLocks: true,
+        deleteArrayBufferImpl: async (k) => {
+          deleteCalls += 1;
+          sharedIdb.delete(k);
+          return true;
+        },
+      });
+
+      try {
+        tab.store.initTokenStore();
+        await new Promise((r) => setTimeout(r, 25));
+        assert.equal(deleteCalls, 0);
+        assert.equal(JSON.parse(sharedStorage.get("gameTokens")).length, 1);
+
+        const report = await tab.store.cleanExpiredTokensDetailed();
+        assert.equal(report.ok, true);
+        assert.equal(report.cleanedCount, 0);
+        assert.equal(deleteCalls, 0);
+        assert.deepEqual(
+          Array.from(new Uint8Array(sharedIdb.get("acc-unsafe"))),
+          [3, 3],
+        );
+      } finally {
+        tab.pinia._e.stop();
+      }
+    }
+  });
+
+  test("Round10 P2: failed same-tab re-login preserves pendingBinRestoreBackups for retry and only clears backup after durable commit", async () => {
+    const expiredIso = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc-keep-backup",
+            name: "保留备份号",
+            roleId: "9701",
+            token: "valid-old-backup-0001",
+            importMethod: "manual",
+            createdAt: expiredIso,
+            lastUsed: expiredIso,
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdb = new Map([
+      ["acc-keep-backup", new Uint8Array([8, 8]).buffer],
+    ]);
+    let releaseDelete;
+    let deleteEntered;
+    const deleteStarted = new Promise((r) => {
+      deleteEntered = r;
+    });
+    let failStoreBin = true;
+    let failGameTokensWrite = false;
+
+    const sharedLocks = createLockManager();
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+      shouldFailSetItem: (k) => failGameTokensWrite && k === "gameTokens",
+      deleteArrayBufferImpl: async (k) => {
+        sharedIdb.delete(k);
+        deleteEntered?.();
+        deleteEntered = null;
+        if (releaseDelete !== "done") {
+          await new Promise((r) => {
+            releaseDelete = r;
+          });
+        }
+        return true;
+      },
+      storeArrayBufferImpl: async (k, buf) => {
+        if (failStoreBin) return false;
+        sharedIdb.set(k, buf);
+        return true;
+      },
+    });
+    const tabB = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks: createLockManager(),
+    });
+
+    try {
+      // Step 1: Trigger Check #2 BIN restore failure so [8, 8] is queued in pendingBinRestoreBackups
+      const cleanP = tabA.store.cleanExpiredTokensDetailed();
+      await deleteStarted;
+      await tabB.store.selectToken("acc-keep-backup");
+      const resolveDel = releaseDelete;
+      releaseDelete = "done";
+      resolveDel();
+      const cleanReport = await cleanP;
+      assert.equal(cleanReport.ok, false);
+      assert.equal(cleanReport.failures[0].reason, "bin_restore_failed");
+      assert.deepEqual(
+        [...tabA.store.getPendingBinRestoreIds()],
+        ["acc-keep-backup"],
+      );
+
+      // Step 2: IndexedDB works again, but localStorage rejects gameTokens write during same-tab re-login
+      failStoreBin = false;
+      failGameTokensWrite = true;
+      const failedRelogin = await tabA.store.commitCredentialUpdate(
+        "acc-keep-backup",
+        {
+          updates: {
+            token: "valid-new-backup-0002",
+            importMethod: "wxQrcode",
+            upgradedToPermanent: true,
+          },
+          binData: new Uint8Array([9, 9]).buffer,
+        },
+      );
+      assert.equal(failedRelogin.committed, false);
+      assert.equal(failedRelogin.reason, "storage_write_failed");
+      assert.equal(failedRelogin.binRolledBack, true);
+      // Old record preserved, uncommitted [9, 9] removed, AND retryable [8, 8] backup MUST still exist!
+      assert.equal(sharedIdb.has("acc-keep-backup"), false);
+      assert.equal(
+        JSON.parse(sharedStorage.get("gameTokens"))[0].token,
+        "valid-old-backup-0001",
+      );
+      assert.deepEqual(
+        [...tabA.store.getPendingBinRestoreIds()],
+        ["acc-keep-backup"],
+        "failed re-login must NOT wipe pendingBinRestoreBackups during bumpCredentialVersion",
+      );
+
+      // Step 3: Retry restores old BIN [8, 8] back into IndexedDB
+      failGameTokensWrite = false;
+      const retryRes = await tabA.store.retryPendingBinRestores();
+      assert.equal(retryRes.ok, true);
+      assert.deepEqual([...retryRes.restoredIds], ["acc-keep-backup"]);
+      assert.deepEqual([...tabA.store.getPendingBinRestoreIds()], []);
+      assert.deepEqual(
+        Array.from(new Uint8Array(sharedIdb.get("acc-keep-backup"))),
+        [8, 8],
+      );
+
+      // Step 4: Verify successful re-login DOES clear any pending backup once committed
+      const okRelogin = await tabA.store.commitCredentialUpdate(
+        "acc-keep-backup",
+        {
+          updates: {
+            token: "valid-final-backup-0003",
+            importMethod: "wxQrcode",
+            upgradedToPermanent: true,
+          },
+          binData: new Uint8Array([7, 7]).buffer,
+        },
+      );
+      assert.equal(okRelogin.committed, true);
+      assert.deepEqual([...tabA.store.getPendingBinRestoreIds()], []);
+      assert.deepEqual(
+        Array.from(new Uint8Array(sharedIdb.get("acc-keep-backup"))),
+        [7, 7],
+      );
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+  });
+
+  test("Round10 Self-Audit: storeArrayBufferIfMissing never clobbers a concurrent re-login NEW_BIN, and previousBin=null still runs deleteArrayBufferIfUnchanged to abort mid-re-login deletion", async () => {
+    const expiredIso = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
+    const createTransactionalIdb = async () => {
+      const records = new Map();
+      const fakeDb = {
+        put: async (_storeName, item) => {
+          records.set(item.id, item);
+        },
+        get: async (_storeName, key) => records.get(key),
+        getAllKeys: async () => Array.from(records.keys()),
+        delete: async (_storeName, key) => {
+          records.delete(key);
+        },
+        clear: async () => {
+          records.clear();
+        },
+        getAll: async () => Array.from(records.values()),
+        transaction: (_storeName, _mode) => ({
+          objectStore: () => ({
+            get: async (key) => records.get(key),
+            put: async (item) => {
+              records.set(item.id, item);
+            },
+            delete: async (key) => {
+              records.delete(key);
+            },
+          }),
+          done: Promise.resolve(),
+        }),
+      };
+      const { default: useIndexedDB } = await loadModule(
+        new URL("../src/hooks/useIndexedDB.ts", import.meta.url),
+        {
+          idb: { openDB: async () => fakeDb },
+          vue,
+        },
+        {
+          console: { log() {}, warn() {}, error() {} },
+          setTimeout,
+          clearTimeout,
+        },
+      );
+      return { records, createInstance: () => useIndexedDB() };
+    };
+
+    // Finding 1 Variant A: Tab A deletes OLD_BIN -> Tab B selects (lastUsed=now, ver still 0) and writes NEW_BIN to IDB
+    // BEFORE updating localStorage -> Tab A Check #2 calls storeArrayBufferIfMissing -> sees "exists", NEVER overwrites NEW_BIN!
+    {
+      const idbEnv = await createTransactionalIdb();
+      const idbA = idbEnv.createInstance();
+      const idbB = idbEnv.createInstance();
+      await idbA.storeArrayBuffer("acc-f1a", new Uint8Array([1, 1]).buffer, {
+        credentialVersion: 0,
+      });
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc-f1a",
+              name: "回写保护号",
+              roleId: "9801",
+              token: "valid-old-f1a-0001",
+              importMethod: "manual",
+              createdAt: expiredIso,
+              lastUsed: expiredIso,
+            },
+          ]),
+        ],
+      ]);
+
+      let releaseAfterCondDelete;
+      let afterCondDeleteEntered;
+      const afterCondDeleteStarted = new Promise((r) => {
+        afterCondDeleteEntered = r;
+      });
+      const wrappedIdbA = {
+        ...idbA,
+        deleteArrayBufferIfUnchanged: async (key, expected) => {
+          const result = await idbA.deleteArrayBufferIfUnchanged(key, expected);
+          afterCondDeleteEntered();
+          await new Promise((r) => {
+            releaseAfterCondDelete = r;
+          });
+          return result;
+        },
+      };
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: wrappedIdbA,
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: idbB,
+      });
+
+      try {
+        const cleanP = tabA.store.cleanExpiredTokensDetailed();
+        await afterCondDeleteStarted;
+        assert.equal(await idbB.getArrayBuffer("acc-f1a"), null);
+
+        // Tab B refreshes lastUsed (credentialVersion still 0!) and writes NEW_BIN [9, 9] to IDB
+        // BEFORE Tab B commits NEW_TOKEN to localStorage.
+        await tabB.store.selectToken("acc-f1a");
+        let releaseTabBStore;
+        let tabBStoreWritten;
+        const tabBStoreDone = new Promise((r) => {
+          tabBStoreWritten = r;
+        });
+        const reloginP = tabB.store.commitCredentialUpdate("acc-f1a", {
+          updates: {
+            token: "valid-new-f1a-0002",
+            importMethod: "wxQrcode",
+            upgradedToPermanent: true,
+          },
+          binData: new Uint8Array([9, 9]).buffer,
+          binStorage: {
+            getArrayBuffer: (k) => idbB.getArrayBuffer(k),
+            storeArrayBuffer: async (k, buf, meta) => {
+              const ok = await idbB.storeArrayBuffer(k, buf, meta);
+              tabBStoreWritten();
+              await new Promise((r) => {
+                releaseTabBStore = r;
+              });
+              return ok;
+            },
+            deleteArrayBuffer: (k) => idbB.deleteArrayBuffer(k),
+          },
+        });
+        await tabBStoreDone;
+
+        // Release Tab A Check #2: storeArrayBufferIfMissing must see "exists" and keep NEW_BIN [9, 9]
+        releaseAfterCondDelete();
+        const report = await cleanP;
+        assert.equal(report.ok, true);
+        assert.deepEqual([...tabA.store.getPendingBinRestoreIds()], []);
+
+        // Release Tab B -> commits NEW_TOKEN with intact NEW_BIN [9, 9]
+        releaseTabBStore();
+        const reloginRes = await reloginP;
+        assert.equal(reloginRes.committed, true);
+        const finalBin = await idbB.getArrayBuffer("acc-f1a");
+        assert.deepEqual(
+          Array.from(new Uint8Array(finalBin)),
+          [9, 9],
+          "storeArrayBufferIfMissing must never overwrite Tab B NEW_BIN with OLD_BIN",
+        );
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+      }
+    }
+
+    // Finding 1 Variant B: retryPendingBinRestores sees "exists" when Tab B already wrote NEW_BIN -> does not overwrite NEW_BIN
+    {
+      const idbEnv = await createTransactionalIdb();
+      const idbA = idbEnv.createInstance();
+      const idbB = idbEnv.createInstance();
+      await idbA.storeArrayBuffer("acc-f1b", new Uint8Array([2, 2]).buffer, {
+        credentialVersion: 0,
+      });
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc-f1b",
+              name: "重试回写保护号",
+              roleId: "9802",
+              token: "valid-old-f1b-0001",
+              importMethod: "manual",
+              createdAt: expiredIso,
+              lastUsed: expiredIso,
+            },
+          ]),
+        ],
+      ]);
+
+      let failConditionalStore = true;
+      let releaseAfterCondDelete;
+      let afterCondDeleteEntered;
+      const afterCondDeleteStarted = new Promise((r) => {
+        afterCondDeleteEntered = r;
+      });
+      const wrappedIdbA = {
+        ...idbA,
+        deleteArrayBufferIfUnchanged: async (key, expected) => {
+          const result = await idbA.deleteArrayBufferIfUnchanged(key, expected);
+          afterCondDeleteEntered();
+          await new Promise((r) => {
+            releaseAfterCondDelete = r;
+          });
+          return result;
+        },
+        storeArrayBufferIfMissing: async (key, data, meta) => {
+          if (failConditionalStore) return "error";
+          return idbA.storeArrayBufferIfMissing(key, data, meta);
+        },
+      };
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: wrappedIdbA,
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: idbB,
+      });
+
+      try {
+        // Queue [2, 2] into pendingBinRestoreBackups via Check #2 restore failure
+        const cleanP = tabA.store.cleanExpiredTokensDetailed();
+        await afterCondDeleteStarted;
+        await tabB.store.selectToken("acc-f1b");
+        releaseAfterCondDelete();
+        const firstReport = await cleanP;
+        assert.equal(firstReport.ok, false);
+        assert.deepEqual(
+          [...tabA.store.getPendingBinRestoreIds()],
+          ["acc-f1b"],
+        );
+
+        // Tab B writes NEW_BIN [8, 9] before bumping credentialVersion
+        failConditionalStore = false;
+        await idbB.storeArrayBuffer("acc-f1b", new Uint8Array([8, 9]).buffer, {
+          credentialVersion: 1,
+        });
+
+        // retryPendingBinRestores sees "exists" -> succeeds without overwriting [8, 9], keeps backup while version still 0
+        const retryRes = await tabA.store.retryPendingBinRestores();
+        assert.equal(retryRes.ok, true);
+        assert.deepEqual([...retryRes.restoredIds], []);
+        assert.deepEqual(
+          [...tabA.store.getPendingBinRestoreIds()],
+          ["acc-f1b"],
+        );
+        assert.deepEqual(
+          Array.from(new Uint8Array(await idbB.getArrayBuffer("acc-f1b"))),
+          [8, 9],
+        );
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+      }
+    }
+
+    // Finding 2: previousBin === null STILL invokes deleteArrayBufferIfUnchanged({ expectedData: null }) and aborts account deletion if Tab B just wrote NEW_BIN before updating localStorage
+    {
+      const idbEnv = await createTransactionalIdb();
+      const idbA = idbEnv.createInstance();
+      const idbB = idbEnv.createInstance();
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc-f2",
+              name: "无旧BIN重登号",
+              roleId: "9803",
+              token: "valid-old-f2-0001",
+              importMethod: "manual",
+              createdAt: expiredIso,
+              lastUsed: expiredIso,
+            },
+          ]),
+        ],
+      ]);
+
+      let releaseBeforeCondDelete;
+      let condDeleteEntered;
+      const condDeleteStarted = new Promise((r) => {
+        condDeleteEntered = r;
+      });
+      const wrappedIdbA = {
+        ...idbA,
+        deleteArrayBufferIfUnchanged: async (key, expected) => {
+          condDeleteEntered();
+          await new Promise((r) => {
+            releaseBeforeCondDelete = r;
+          });
+          return idbA.deleteArrayBufferIfUnchanged(key, expected);
+        },
+      };
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: wrappedIdbA,
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: idbB,
+      });
+
+      try {
+        const cleanP = tabA.store.cleanExpiredTokensDetailed();
+        await condDeleteStarted;
+
+        // Tab B writes NEW_BIN [7, 8] to IDB BEFORE updating localStorage (localStorage still shows expired acc-f2!)
+        await idbB.storeArrayBuffer("acc-f2", new Uint8Array([7, 8]).buffer, {
+          credentialVersion: 1,
+        });
+
+        // Resume Tab A: deleteArrayBufferIfUnchanged({ expectedData: null }) sees NEW_BIN -> returns "changed" -> aborts account deletion!
+        releaseBeforeCondDelete();
+        const report = await cleanP;
+        assert.equal(report.ok, true);
+        assert.equal(report.cleanedCount, 0);
+        assert.equal(JSON.parse(sharedStorage.get("gameTokens")).length, 1);
+        assert.deepEqual(
+          Array.from(new Uint8Array(await idbB.getArrayBuffer("acc-f2"))),
+          [7, 8],
+        );
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+      }
     }
   });
 });

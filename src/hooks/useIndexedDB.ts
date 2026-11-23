@@ -17,6 +17,39 @@ interface ArrayBufferDB extends DBSchema {
   };
 }
 
+export interface ArrayBufferRecord {
+  data: ArrayBuffer;
+  updatedAtMs: number | null;
+  credentialVersion: number | null;
+  binWriteToken: string | null;
+}
+
+export interface ConditionalDeleteExpected {
+  expectedData?: ArrayBuffer | null;
+  expectedUpdatedAtMs?: number | null;
+  expectedCredentialVersion?: number | null;
+  expectedBinWriteToken?: string | null;
+}
+
+export type ConditionalDeleteResult =
+  "deleted" | "changed" | "missing" | "error";
+
+export type ConditionalStoreResult = "stored" | "exists" | "error";
+
+const arrayBuffersEqual = (
+  a: ArrayBuffer | null | undefined,
+  b: ArrayBuffer | null | undefined,
+): boolean => {
+  if (!a || !b) return a === b;
+  if (a.byteLength !== b.byteLength) return false;
+  const viewA = new Uint8Array(a);
+  const viewB = new Uint8Array(b);
+  for (let i = 0; i < viewA.length; i += 1) {
+    if (viewA[i] !== viewB[i]) return false;
+  }
+  return true;
+};
+
 // Hook 返回类型
 interface UseIndexedDBReturn {
   // 状态
@@ -29,9 +62,19 @@ interface UseIndexedDBReturn {
     data: ArrayBuffer,
     metadata?: Record<string, any>,
   ) => Promise<boolean>;
+  storeArrayBufferIfMissing: (
+    key: string,
+    data: ArrayBuffer,
+    metadata?: Record<string, any>,
+  ) => Promise<ConditionalStoreResult>;
   getArrayBuffer: (key: string) => Promise<ArrayBuffer | null>;
+  getArrayBufferRecord: (key: string) => Promise<ArrayBufferRecord | null>;
   getAllKeys: () => Promise<string[]>;
   deleteArrayBuffer: (key: string) => Promise<boolean>;
+  deleteArrayBufferIfUnchanged: (
+    key: string,
+    expected?: ConditionalDeleteExpected,
+  ) => Promise<ConditionalDeleteResult>;
   clearAll: () => Promise<boolean>;
   getStorageInfo: () => Promise<{ totalSize: number; keyCount: number }>;
 }
@@ -201,10 +244,17 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
     }
 
     try {
+      const binWriteToken =
+        typeof metadata?.binWriteToken === "string" && metadata.binWriteToken
+          ? metadata.binWriteToken
+          : `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
       const item = {
         id: key,
         data,
-        metadata,
+        metadata: {
+          ...(metadata || {}),
+          binWriteToken,
+        },
         createdAt: new Date(),
         updatedAt: new Date(),
       };
@@ -223,9 +273,63 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
   };
 
   /**
-   * 获取 ArrayBuffer 数据
+   * 在单个 IndexedDB 读写事务内仅当键缺失时写入 ArrayBuffer，
+   * 避免无 Web Locks 环境下旧 BIN 恢复覆盖另一标签页刚写入的新 BIN。
    */
-  const getArrayBuffer = async (key: string): Promise<ArrayBuffer | null> => {
+  const storeArrayBufferIfMissing = async (
+    key: string,
+    data: ArrayBuffer,
+    metadata?: Record<string, any>,
+  ): Promise<ConditionalStoreResult> => {
+    const database = await ensureReady();
+    if (!database) {
+      return "error";
+    }
+
+    try {
+      const tx = database.transaction(storeName, "readwrite");
+      const store = tx.objectStore(storeName);
+      const existing = await store.get(key);
+      if (existing) {
+        await tx.done;
+        return "exists";
+      }
+
+      const binWriteToken =
+        typeof metadata?.binWriteToken === "string" && metadata.binWriteToken
+          ? metadata.binWriteToken
+          : `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const item = {
+        id: key,
+        data,
+        metadata: {
+          ...(metadata || {}),
+          binWriteToken,
+        },
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      await store.put(item);
+      await tx.done;
+      console.log(
+        `✅ ArrayBuffer 条件恢复成功，键: ${key}, 大小: ${data.byteLength} 字节`,
+      );
+      return "stored";
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "未知错误";
+      error.value = `条件存储数据失败: ${errorMessage}`;
+      console.error("❌ 条件存储 ArrayBuffer 错误:", err);
+      return "error";
+    }
+  };
+
+  /**
+   * 获取 ArrayBuffer 数据及其元数据快照（用于跨标签页条件删除校验）
+   */
+  const getArrayBufferRecord = async (
+    key: string,
+  ): Promise<ArrayBufferRecord | null> => {
     const database = await ensureReady();
     if (!database) {
       return null;
@@ -239,16 +343,46 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
         return null;
       }
 
+      const meta = result.metadata || {};
+      const updatedAtMs =
+        result.updatedAt instanceof Date
+          ? result.updatedAt.getTime()
+          : typeof result.updatedAt === "number"
+            ? result.updatedAt
+            : null;
+      const credentialVersion =
+        typeof meta.credentialVersion === "number" &&
+        Number.isFinite(meta.credentialVersion)
+          ? meta.credentialVersion
+          : null;
+      const binWriteToken =
+        typeof meta.binWriteToken === "string" && meta.binWriteToken
+          ? meta.binWriteToken
+          : null;
+
       console.log(
         `✅ ArrayBuffer 读取成功，键: ${key}, 大小: ${result.data.byteLength} 字节`,
       );
-      return result.data;
+      return {
+        data: result.data,
+        updatedAtMs,
+        credentialVersion,
+        binWriteToken,
+      };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "未知错误";
       error.value = `读取数据失败: ${errorMessage}`;
       console.error("❌ 读取 ArrayBuffer 错误:", err);
       return null;
     }
+  };
+
+  /**
+   * 获取 ArrayBuffer 数据
+   */
+  const getArrayBuffer = async (key: string): Promise<ArrayBuffer | null> => {
+    const record = await getArrayBufferRecord(key);
+    return record ? record.data : null;
   };
 
   /**
@@ -288,6 +422,77 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
       error.value = `删除数据失败: ${errorMessage}`;
       console.error("❌ 删除 ArrayBuffer 错误:", err);
       return false;
+    }
+  };
+
+  /**
+   * 在单个 IndexedDB 读写事务内按凭据版本、写入标记与字节快照做原子条件删除，
+   * 避免无 Web Locks 环境下误删另一标签页刚重登写入的新 BIN。
+   */
+  const deleteArrayBufferIfUnchanged = async (
+    key: string,
+    expected: ConditionalDeleteExpected = {},
+  ): Promise<ConditionalDeleteResult> => {
+    const database = await ensureReady();
+    if (!database) {
+      return "error";
+    }
+
+    try {
+      const tx = database.transaction(storeName, "readwrite");
+      const store = tx.objectStore(storeName);
+      const current = await store.get(key);
+      if (!current) {
+        await tx.done;
+        return "missing";
+      }
+
+      const currentMeta = current.metadata || {};
+      const currentMetaVer =
+        typeof currentMeta.credentialVersion === "number" &&
+        Number.isFinite(currentMeta.credentialVersion)
+          ? currentMeta.credentialVersion
+          : null;
+      const currentWriteToken =
+        typeof currentMeta.binWriteToken === "string" &&
+        currentMeta.binWriteToken
+          ? currentMeta.binWriteToken
+          : null;
+      const currentUpdatedAtMs =
+        current.updatedAt instanceof Date
+          ? current.updatedAt.getTime()
+          : typeof current.updatedAt === "number"
+            ? current.updatedAt
+            : null;
+
+      const changed =
+        expected.expectedData === null ||
+        (expected.expectedBinWriteToken !== undefined &&
+          currentWriteToken !== expected.expectedBinWriteToken) ||
+        (expected.expectedCredentialVersion !== undefined &&
+          expected.expectedCredentialVersion !== null &&
+          currentMetaVer !== null &&
+          currentMetaVer !== expected.expectedCredentialVersion) ||
+        (expected.expectedUpdatedAtMs !== undefined &&
+          expected.expectedUpdatedAtMs !== null &&
+          currentUpdatedAtMs !== expected.expectedUpdatedAtMs) ||
+        (expected.expectedData !== undefined &&
+          !arrayBuffersEqual(current.data, expected.expectedData));
+
+      if (changed) {
+        await tx.done;
+        return "changed";
+      }
+
+      await store.delete(key);
+      await tx.done;
+      console.log(`✅ ArrayBuffer 条件删除成功，键: ${key}`);
+      return "deleted";
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "未知错误";
+      error.value = `条件删除数据失败: ${errorMessage}`;
+      console.error("❌ 条件删除 ArrayBuffer 错误:", err);
+      return "error";
     }
   };
 
@@ -348,9 +553,12 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
 
     // 方法
     storeArrayBuffer,
+    storeArrayBufferIfMissing,
     getArrayBuffer,
+    getArrayBufferRecord,
     getAllKeys,
     deleteArrayBuffer,
+    deleteArrayBufferIfUnchanged,
     clearAll,
     getStorageInfo,
   };

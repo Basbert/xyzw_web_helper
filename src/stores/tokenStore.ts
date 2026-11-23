@@ -27,13 +27,35 @@ import { $emit, emitPlus } from "./events/index.js";
 
 const {
   getArrayBuffer,
+  getArrayBufferRecord,
   storeArrayBuffer,
+  storeArrayBufferIfMissing,
   deleteArrayBuffer,
+  deleteArrayBufferIfUnchanged,
   getAllKeys,
   clearAll,
   isReady: isIdbReady,
   error: idbError,
 } = useIndexedDB();
+const restoreBinIfMissing = async (
+  tokenId: string,
+  buffer: ArrayBuffer,
+  credentialVersion: number,
+): Promise<"stored" | "exists" | "error"> => {
+  try {
+    if (typeof storeArrayBufferIfMissing === "function") {
+      return await storeArrayBufferIfMissing(tokenId, buffer, {
+        credentialVersion,
+      });
+    }
+    const ok = Boolean(
+      await storeArrayBuffer(tokenId, buffer, { credentialVersion }),
+    );
+    return ok ? "stored" : "error";
+  } catch {
+    return "error";
+  }
+};
 const isIndexedDbUnavailable = () =>
   isIdbReady?.value === false && Boolean(idbError?.value);
 const resetStaleIdbError = () => {
@@ -520,6 +542,10 @@ export const useTokenStore = defineStore("tokens", () => {
   const CRED_VERSION_KEY_PREFIX = "xyzw_cred_ver_";
   const STORE_WRITE_LOCK_NAME = "xyzw-gameTokens";
   const STORE_WRITE_LOCK_WAIT_MS = 10000;
+  const hasCrossTabWebLocks = () =>
+    typeof navigator !== "undefined" &&
+    Boolean(navigator.locks) &&
+    typeof navigator.locks.request === "function";
   let credentialVersionSeed = 0;
   let selectRequestSeq = 0;
   const tokenCredentialVersions = new Map<string, number>();
@@ -591,7 +617,6 @@ export const useTokenStore = defineStore("tokens", () => {
     const next = Math.max(current, credentialVersionSeed) + 1;
     credentialVersionSeed = next;
     tokenCredentialVersions.set(tokenId, next);
-    pendingBinRestoreBackups.delete(tokenId);
     if (typeof localStorage !== "undefined" && localStorage?.setItem) {
       try {
         localStorage.setItem(
@@ -693,7 +718,11 @@ export const useTokenStore = defineStore("tokens", () => {
 
   interface CredentialBinStorage {
     getArrayBuffer?: (key: string) => Promise<ArrayBuffer | null>;
-    storeArrayBuffer?: (key: string, data: ArrayBuffer) => Promise<boolean>;
+    storeArrayBuffer?: (
+      key: string,
+      data: ArrayBuffer,
+      metadata?: Record<string, any>,
+    ) => Promise<boolean>;
     deleteArrayBuffer?: (key: string) => Promise<boolean>;
   }
 
@@ -841,6 +870,9 @@ export const useTokenStore = defineStore("tokens", () => {
         error: persisted.error,
       };
     }
+    if (touchesCredential) {
+      pendingBinRestoreBackups.delete(tokenId);
+    }
     return { ok: true, token: nextToken };
   };
 
@@ -925,7 +957,11 @@ export const useTokenStore = defineStore("tokens", () => {
           return false;
         }
         if (previousBin && typeof storage.storeArrayBuffer === "function") {
-          const restored = await storage.storeArrayBuffer(tokenId, previousBin);
+          const restored = await storage.storeArrayBuffer(
+            tokenId,
+            previousBin,
+            { credentialVersion: getCredentialVersion(tokenId) },
+          );
           return Boolean(restored);
         }
         if (typeof storage.deleteArrayBuffer === "function") {
@@ -961,7 +997,11 @@ export const useTokenStore = defineStore("tokens", () => {
           binRolledBack: true,
         };
       }
-      const saved = await storage.storeArrayBuffer(tokenId, options.binData);
+      const nextBinVersion =
+        Math.max(getCredentialVersion(tokenId), credentialVersionSeed) + 1;
+      const saved = await storage.storeArrayBuffer(tokenId, options.binData, {
+        credentialVersion: nextBinVersion,
+      });
       if (!saved) {
         return {
           committed: false,
@@ -1013,6 +1053,10 @@ export const useTokenStore = defineStore("tokens", () => {
           cleanupError,
         );
       }
+    }
+
+    if (binWritten) {
+      pendingBinRestoreBackups.delete(tokenId);
     }
 
     if (options.closeActiveConnection) {
@@ -1513,9 +1557,22 @@ export const useTokenStore = defineStore("tokens", () => {
           // cross-tab removal event that tears down other tabs' live state.
           resetStaleIdbError();
           let previousBin: ArrayBuffer | null = null;
+          let previousBinUpdatedAtMs: number | null | undefined;
+          let previousBinCredentialVersion: number | null = null;
+          let previousBinWriteToken: string | null | undefined;
           let backupThrew = false;
           try {
-            previousBin = await getArrayBuffer(tokenId);
+            if (typeof getArrayBufferRecord === "function") {
+              const record = await getArrayBufferRecord(tokenId);
+              if (record) {
+                previousBin = record.data;
+                previousBinUpdatedAtMs = record.updatedAtMs;
+                previousBinCredentialVersion = record.credentialVersion;
+                previousBinWriteToken = record.binWriteToken;
+              }
+            } else {
+              previousBin = await getArrayBuffer(tokenId);
+            }
           } catch {
             backupThrew = true;
             previousBin = null;
@@ -1533,8 +1590,8 @@ export const useTokenStore = defineStore("tokens", () => {
             };
           }
 
-          // Re-verify predicate BEFORE deleting BIN in case another tab
-          // refreshed lastUsed or upgraded this account while getArrayBuffer awaited.
+          // Re-verify predicate AND credentialVersion BEFORE deleting BIN in case
+          // another tab refreshed lastUsed, upgraded, or re-logged in while reading BIN.
           syncGameTokensFromStorage();
           const latestBeforeBinDelete = gameTokens.value.find(
             (token) => token.id === tokenId,
@@ -1551,7 +1608,8 @@ export const useTokenStore = defineStore("tokens", () => {
           }
           if (
             options.shouldDelete &&
-            !options.shouldDelete(latestBeforeBinDelete)
+            (!options.shouldDelete(latestBeforeBinDelete) ||
+              getCredentialVersion(tokenId) !== startCredentialVersion)
           ) {
             return {
               ok: true,
@@ -1564,14 +1622,77 @@ export const useTokenStore = defineStore("tokens", () => {
           }
 
           let binCleared = true;
-          try {
-            const deleted = await deleteArrayBuffer(tokenId);
-            if (deleted === false) {
+          let binChangedConcurrently = false;
+          let deletedPreviousBin = false;
+          if (
+            options.shouldDelete &&
+            typeof deleteArrayBufferIfUnchanged === "function"
+          ) {
+            try {
+              const condResult = await deleteArrayBufferIfUnchanged(
+                tokenId,
+                previousBin === null
+                  ? { expectedData: null }
+                  : {
+                      expectedData: previousBin,
+                      expectedUpdatedAtMs: previousBinUpdatedAtMs,
+                      expectedCredentialVersion:
+                        previousBinCredentialVersion ?? startCredentialVersion,
+                      expectedBinWriteToken: previousBinWriteToken,
+                    },
+              );
+              if (condResult === "changed") {
+                binChangedConcurrently = true;
+              } else if (condResult === "error") {
+                binCleared = false;
+              } else if (condResult === "deleted") {
+                deletedPreviousBin = true;
+              }
+            } catch (idbError) {
+              wsLogger.error(
+                `条件删除账号 BIN 凭据失败 [${tokenId}]:`,
+                idbError,
+              );
               binCleared = false;
             }
-          } catch (idbError) {
-            wsLogger.error(`删除账号 BIN 凭据失败 [${tokenId}]:`, idbError);
-            binCleared = false;
+          } else if (options.shouldDelete && previousBin === null) {
+            // Legacy IDB fallback without deleteArrayBufferIfUnchanged: expired
+            // account had no BIN when snapshotted, so never run unconditional delete.
+            binCleared = true;
+          } else if (options.shouldDelete && !hasCrossTabWebLocks()) {
+            // Without cross-tab Web Locks OR atomic IndexedDB conditional delete,
+            // refuse non-atomic BIN deletion during expiry cleanup to protect concurrent re-logins.
+            return {
+              ok: true,
+              listCleared: false,
+              binCleared: false,
+              retryable: false,
+              reason: null,
+              skipped: true,
+            };
+          } else {
+            try {
+              const deleted = await deleteArrayBuffer(tokenId);
+              if (deleted === false) {
+                binCleared = false;
+              } else {
+                deletedPreviousBin = Boolean(previousBin);
+              }
+            } catch (idbError) {
+              wsLogger.error(`删除账号 BIN 凭据失败 [${tokenId}]:`, idbError);
+              binCleared = false;
+            }
+          }
+
+          if (binChangedConcurrently) {
+            return {
+              ok: true,
+              listCleared: false,
+              binCleared: false,
+              retryable: false,
+              reason: null,
+              skipped: true,
+            };
           }
 
           if (!binCleared) {
@@ -1605,24 +1726,20 @@ export const useTokenStore = defineStore("tokens", () => {
           }
           if (
             options.shouldDelete &&
-            !options.shouldDelete(latestAfterBinDelete)
+            (!options.shouldDelete(latestAfterBinDelete) ||
+              getCredentialVersion(tokenId) !== startCredentialVersion)
           ) {
             let binRestored = true;
             const credentialChanged =
               getCredentialVersion(tokenId) !== startCredentialVersion;
-            if (previousBin && !credentialChanged) {
-              try {
-                binRestored = Boolean(
-                  await storeArrayBuffer(tokenId, previousBin),
-                );
-              } catch (restoreError) {
+            if (deletedPreviousBin && previousBin && !credentialChanged) {
+              const restoreStatus = await restoreBinIfMissing(
+                tokenId,
+                previousBin,
+                startCredentialVersion,
+              );
+              if (restoreStatus === "error") {
                 binRestored = false;
-                wsLogger.warn(
-                  `恢复已重新激活账号的 BIN 凭据失败 [${tokenId}]:`,
-                  restoreError,
-                );
-              }
-              if (!binRestored) {
                 wsLogger.warn(
                   `恢复已重新激活账号的 BIN 凭据返回失败 [${tokenId}]`,
                 );
@@ -1674,17 +1791,17 @@ export const useTokenStore = defineStore("tokens", () => {
             );
             let binRestored = true;
             if (
+              deletedPreviousBin &&
               previousBin &&
               getCredentialVersion(tokenId) === startCredentialVersion
             ) {
-              try {
-                binRestored = Boolean(
-                  await storeArrayBuffer(tokenId, previousBin),
-                );
-              } catch {
+              const restoreStatus = await restoreBinIfMissing(
+                tokenId,
+                previousBin,
+                startCredentialVersion,
+              );
+              if (restoreStatus === "error") {
                 binRestored = false;
-              }
-              if (!binRestored) {
                 pendingBinRestoreBackups.set(tokenId, {
                   buffer: previousBin,
                   version: startCredentialVersion,
@@ -1703,6 +1820,8 @@ export const useTokenStore = defineStore("tokens", () => {
                 : "删除失败：写入浏览器本地存储失败，且恢复原账号 BIN 凭据失败，请重试删除或重新登录",
             };
           }
+
+          pendingBinRestoreBackups.delete(tokenId);
 
           capturedConnection = wsConnections.value[tokenId];
           hadOpenConnection = Boolean(capturedConnection);
@@ -3463,6 +3582,7 @@ export const useTokenStore = defineStore("tokens", () => {
         data.tokens.forEach((token: any) => {
           if (token?.id) bumpCredentialVersion(token.id);
         });
+        pendingBinRestoreBackups.clear();
         cleanupInvalidTokens();
         notifyGameTokensSynced();
         return {
@@ -3884,17 +4004,25 @@ export const useTokenStore = defineStore("tokens", () => {
               pendingBinRestoreBackups.delete(tokenId);
               return;
             }
-            let restored = false;
-            try {
-              restored = Boolean(
-                await storeArrayBuffer(tokenId, backup.buffer),
-              );
-            } catch {
-              restored = false;
-            }
-            if (restored) {
+            const restoreStatus = await restoreBinIfMissing(
+              tokenId,
+              backup.buffer,
+              backup.version,
+            );
+            if (restoreStatus === "stored") {
               pendingBinRestoreBackups.delete(tokenId);
               restoredIds.push(tokenId);
+            } else if (restoreStatus === "exists") {
+              syncGameTokensFromStorage();
+              const stillExists = gameTokens.value.some(
+                (t) => t.id === tokenId,
+              );
+              if (
+                !stillExists ||
+                getCredentialVersion(tokenId) !== backup.version
+              ) {
+                pendingBinRestoreBackups.delete(tokenId);
+              }
             } else {
               failures.push({
                 tokenId,
@@ -4311,10 +4439,14 @@ export const useTokenStore = defineStore("tokens", () => {
     if (tokenStoreInitialized) return;
     tokenStoreInitialized = true;
 
-    // 清理过期token
-    cleanExpiredTokens().catch((error) => {
-      wsLogger.warn("初始化清理过期Token失败:", error);
-    });
+    // 清理过期token（无跨标签页 Web Locks 时跳过自动后台清理，避免与他页重登竞态）
+    if (hasCrossTabWebLocks()) {
+      cleanExpiredTokens().catch((error) => {
+        wsLogger.warn("初始化清理过期Token失败:", error);
+      });
+    } else {
+      tokenLogger.debug("当前环境无跨标签页 Web Locks，跳过启动自动过期清理");
+    }
     // 启动连接监控、跨标签页协调与限流通知
     initConnectionCoordination();
 
