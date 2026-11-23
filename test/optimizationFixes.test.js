@@ -9933,7 +9933,9 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       "apexServerTimeSample",
       "apexServerTimeTokenId",
       "activeGuessOpToken",
+      "inFlightGuessOps",
       "activeVoteOpToken",
+      "inFlightVoteOps",
       "readLiveApexServerNowMs",
       "assertGuessOpenNow",
       "assertVoteOpenNow",
@@ -10329,6 +10331,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       "apexServerTimeSample",
       "apexServerTimeTokenId",
       "activeGuessOpToken",
+      "inFlightGuessOps",
       "readLiveApexServerNowMs",
       "assertGuessOpenNow",
       "doGuess",
@@ -10753,6 +10756,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       "apexServerTimeSample",
       "apexServerTimeTokenId",
       "activeVoteOpToken",
+      "inFlightVoteOps",
       "readLiveApexServerNowMs",
       "assertVoteOpenNow",
       "openVoteDialog",
@@ -10983,7 +10987,9 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       "apexServerTimeSample",
       "apexServerTimeTokenId",
       "activeGuessOpToken",
+      "inFlightGuessOps",
       "activeVoteOpToken",
+      "inFlightVoteOps",
       "readLiveApexServerNowMs",
       "assertGuessOpenNow",
       "assertVoteOpenNow",
@@ -11434,5 +11440,296 @@ globalThis.api = {
     assert.match(inWindow1830.reminder, /角色日期与服务端实时日期不一致/);
     assert.equal(cmds.includes("apex_getguesslist"), false);
     assert.equal(cmds.includes("apex_guess"), false);
+  });
+
+  test("Round18 P2: switching A -> B -> A while A's first apex_vote or apex_guess awaits server reply blocks duplicate submission on A while keeping B unblocked", async () => {
+    const apexVueSource = await readFile(
+      new URL("../src/components/Apex/ApexChallenge.vue", import.meta.url),
+      "utf8",
+    );
+    const scriptContent = apexVueSource.match(
+      /<script setup[^>]*>([\s\S]*?)<\/script>/,
+    )?.[1];
+    assert.ok(scriptContent);
+
+    // Verify watch handler preserves per-account in-flight loading state rather than unconditionally clearing it
+    assert.match(
+      apexVueSource,
+      /voteLoading\.value\s*=\s*Boolean\(newId\s*&&\s*inFlightVoteOps\.has\(newId\)\)/,
+      "account switch watcher must derive voteLoading from per-account inFlightVoteOps",
+    );
+
+    const apexAst = ts.createSourceFile(
+      "ApexChallenge.js",
+      scriptContent,
+      ts.ScriptTarget.ES2022,
+      true,
+    );
+    const extractNames = [
+      "VOTE_BASE_CNT",
+      "apexServerTimeSample",
+      "apexServerTimeTokenId",
+      "activeGuessOpToken",
+      "inFlightGuessOps",
+      "activeVoteOpToken",
+      "inFlightVoteOps",
+      "readLiveApexServerNowMs",
+      "assertGuessOpenNow",
+      "assertVoteOpenNow",
+      "openVoteDialog",
+      "doGuess",
+      "doVote",
+    ];
+    const extractedCode = apexAst.statements
+      .filter(
+        (node) =>
+          ts.isVariableStatement(node) &&
+          node.declarationList.declarations.some((d) =>
+            extractNames.includes(d.name.getText(apexAst)),
+          ),
+      )
+      .map((node) => node.getText(apexAst))
+      .join("\n");
+
+    const actualMap = await import("../src/utils/apexStageMap.js");
+    const rules = await loadModule(
+      new URL("../src/utils/apexRules.js", import.meta.url),
+      { "./apexStageMap": actualMap },
+    );
+
+    const mockWallMs = Date.parse("2026-11-23T18:30:00+08:00");
+    const mockPerfMs = 1_400_000;
+    const RealDate = Date;
+    class MockDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(mockWallMs);
+        else super(...args);
+      }
+      static now() {
+        return mockWallMs;
+      }
+    }
+
+    const serverClockMod = await loadModule(
+      new URL("../src/utils/serverClock.js", import.meta.url),
+      {},
+      { Date: MockDate, performance: { now: () => mockPerfMs } },
+    );
+    const rateLimitMod = await loadModule(
+      new URL("../src/utils/apexRateLimit.js", import.meta.url),
+      {},
+      { Date: MockDate },
+    );
+
+    const sentByAccount = { "acc-a": [], "acc-b": [] };
+    const pendingResolvers = [];
+    const clientA = {
+      serverTime: mockWallMs,
+      serverTimeSampledAt: mockPerfMs,
+    };
+    const clientB = {
+      serverTime: mockWallMs,
+      serverTimeSampledAt: mockPerfMs,
+    };
+
+    const tokenStore = {
+      selectedToken: { id: "acc-a" },
+      wsConnections: {
+        "acc-a": { status: "connected", client: clientA },
+        "acc-b": { status: "connected", client: clientB },
+      },
+      getWebSocketStatus: () => "connected",
+      sendMessageWithPromise: (id, cmd, params, _timeout, opts) => {
+        opts?.beforeSend?.();
+        sentByAccount[id].push({ cmd, params: { ...params } });
+        return new Promise((resolve, reject) => {
+          pendingResolvers.push({ id, cmd, resolve, reject });
+        });
+      },
+    };
+
+    const notices = [];
+    const pendingGuessTeamId = { value: "" };
+    const voteLoading = { value: false };
+    const voteDialogVisible = { value: false };
+    const voteTargetTeamId = { value: "" };
+    const voteTargetName = { value: "" };
+    const voteRound = { value: null };
+    const voteMaxCnt = { value: 10 };
+    const voteCnt = { value: 1 };
+    const supportItemCnt = { value: 10 };
+
+    const scheduleId64 = rules
+      .getTodayApexGuessSchedule(rules.toChinaWallClockMs(mockWallMs))
+      .stages.find((s) => s.title === "64强赛")?.scheduleId;
+
+    const ctx = vm.createContext({
+      Date: MockDate,
+      tokenStore,
+      roleResetTime: { value: { day: "261123", season: 1 } },
+      pendingGuessTeamId,
+      actionCooldown: { guess: 0, vote: 0 },
+      voteTargetTeamId,
+      voteTargetName,
+      voteRound,
+      voteMaxCnt,
+      voteCnt,
+      voteLoading,
+      voteDialogVisible,
+      supportItemCnt,
+      supportOpen: { value: true },
+      canBetRow: () => true,
+      refreshCurrentBets() {},
+      fetchRoleInfo: async () => {},
+      fetchGuessHistory: async () => {},
+      fetchVoteBoard: async () => {},
+      startActionCooldown() {},
+      withApexGuessLock: async (_id, fn) => fn(),
+      runApexAction: rateLimitMod.runApexAction,
+      ApexAction: rateLimitMod.ApexAction,
+      isApexRateLimited: rateLimitMod.isApexRateLimited,
+      apexCooldownLeft: rateLimitMod.apexCooldownLeft,
+      sampleFromWebSocketClient: serverClockMod.sampleFromWebSocketClient,
+      getEstimatedServerNowSec: serverClockMod.getEstimatedServerNowSec,
+      toChinaWallClockMs: rules.toChinaWallClockMs,
+      getCurrentSeason: rules.getCurrentSeason,
+      getScheduleStatus: rules.getScheduleStatus,
+      canGuessNow: rules.canGuessNow,
+      canGuessRow: rules.canGuessRow,
+      checkSupportInTime: () => true,
+      TIMEOUT_ACTION: 8000,
+      message: {
+        warning(msg) {
+          notices.push({ type: "warning", msg });
+        },
+        error(msg) {
+          notices.push({ type: "error", msg });
+        },
+        success(msg) {
+          notices.push({ type: "success", msg });
+        },
+      },
+    });
+    vm.runInContext(
+      `${extractedCode}
+globalThis.api = {
+  openVoteDialog,
+  doGuess,
+  doVote,
+  hasInFlightVote: (id) => inFlightVoteOps.has(id),
+  hasInFlightGuess: (id) => inFlightGuessOps.has(id),
+  simulateAccountSwitch(newId) {
+    tokenStore.selectedToken = newId ? { id: newId } : null;
+    activeGuessOpToken = null;
+    pendingGuessTeamId.value = (newId && inFlightGuessOps.get(newId)?.teamId) || "";
+    activeVoteOpToken = null;
+    voteLoading.value = Boolean(newId && inFlightVoteOps.has(newId));
+    voteDialogVisible.value = false;
+  },
+};`,
+      ctx,
+    );
+
+    // 1. Account A opens vote dialog and submits first apex_vote (in flight, awaiting reply)
+    ctx.api.openVoteDialog("team-1", "热门队", 7);
+    assert.equal(voteDialogVisible.value, true);
+    const voteAPromise = ctx.api.doVote();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(sentByAccount["acc-a"].length, 1);
+    assert.equal(ctx.api.hasInFlightVote("acc-a"), true);
+
+    // 2. Switch A -> B: modal resets, B is NOT blocked and CAN submit its own vote!
+    ctx.api.simulateAccountSwitch("acc-b");
+    assert.equal(voteDialogVisible.value, false);
+    assert.equal(voteLoading.value, false);
+    ctx.api.openVoteDialog("team-1", "热门队", 7);
+    assert.equal(voteDialogVisible.value, true);
+    const voteBPromise = ctx.api.doVote();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(sentByAccount["acc-b"].length, 1);
+    // Resolve B's vote while still on B
+    pendingResolvers.find((p) => p.id === "acc-b").resolve({ ok: true });
+    await voteBPromise;
+    assert.equal(ctx.api.hasInFlightVote("acc-b"), false);
+    assert.equal(ctx.api.hasInFlightVote("acc-a"), true);
+
+    // 3. Switch B -> A while A's first apex_vote STILL hasn't replied!
+    ctx.api.simulateAccountSwitch("acc-a");
+    assert.equal(voteDialogVisible.value, false);
+    assert.equal(
+      voteLoading.value,
+      true,
+      "switching back to A while A's first vote is in flight must restore voteLoading=true",
+    );
+
+    // Attempting to reopen dialog on A must be blocked
+    ctx.api.openVoteDialog("team-1", "热门队", 7);
+    assert.equal(
+      voteDialogVisible.value,
+      false,
+      "openVoteDialog must not open while A's first vote is still in flight",
+    );
+
+    // Even if doVote is invoked directly with stale UI refs, per-account inFlightVoteOps MUST block!
+    voteDialogVisible.value = true;
+    voteLoading.value = false;
+    await ctx.api.doVote();
+    assert.equal(
+      sentByAccount["acc-a"].length,
+      1,
+      "A must NEVER send a second apex_vote before the first response returns",
+    );
+    assert.ok(
+      notices.some(
+        (n) => n.type === "warning" && /上一笔助威请求处理中/.test(n.msg),
+      ),
+    );
+
+    // 4. First vote reply finally returns -> clears in-flight state and unlocks A!
+    pendingResolvers.find((p) => p.id === "acc-a").resolve({ ok: true });
+    await voteAPromise;
+    assert.equal(ctx.api.hasInFlightVote("acc-a"), false);
+    assert.equal(voteLoading.value, false);
+
+    // Now A can legitimately send a fresh vote
+    ctx.api.openVoteDialog("team-1", "热门队", 7);
+    assert.equal(voteDialogVisible.value, true);
+    const secondVoteAPromise = ctx.api.doVote();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(sentByAccount["acc-a"].length, 2);
+    pendingResolvers.at(-1).resolve({ ok: true });
+    await secondVoteAPromise;
+    assert.equal(ctx.api.hasInFlightVote("acc-a"), false);
+    assert.equal(voteLoading.value, false);
+
+    // 5. Same A -> B -> A in-flight guard verification for doGuess (even with pass-through lock!)
+    const row = {
+      team1Id: "team-1",
+      team1Name: "热门队",
+      team2Id: "team-2",
+      team2Name: "对手",
+    };
+    const grp = { scheduleId: scheduleId64, stage: 4, canBet: true, state: 2 };
+    const guessAPromise = ctx.api.doGuess("team-1", row, grp);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(
+      sentByAccount["acc-a"].filter((x) => x.cmd === "apex_guess").length,
+      1,
+    );
+    ctx.api.simulateAccountSwitch("acc-b");
+    assert.equal(pendingGuessTeamId.value, "");
+    ctx.api.simulateAccountSwitch("acc-a");
+    assert.equal(pendingGuessTeamId.value, "team-1");
+    pendingGuessTeamId.value = "";
+    await ctx.api.doGuess("team-1", row, grp);
+    assert.equal(
+      sentByAccount["acc-a"].filter((x) => x.cmd === "apex_guess").length,
+      1,
+      "A must NEVER send a second apex_guess before the first response returns",
+    );
+    pendingResolvers.at(-1).resolve({ ok: true });
+    await guessAPromise;
+    assert.equal(ctx.api.hasInFlightGuess("acc-a"), false);
+    assert.equal(pendingGuessTeamId.value, "");
   });
 });

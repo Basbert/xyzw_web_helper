@@ -1211,15 +1211,18 @@ const currentSchedule = computed(() => {
 const voteDialogVisible = ref(false);
 const voteLoading = ref(false);
 let activeVoteOpToken = null;
+/** 按账号维护在途助威操作标识：切号仅重置弹窗，首笔请求未结束前切回原账号仍不允许并发发起第二笔 */
+const inFlightVoteOps = new Map();
 const voteTargetTeamId = ref("");
 const voteTargetName = ref("");
 const voteRound = ref(null);
 const voteCnt = ref(VOTE_BASE_CNT);
 const voteMaxCnt = ref(0);
 
-/** 并发防护：当前进行中的押注队伍 ID（'' = 空闲）与单次操作标识 */
+/** 并发防护：当前进行中的押注队伍 ID（'' = 空闲）、当前操作标识与按账号维度的在途竞猜表 */
 const pendingGuessTeamId = ref("");
 let activeGuessOpToken = null;
+const inFlightGuessOps = new Map();
 /** 竞猜 / 助威的服务端冷却倒计时（秒，0 = 可操作） */
 const actionCooldown = reactive({ guess: 0, vote: 0 });
 const cooldownTimer = { guess: null, vote: null };
@@ -2017,7 +2020,10 @@ const assertVoteOpenNow = (targetRound, targetTokenId) => {
  * @param {object} grp 所属阶段分组
  */
 const doGuess = async (teamId, row, grp) => {
-  if (pendingGuessTeamId.value) {
+  const token = tokenStore.selectedToken;
+  if (!token) return;
+  const confirmedTokenId = token.id;
+  if (pendingGuessTeamId.value || inFlightGuessOps.has(confirmedTokenId)) {
     message.warning("上一笔竞猜请求处理中，请稍候");
     return;
   }
@@ -2029,9 +2035,6 @@ const doGuess = async (teamId, row, grp) => {
     message.warning(grp.betTip || "该场竞猜当前不可押注");
     return;
   }
-  const token = tokenStore.selectedToken;
-  if (!token) return;
-  const confirmedTokenId = token.id;
   const confirmedTeamId = teamId;
   const confirmedTeamName =
     row.team1Id === confirmedTeamId ? row.team1Name : row.team2Name;
@@ -2049,6 +2052,10 @@ const doGuess = async (teamId, row, grp) => {
   }
   const guessOpToken = Symbol("apex-guess");
   activeGuessOpToken = guessOpToken;
+  inFlightGuessOps.set(confirmedTokenId, {
+    opToken: guessOpToken,
+    teamId: confirmedTeamId,
+  });
   pendingGuessTeamId.value = confirmedTeamId;
   try {
     // 手动竞猜走 immediate：不排队、不等冷却，直接发；被 200400 打回才退避重试，且每次入队和出队实际发包前均按最新服务器时间复核窗口
@@ -2090,11 +2097,10 @@ const doGuess = async (teamId, row, grp) => {
     );
     // 业务错误码由 xyzwWebSocket.js 直接 reject，成功分支即 resolve
     message.success(`已竞猜 ${confirmedTeamName}，等待开赛结果`);
-    if (
-      activeGuessOpToken === guessOpToken &&
-      tokenStore.selectedToken?.id === confirmedTokenId
-    ) {
-      actionCooldown.guess = 0;
+    if (tokenStore.selectedToken?.id === confirmedTokenId) {
+      if (activeGuessOpToken === guessOpToken) {
+        actionCooldown.guess = 0;
+      }
       await fetchRoleInfo();
       if (tokenStore.selectedToken?.id === confirmedTokenId) {
         refreshCurrentBets();
@@ -2102,14 +2108,15 @@ const doGuess = async (teamId, row, grp) => {
       }
     }
   } catch (e) {
-    const isActiveOp =
-      activeGuessOpToken === guessOpToken &&
-      tokenStore.selectedToken?.id === confirmedTokenId;
-    if (!isActiveOp) return;
+    const isCurrentAccount = tokenStore.selectedToken?.id === confirmedTokenId;
+    const isActiveOp = activeGuessOpToken === guessOpToken && isCurrentAccount;
+    if (!isCurrentAccount || (e?.notSent && !isActiveOp)) return;
     if (isApexRateLimited(e)) {
-      startActionCooldown("guess", apexCooldownLeft(ApexAction.GUESS));
+      if (isActiveOp) {
+        startActionCooldown("guess", apexCooldownLeft(ApexAction.GUESS));
+      }
       message.warning(
-        `服务器限流（200400），请 ${actionCooldown.guess} 秒后再试`,
+        `服务器限流（200400），请 ${actionCooldown.guess || Math.max(1, Math.ceil(apexCooldownLeft(ApexAction.GUESS) / 1000))} 秒后再试`,
       );
     } else if (e?.notSent) {
       refreshCurrentBets();
@@ -2119,16 +2126,33 @@ const doGuess = async (teamId, row, grp) => {
       message.error(`竞猜请求失败: ${e.message}`);
     }
   } finally {
-    if (activeGuessOpToken === guessOpToken) {
+    const wasActiveOp = activeGuessOpToken === guessOpToken;
+    if (inFlightGuessOps.get(confirmedTokenId)?.opToken === guessOpToken) {
+      inFlightGuessOps.delete(confirmedTokenId);
+    }
+    if (wasActiveOp) {
       activeGuessOpToken = null;
-      pendingGuessTeamId.value = "";
+    }
+    const currentTokenId = tokenStore.selectedToken?.id;
+    if (wasActiveOp || currentTokenId === confirmedTokenId) {
+      pendingGuessTeamId.value =
+        (currentTokenId && inFlightGuessOps.get(currentTokenId)?.teamId) || "";
     }
   }
 };
 
 /** 打开助威数量选择对话框 */
 const openVoteDialog = (teamId, name, round) => {
-  if (voteLoading.value) return;
+  const currentTokenId = tokenStore.selectedToken?.id;
+  if (
+    voteLoading.value ||
+    (currentTokenId && inFlightVoteOps.has(currentTokenId))
+  ) {
+    if (!voteDialogVisible.value) {
+      message.warning("上一笔助威请求处理中，请稍候");
+    }
+    return;
+  }
   voteTargetTeamId.value = teamId;
   voteTargetName.value = name || "该队伍";
   voteRound.value = round;
@@ -2153,14 +2177,18 @@ const voteChangeNum = (delta) => {
  * 由服务器自己的冷却窗口裁决，客户端不额外制造等待。
  */
 const doVote = async () => {
-  if (voteLoading.value) return;
   const token = tokenStore.selectedToken;
   const confirmedTokenId = token?.id;
+  if (!confirmedTokenId) return;
+  if (voteLoading.value || inFlightVoteOps.has(confirmedTokenId)) {
+    message.warning("上一笔助威请求处理中，请稍候");
+    return;
+  }
   const confirmedTeamId = voteTargetTeamId.value;
   const confirmedTeamName = voteTargetName.value || "该队伍";
   const confirmedRound = voteRound.value;
   const confirmedVoteCnt = Number(voteCnt.value);
-  if (!confirmedTokenId || !confirmedTeamId) return;
+  if (!confirmedTeamId) return;
   if (!confirmedRound) {
     message.warning("助威期数无效，请重新选择队伍");
     return;
@@ -2185,6 +2213,7 @@ const doVote = async () => {
   }
   const voteOpToken = Symbol("apex-vote");
   activeVoteOpToken = voteOpToken;
+  inFlightVoteOps.set(confirmedTokenId, voteOpToken);
   voteLoading.value = true;
   try {
     // 手动助威同样走 immediate：确认时固定账号/队伍/轮次/票数快照，首次发送、200400 重试、出队校验和结果提示均使用同一份数据
@@ -2227,25 +2256,24 @@ const doVote = async () => {
       },
     );
     message.success(`已为 ${confirmedTeamName} 助威 ${confirmedVoteCnt} 次`);
-    if (
-      activeVoteOpToken !== voteOpToken ||
-      tokenStore.selectedToken?.id !== confirmedTokenId
-    )
-      return;
-    voteDialogVisible.value = false;
-    actionCooldown.vote = 0;
+    if (tokenStore.selectedToken?.id !== confirmedTokenId) return;
+    if (activeVoteOpToken === voteOpToken) {
+      voteDialogVisible.value = false;
+      actionCooldown.vote = 0;
+    }
     await fetchRoleInfo();
     if (tokenStore.selectedToken?.id !== confirmedTokenId) return;
     fetchVoteBoard();
   } catch (e) {
-    const isActiveOp =
-      activeVoteOpToken === voteOpToken &&
-      tokenStore.selectedToken?.id === confirmedTokenId;
-    if (!isActiveOp) return;
+    const isCurrentAccount = tokenStore.selectedToken?.id === confirmedTokenId;
+    const isActiveOp = activeVoteOpToken === voteOpToken && isCurrentAccount;
+    if (!isCurrentAccount || (e?.notSent && !isActiveOp)) return;
     if (isApexRateLimited(e)) {
-      startActionCooldown("vote", apexCooldownLeft(ApexAction.VOTE));
+      if (isActiveOp) {
+        startActionCooldown("vote", apexCooldownLeft(ApexAction.VOTE));
+      }
       message.warning(
-        `服务器限流（200400），请 ${actionCooldown.vote} 秒后再试`,
+        `服务器限流（200400），请 ${actionCooldown.vote || Math.max(1, Math.ceil(apexCooldownLeft(ApexAction.VOTE) / 1000))} 秒后再试`,
       );
     } else if (e?.notSent) {
       message.warning(`助威未发送：${e.message}`);
@@ -2253,9 +2281,18 @@ const doVote = async () => {
       message.error(`助威请求失败: ${e.message}`);
     }
   } finally {
-    if (activeVoteOpToken === voteOpToken) {
+    const wasActiveOp = activeVoteOpToken === voteOpToken;
+    if (inFlightVoteOps.get(confirmedTokenId) === voteOpToken) {
+      inFlightVoteOps.delete(confirmedTokenId);
+    }
+    if (wasActiveOp) {
       activeVoteOpToken = null;
-      voteLoading.value = false;
+    }
+    const currentTokenId = tokenStore.selectedToken?.id;
+    if (wasActiveOp || currentTokenId === confirmedTokenId) {
+      voteLoading.value = Boolean(
+        currentTokenId && inFlightVoteOps.has(currentTokenId),
+      );
     }
   }
 };
@@ -2447,7 +2484,7 @@ watch(
 watch(
   () => tokenStore.selectedToken?.id,
   async (newId, oldId) => {
-    if (!newId || newId === oldId) return;
+    if (newId === oldId) return;
     roleInfo.value = createEmptyRoleInfo();
     roleResetTime.value = {};
     betList.value = [];
@@ -2456,13 +2493,15 @@ watch(
     currentBets.value = [];
     selectedRound.value = null;
     activeGuessOpToken = null;
-    pendingGuessTeamId.value = "";
+    pendingGuessTeamId.value =
+      (newId && inFlightGuessOps.get(newId)?.teamId) || "";
     activeVoteOpToken = null;
-    voteLoading.value = false;
+    voteLoading.value = Boolean(newId && inFlightVoteOps.has(newId));
     voteDialogVisible.value = false;
     fetchingStages.clear();
     hasAutoLoaded.value = false;
     stopPolling();
+    if (!newId) return;
     if (isConnected.value) {
       await new Promise((r) => setTimeout(r, 500));
       if (tokenStore.selectedToken?.id !== newId || !isConnected.value) return;
