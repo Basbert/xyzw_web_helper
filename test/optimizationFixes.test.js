@@ -9935,7 +9935,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       "activeGuessOpToken",
       "inFlightGuessOps",
       "activeVoteOpToken",
-      "inFlightVoteOps",
+      "voteLoading",
       "readLiveApexServerNowMs",
       "assertGuessOpenNow",
       "assertVoteOpenNow",
@@ -10037,7 +10037,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       voteTargetName: { value: "热门队" },
       voteRound: { value: 1 },
       voteCnt: { value: 1 },
-      voteLoading: { value: false },
+      computed: vue.computed,
+      inFlightVoteOps: vue.shallowReactive(new Map()),
       voteDialogVisible: { value: true },
       supportOpen: { value: true },
       canBetRow: () => true,
@@ -10756,7 +10757,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       "apexServerTimeSample",
       "apexServerTimeTokenId",
       "activeVoteOpToken",
-      "inFlightVoteOps",
+      "voteLoading",
       "readLiveApexServerNowMs",
       "assertVoteOpenNow",
       "openVoteDialog",
@@ -10847,7 +10848,6 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     const voteRound = { value: 7 };
     const voteMaxCnt = { value: 99 };
     const voteCnt = { value: 1 };
-    const voteLoading = { value: false };
     const voteDialogVisible = { value: true };
     const supportItemCnt = { value: 99 };
 
@@ -10861,7 +10861,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       voteRound,
       voteMaxCnt,
       voteCnt,
-      voteLoading,
+      computed: vue.computed,
+      inFlightVoteOps: vue.shallowReactive(new Map()),
       voteDialogVisible,
       supportItemCnt,
       supportOpen: { value: true },
@@ -10891,7 +10892,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       },
     });
     vm.runInContext(
-      `${extractedCode}\nglobalThis.api = { openVoteDialog, voteChangeNum, doVote };`,
+      `${extractedCode}\nglobalThis.api = { openVoteDialog, voteChangeNum, doVote, voteLoading };`,
       ctx,
     );
 
@@ -10939,7 +10940,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       ),
       "success toast must report the confirmed team name and 1 ticket",
     );
-    assert.equal(voteLoading.value, false);
+    assert.equal(ctx.api.voteLoading.value, false);
 
     // Also verify manual assertVoteOpenNow refuses to send when role resetTime.day conflicts with live server date!
     mockWallMs = Date.parse("2026-11-24T00:05:00+08:00");
@@ -10989,7 +10990,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       "activeGuessOpToken",
       "inFlightGuessOps",
       "activeVoteOpToken",
-      "inFlightVoteOps",
+      "voteLoading",
       "readLiveApexServerNowMs",
       "assertGuessOpenNow",
       "assertVoteOpenNow",
@@ -11135,7 +11136,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     };
 
     const callsA = [];
-    const tokenStore = {
+    const tokenStore = vue.shallowReactive({
       selectedToken: { id: "acc-a" },
       wsConnections: {
         "acc-a": { status: "connected", client: clientA },
@@ -11149,11 +11150,10 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
         }
         return wsClientB.sendWithPromise(cmd, params, timeout, options);
       },
-    };
+    });
 
     const notices = [];
     const pendingGuessTeamId = { value: "" };
-    const voteLoading = { value: false };
     const voteDialogVisible = { value: true };
     const voteTargetTeamId = { value: "team-same" };
     const voteTargetName = { value: "同队热门" };
@@ -11174,7 +11174,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       voteTargetName,
       voteRound,
       voteCnt,
-      voteLoading,
+      computed: vue.computed,
+      inFlightVoteOps: vue.shallowReactive(new Map()),
       voteDialogVisible,
       supportOpen: { value: true },
       canBetRow: () => true,
@@ -11214,12 +11215,12 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
 globalThis.api = {
   doGuess,
   doVote,
+  voteLoading,
   simulateAccountSwitch(newId) {
     tokenStore.selectedToken = { id: newId };
     activeGuessOpToken = null;
     pendingGuessTeamId.value = "";
     activeVoteOpToken = null;
-    voteLoading.value = false;
     voteDialogVisible.value = false;
   },
 };`,
@@ -11304,12 +11305,12 @@ globalThis.api = {
     await new Promise((r) => setTimeout(r, 0));
     assert.equal(wsClientB.sendQueue.length, 1);
     assert.equal(wsClientB.sendQueue[0].cmd, "apex_vote");
-    assert.equal(voteLoading.value, true);
+    assert.equal(ctx.api.voteLoading.value, true);
 
     backoffTimers[0].fn();
     await voteAPromise;
     assert.equal(
-      voteLoading.value,
+      ctx.api.voteLoading.value,
       true,
       "Account A vote finally must NOT clear Account B's active voteLoading",
     );
@@ -11328,7 +11329,7 @@ globalThis.api = {
       rawData: { ok: true },
     });
     await voteBPromise;
-    assert.equal(voteLoading.value, false);
+    assert.equal(ctx.api.voteLoading.value, false);
     assert.ok(
       notices.some(
         (n) => n.type === "success" && n.msg === "已为 同队热门 助威 1 次",
@@ -11452,13 +11453,6 @@ globalThis.api = {
     )?.[1];
     assert.ok(scriptContent);
 
-    // Verify watch handler preserves per-account in-flight loading state rather than unconditionally clearing it
-    assert.match(
-      apexVueSource,
-      /voteLoading\.value\s*=\s*Boolean\(newId\s*&&\s*inFlightVoteOps\.has\(newId\)\)/,
-      "account switch watcher must derive voteLoading from per-account inFlightVoteOps",
-    );
-
     const apexAst = ts.createSourceFile(
       "ApexChallenge.js",
       scriptContent,
@@ -11472,7 +11466,7 @@ globalThis.api = {
       "activeGuessOpToken",
       "inFlightGuessOps",
       "activeVoteOpToken",
-      "inFlightVoteOps",
+      "voteLoading",
       "readLiveApexServerNowMs",
       "assertGuessOpenNow",
       "assertVoteOpenNow",
@@ -11532,7 +11526,7 @@ globalThis.api = {
       serverTimeSampledAt: mockPerfMs,
     };
 
-    const tokenStore = {
+    const tokenStore = vue.shallowReactive({
       selectedToken: { id: "acc-a" },
       wsConnections: {
         "acc-a": { status: "connected", client: clientA },
@@ -11546,11 +11540,10 @@ globalThis.api = {
           pendingResolvers.push({ id, cmd, resolve, reject });
         });
       },
-    };
+    });
 
     const notices = [];
     const pendingGuessTeamId = { value: "" };
-    const voteLoading = { value: false };
     const voteDialogVisible = { value: false };
     const voteTargetTeamId = { value: "" };
     const voteTargetName = { value: "" };
@@ -11574,7 +11567,8 @@ globalThis.api = {
       voteRound,
       voteMaxCnt,
       voteCnt,
-      voteLoading,
+      computed: vue.computed,
+      inFlightVoteOps: vue.shallowReactive(new Map()),
       voteDialogVisible,
       supportItemCnt,
       supportOpen: { value: true },
@@ -11616,6 +11610,7 @@ globalThis.api = {
   openVoteDialog,
   doGuess,
   doVote,
+  voteLoading,
   hasInFlightVote: (id) => inFlightVoteOps.has(id),
   hasInFlightGuess: (id) => inFlightGuessOps.has(id),
   simulateAccountSwitch(newId) {
@@ -11623,7 +11618,6 @@ globalThis.api = {
     activeGuessOpToken = null;
     pendingGuessTeamId.value = (newId && inFlightGuessOps.get(newId)?.teamId) || "";
     activeVoteOpToken = null;
-    voteLoading.value = Boolean(newId && inFlightVoteOps.has(newId));
     voteDialogVisible.value = false;
   },
 };`,
@@ -11641,7 +11635,7 @@ globalThis.api = {
     // 2. Switch A -> B: modal resets, B is NOT blocked and CAN submit its own vote!
     ctx.api.simulateAccountSwitch("acc-b");
     assert.equal(voteDialogVisible.value, false);
-    assert.equal(voteLoading.value, false);
+    assert.equal(ctx.api.voteLoading.value, false);
     ctx.api.openVoteDialog("team-1", "热门队", 7);
     assert.equal(voteDialogVisible.value, true);
     const voteBPromise = ctx.api.doVote();
@@ -11657,7 +11651,7 @@ globalThis.api = {
     ctx.api.simulateAccountSwitch("acc-a");
     assert.equal(voteDialogVisible.value, false);
     assert.equal(
-      voteLoading.value,
+      ctx.api.voteLoading.value,
       true,
       "switching back to A while A's first vote is in flight must restore voteLoading=true",
     );
@@ -11670,9 +11664,8 @@ globalThis.api = {
       "openVoteDialog must not open while A's first vote is still in flight",
     );
 
-    // Even if doVote is invoked directly with stale UI refs, per-account inFlightVoteOps MUST block!
+    // A directly invoked confirmation must also respect the in-flight request.
     voteDialogVisible.value = true;
-    voteLoading.value = false;
     await ctx.api.doVote();
     assert.equal(
       sentByAccount["acc-a"].length,
@@ -11689,7 +11682,7 @@ globalThis.api = {
     pendingResolvers.find((p) => p.id === "acc-a").resolve({ ok: true });
     await voteAPromise;
     assert.equal(ctx.api.hasInFlightVote("acc-a"), false);
-    assert.equal(voteLoading.value, false);
+    assert.equal(ctx.api.voteLoading.value, false);
 
     // Now A can legitimately send a fresh vote
     ctx.api.openVoteDialog("team-1", "热门队", 7);
@@ -11700,7 +11693,7 @@ globalThis.api = {
     pendingResolvers.at(-1).resolve({ ok: true });
     await secondVoteAPromise;
     assert.equal(ctx.api.hasInFlightVote("acc-a"), false);
-    assert.equal(voteLoading.value, false);
+    assert.equal(ctx.api.voteLoading.value, false);
 
     // 5. Same A -> B -> A in-flight guard verification for doGuess (even with pass-through lock!)
     const row = {
@@ -11731,5 +11724,121 @@ globalThis.api = {
     await guessAPromise;
     assert.equal(ctx.api.hasInFlightGuess("acc-a"), false);
     assert.equal(pendingGuessTeamId.value, "");
+  });
+
+  test("Apex vote stays locked for its account across a view remount and unlocks on settlement", async () => {
+    const source = await readFile(
+      new URL("../src/components/Apex/ApexChallenge.vue", import.meta.url),
+      "utf8",
+    );
+    const { descriptor } = parse(source);
+    assert.ok(descriptor.scriptSetup);
+    const { inFlightVoteOps } =
+      await import("../src/components/Apex/apexVoteState.js");
+    const setupSource = ts.createSourceFile(
+      "ApexChallenge.setup.js",
+      descriptor.scriptSetup.content,
+      ts.ScriptTarget.ES2022,
+      true,
+    );
+    const names = new Set([
+      "VOTE_BASE_CNT",
+      "inFlightVoteOps",
+      "voteDialogVisible",
+      "voteLoading",
+      "activeVoteOpToken",
+      "voteTargetTeamId",
+      "voteTargetName",
+      "voteRound",
+      "voteCnt",
+      "voteMaxCnt",
+      "openVoteDialog",
+      "doVote",
+    ]);
+    const setupCode = setupSource.statements
+      .filter(
+        (node) =>
+          ts.isVariableStatement(node) &&
+          node.declarationList.declarations.some((d) =>
+            names.has(d.name.getText(setupSource)),
+          ),
+      )
+      .map((node) => node.getText(setupSource))
+      .join("\n");
+    const mountVoteView = vm.runInNewContext(
+      `(tokenStore) => {
+        ${setupCode}
+        return { openVoteDialog, doVote, voteDialogVisible, voteLoading };
+      }`,
+      {
+        computed: vue.computed,
+        ref: vue.ref,
+        inFlightVoteOps,
+        supportItemCnt: vue.ref(10),
+        supportOpen: vue.ref(true),
+        actionCooldown: { vote: 0 },
+        assertVoteOpenNow() {},
+        runApexAction: (_action, send) => send(0),
+        ApexAction: { VOTE: "vote" },
+        TIMEOUT_ACTION: 10000,
+        fetchRoleInfo: async () => {},
+        fetchVoteBoard() {},
+        isApexRateLimited: () => false,
+        message: { success() {}, warning() {}, error() {} },
+      },
+    );
+
+    const requests = [];
+    const store = (id) => ({
+      selectedToken: { id },
+      getWebSocketStatus: () => "connected",
+      sendMessageWithPromise: (
+        tokenId,
+        command,
+        _params,
+        _timeout,
+        options,
+      ) => {
+        options.beforeSend();
+        assert.equal(command, "apex_vote");
+        return new Promise((resolve, reject) =>
+          requests.push({ tokenId, resolve, reject }),
+        );
+      },
+    });
+    const accountA = store("acc-a");
+    const originalView = mountVoteView(accountA);
+    originalView.openVoteDialog("team-1", "热门队", 7);
+    const originalVote = originalView.doVote();
+    assert.equal(requests.length, 1);
+
+    const reopenedView = mountVoteView(accountA);
+    assert.equal(reopenedView.voteLoading.value, true);
+    reopenedView.openVoteDialog("team-1", "热门队", 7);
+    assert.equal(reopenedView.voteDialogVisible.value, false);
+    await reopenedView.doVote();
+    assert.equal(requests.length, 1);
+
+    const otherView = mountVoteView(store("acc-b"));
+    otherView.openVoteDialog("team-1", "热门队", 7);
+    const otherVote = otherView.doVote();
+    assert.deepEqual(
+      requests.map(({ tokenId }) => tokenId),
+      ["acc-a", "acc-b"],
+    );
+    requests[1].resolve({});
+    await otherVote;
+    assert.equal(reopenedView.voteLoading.value, true);
+
+    requests[0].reject(new Error("请求超时"));
+    await originalVote;
+    assert.equal(reopenedView.voteLoading.value, false);
+    reopenedView.openVoteDialog("team-1", "热门队", 7);
+    assert.equal(reopenedView.voteDialogVisible.value, true);
+    const nextVote = reopenedView.doVote();
+    assert.equal(requests[2].tokenId, "acc-a");
+    requests[2].resolve({});
+    await nextVote;
+    assert.equal(reopenedView.voteLoading.value, false);
   });
 });

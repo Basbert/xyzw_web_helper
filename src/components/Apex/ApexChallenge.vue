@@ -773,6 +773,7 @@ import {
   getEstimatedServerNowSec,
   sampleFromWebSocketClient,
 } from "@/utils/serverClock";
+import { inFlightVoteOps } from "./apexVoteState.js";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
@@ -1209,10 +1210,10 @@ const currentSchedule = computed(() => {
 
 // 助威对话框状态
 const voteDialogVisible = ref(false);
-const voteLoading = ref(false);
+const voteLoading = computed(() =>
+  inFlightVoteOps.has(tokenStore.selectedToken?.id),
+);
 let activeVoteOpToken = null;
-/** 按账号维护在途助威操作标识：切号仅重置弹窗，首笔请求未结束前切回原账号仍不允许并发发起第二笔 */
-const inFlightVoteOps = new Map();
 const voteTargetTeamId = ref("");
 const voteTargetName = ref("");
 const voteRound = ref(null);
@@ -2143,11 +2144,7 @@ const doGuess = async (teamId, row, grp) => {
 
 /** 打开助威数量选择对话框 */
 const openVoteDialog = (teamId, name, round) => {
-  const currentTokenId = tokenStore.selectedToken?.id;
-  if (
-    voteLoading.value ||
-    (currentTokenId && inFlightVoteOps.has(currentTokenId))
-  ) {
+  if (voteLoading.value) {
     if (!voteDialogVisible.value) {
       message.warning("上一笔助威请求处理中，请稍候");
     }
@@ -2180,7 +2177,7 @@ const doVote = async () => {
   const token = tokenStore.selectedToken;
   const confirmedTokenId = token?.id;
   if (!confirmedTokenId) return;
-  if (voteLoading.value || inFlightVoteOps.has(confirmedTokenId)) {
+  if (voteLoading.value) {
     message.warning("上一笔助威请求处理中，请稍候");
     return;
   }
@@ -2214,7 +2211,6 @@ const doVote = async () => {
   const voteOpToken = Symbol("apex-vote");
   activeVoteOpToken = voteOpToken;
   inFlightVoteOps.set(confirmedTokenId, voteOpToken);
-  voteLoading.value = true;
   try {
     // 手动助威同样走 immediate：确认时固定账号/队伍/轮次/票数快照，首次发送、200400 重试、出队校验和结果提示均使用同一份数据
     const verifyVoteReady = () => {
@@ -2281,18 +2277,11 @@ const doVote = async () => {
       message.error(`助威请求失败: ${e.message}`);
     }
   } finally {
-    const wasActiveOp = activeVoteOpToken === voteOpToken;
     if (inFlightVoteOps.get(confirmedTokenId) === voteOpToken) {
       inFlightVoteOps.delete(confirmedTokenId);
     }
-    if (wasActiveOp) {
+    if (activeVoteOpToken === voteOpToken) {
       activeVoteOpToken = null;
-    }
-    const currentTokenId = tokenStore.selectedToken?.id;
-    if (wasActiveOp || currentTokenId === confirmedTokenId) {
-      voteLoading.value = Boolean(
-        currentTokenId && inFlightVoteOps.has(currentTokenId),
-      );
     }
   }
 };
@@ -2496,7 +2485,6 @@ watch(
     pendingGuessTeamId.value =
       (newId && inFlightGuessOps.get(newId)?.teamId) || "";
     activeVoteOpToken = null;
-    voteLoading.value = Boolean(newId && inFlightVoteOps.has(newId));
     voteDialogVisible.value = false;
     fetchingStages.clear();
     hasAutoLoaded.value = false;
