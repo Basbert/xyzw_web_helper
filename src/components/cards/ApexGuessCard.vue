@@ -120,7 +120,7 @@ const claimResults = reactive(new Map());
 
 <script setup>
 const props = defineProps({ active: { type: Boolean, default: true } });
-const emit = defineEmits(["navToApex", "statusChange"]);
+const emit = defineEmits(["navToApex", "statusChange", "stateChange"]);
 const tokenStore = useTokenStore();
 const message = useMessage();
 const {
@@ -264,6 +264,9 @@ const isClaimDisabled = computed(
 const formatVotes = (value) => Number(value).toLocaleString("zh-CN");
 
 watch(collapsedSummary, (value) => emit("statusChange", value), {
+  immediate: true,
+});
+watch(guessState, (value) => emit("stateChange", value), {
   immediate: true,
 });
 watch(

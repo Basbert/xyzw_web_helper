@@ -117,10 +117,16 @@ export function useDashboardDailyActions(tokenStore, dependencies) {
           Number.isSafeInteger(result?.skipped) && result.skipped >= 0
             ? `跳过 ${result.skipped} 项`
             : "跳过次数待确认";
+        const reminders = Array.isArray(result?.reminders)
+          ? result.reminders.filter(Boolean)
+          : [];
+        const reminderSuffix = reminders.length
+          ? ` ${reminders.join("；")}`
+          : "";
         const text =
           incomplete || failed
-            ? `${name}：本轮结束，${incomplete} 项待核对，${failed} 个步骤失败，${skippedText}。`
-            : `${name}：每日任务本轮已完成，服务器状态已核对，${skippedText}。`;
+            ? `${name}：本轮结束，${incomplete} 项待核对，${failed} 个步骤失败，${skippedText}。${reminderSuffix}`
+            : `${name}：每日任务本轮已完成，服务器状态已核对，${skippedText}。${reminderSuffix}`;
         appendLog(runLogs, text);
         results[tokenId] = {
           type: incomplete || failed ? "warning" : "success",

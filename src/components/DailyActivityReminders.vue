@@ -1,6 +1,12 @@
 <template>
   <section
-    v-if="days.dream || days.camp || days.legionWar || weeklyQuizReminder"
+    v-if="
+      days.dream ||
+      days.camp ||
+      days.legionWar ||
+      weeklyQuizReminder ||
+      apexGuessReminder
+    "
     class="activity-reminders"
     aria-label="今日活动提醒"
   >
@@ -43,12 +49,20 @@
         去执行日常
       </button>
     </div>
+    <div v-if="apexGuessReminder" class="reminder-row">
+      <div>
+        <strong>逐鹿盐山竞猜</strong>
+        <p>{{ apexGuessReminder }}</p>
+      </div>
+      <button type="button" @click="emit('navigate', 'apex')">查看竞猜</button>
+    </div>
   </section>
 </template>
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
+import { describeApexGuessReminder } from "@/utils/apexGuessHelper";
 import {
   describeCampProgress,
   describeWeeklyQuizReminder,
@@ -90,6 +104,7 @@ const connected = computed(() => {
 });
 const weeklyQuizConfig = ref(null);
 const weeklyQuizEnabled = ref(true);
+const apexGuessEnabled = ref(true);
 let quizSequence = 0;
 let disposed = false;
 
@@ -101,6 +116,7 @@ function refreshWeeklyQuizSetting() {
     typeof localStorage === "undefined"
   ) {
     weeklyQuizEnabled.value = true;
+    apexGuessEnabled.value = true;
     return;
   }
   try {
@@ -113,8 +129,17 @@ function refreshWeeklyQuizSetting() {
       typeof saved?.weeklyQuizEnabled === "boolean"
         ? saved.weeklyQuizEnabled
         : defaultEnabled;
+    const defaultApexEnabled =
+      typeof DAILY_TASK_DEFAULTS === "object"
+        ? DAILY_TASK_DEFAULTS.apexGuessEnabled
+        : true;
+    apexGuessEnabled.value =
+      typeof saved?.apexGuessEnabled === "boolean"
+        ? saved.apexGuessEnabled
+        : defaultApexEnabled;
   } catch {
     weeklyQuizEnabled.value = true;
+    apexGuessEnabled.value = true;
   }
 }
 
@@ -179,6 +204,23 @@ const weeklyQuizReminder = computed(() => {
     config: weeklyQuizConfig.value,
     nowMs,
     weeklyQuizEnabled: weeklyQuizEnabled.value,
+  });
+});
+const apexGuessReminder = computed(() => {
+  if (typeof describeApexGuessReminder !== "function") {
+    return "";
+  }
+  const id = tokenStore.selectedToken?.id;
+  const serverTimeMs = id
+    ? tokenStore.wsConnections?.[id]?.client?.serverTime
+    : null;
+  const nowMs =
+    Number.isFinite(serverTimeMs) && serverTimeMs > 0
+      ? serverTimeMs
+      : now.value;
+  return describeApexGuessReminder({
+    nowMs,
+    apexGuessEnabled: apexGuessEnabled.value,
   });
 });
 const campText = ref("挑战进度待确认");

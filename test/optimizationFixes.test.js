@@ -255,6 +255,8 @@ describe("tokenStore clearAllTokens and background monitoring", () => {
       },
       {
         AbortController,
+        TextDecoder,
+        atob,
         WebSocket: { CLOSED: 3 },
         localStorage: storage,
         navigator: { onLine: true },
@@ -726,6 +728,8 @@ describe("Commit 4 review regression fixes (P1 & P2)", () => {
       },
       {
         AbortController,
+        TextDecoder,
+        atob,
         WebSocket: { CLOSED: 3 },
         localStorage: {
           getItem: (k) => storageMap.get(k) ?? null,
@@ -887,6 +891,8 @@ describe("Commit 4 review regression fixes (P1 & P2)", () => {
       },
       {
         AbortController,
+        TextDecoder,
+        atob,
         WebSocket: { CLOSED: 3 },
         localStorage: {
           getItem: (k) => storageMap.get(k) ?? null,
@@ -1895,6 +1901,8 @@ describe("Commit 5 review round-2 regression fixes (4 P1 + 3 P2)", () => {
       },
       {
         AbortController,
+        TextDecoder,
+        atob,
         WebSocket: { CLOSED: 3 },
         localStorage: {
           getItem: (k) => storageMap.get(k) ?? null,
@@ -2767,6 +2775,8 @@ describe("Commit 6 review round-3 regression fixes (3 P1 + 1 P2)", () => {
       },
       {
         AbortController,
+        TextDecoder,
+        atob,
         WebSocket: { CLOSED: 3 },
         localStorage: {
           getItem: () => null,
@@ -3225,6 +3235,8 @@ describe("Commit 7 review round-4 regression fixes (2 P1 + 3 P2)", () => {
       },
       {
         AbortController,
+        TextDecoder,
+        atob,
         WebSocket: { CLOSED: 3 },
         localStorage: storageAdapter,
         navigator: { onLine: true, locks: sharedLocks },
@@ -3833,6 +3845,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     disableWebLocks = false,
     wsClientClass = null,
     onStorageWrite = null,
+    transformTokenImpl = null,
   }) => {
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -3972,8 +3985,10 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
           fetchTokenPayloadFromUrl: async () => ({}),
           scheduleAuthUserRequest: (fn) => fn(),
           setAuthUserRateLimiterCallback() {},
-          transformToken: async () =>
-            JSON.stringify({ roleId: "1001", roleToken: "refreshed-tok" }),
+          transformToken:
+            transformTokenImpl ||
+            (async () =>
+              JSON.stringify({ roleId: "1001", roleToken: "refreshed-tok" })),
         },
         "@/utils/wechatForceLogout": {
           refreshTokenFromCombUser: async () => ({}),
@@ -4002,6 +4017,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       },
       {
         AbortController,
+        TextDecoder,
+        atob,
         WebSocket: { CLOSED: 3 },
         localStorage: storageAdapter,
         navigator: disableWebLocks
@@ -4506,6 +4523,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       },
       {
         AbortController,
+        TextDecoder,
+        atob,
         WebSocket: { CLOSED: 3 },
         localStorage: silentReadOnlyStorage,
         navigator: { onLine: true, locks: locksB },
@@ -4662,6 +4681,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       },
       {
         AbortController,
+        TextDecoder,
+        atob,
         WebSocket: { CLOSED: 3 },
         localStorage: storageAdapter,
         navigator: { onLine: true, locks: sharedLocks },
@@ -5561,6 +5582,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       },
       {
         AbortController,
+        TextDecoder,
+        atob,
         WebSocket: { CLOSED: 3 },
         localStorage: storageAdapter,
         navigator: { onLine: true, locks: sharedLocks },
@@ -7843,12 +7866,16 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
         ["acc-r11-p2"],
       );
 
-      // Step 2: Update ONLY the session token string (same roleId "9902", BIN importMethod, NO replacement BIN)
+      // Step 2: Update ONLY the session token string for the SAME role ("9902"), BIN importMethod, NO replacement BIN
+      const sameRoleSessionToken = JSON.stringify({
+        roleId: "9902",
+        roleToken: "valid-session-only-r11-p2-0002",
+      });
       const tokenOnlyCommit = await tabA.store.commitCredentialUpdate(
         "acc-r11-p2",
         {
           updates: {
-            token: "valid-session-only-r11-p2-0002",
+            token: sameRoleSessionToken,
             importMethod: "bin",
             upgradedToPermanent: true,
           },
@@ -7857,7 +7884,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       assert.equal(tokenOnlyCommit.committed, true);
       assert.equal(
         JSON.parse(sharedStorage.get("gameTokens"))[0].token,
-        "valid-session-only-r11-p2-0002",
+        sameRoleSessionToken,
       );
       // Backup MUST still be preserved because no replacement BIN was written!
       assert.deepEqual(
@@ -7879,6 +7906,1351 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     } finally {
       tabA.pinia._e.stop();
       tabB.pinia._e.stop();
+    }
+  });
+
+  test("Round12 P1: without Web Locks, legacy BIN migration and overwrite rollbacks verify binWriteToken atomically and never delete or overwrite another tab's re-logged-in NEW_BIN", async () => {
+    const createTransactionalIdb = async () => {
+      const records = new Map();
+      const fakeDb = {
+        put: async (_storeName, item) => {
+          records.set(item.id, item);
+        },
+        get: async (_storeName, key) => records.get(key),
+        getAllKeys: async () => Array.from(records.keys()),
+        delete: async (_storeName, key) => {
+          records.delete(key);
+        },
+        clear: async () => {
+          records.clear();
+        },
+        getAll: async () => Array.from(records.values()),
+        transaction: (_storeName, _mode) => ({
+          objectStore: () => ({
+            get: async (key) => records.get(key),
+            put: async (item) => {
+              records.set(item.id, item);
+            },
+            delete: async (key) => {
+              records.delete(key);
+            },
+          }),
+          done: Promise.resolve(),
+        }),
+      };
+      const { default: useIndexedDB } = await loadModule(
+        new URL("../src/hooks/useIndexedDB.ts", import.meta.url),
+        {
+          idb: { openDB: async () => fakeDb },
+          vue,
+        },
+        {
+          console: { log() {}, warn() {}, error() {} },
+          setTimeout,
+          clearTimeout,
+        },
+      );
+      return { records, createInstance: () => useIndexedDB() };
+    };
+
+    // Variant A (legacy name migration, previousBin === null) AND Variant B (existing BIN overwrite, previousBin !== null)
+    for (const hasExistingBin of [false, true]) {
+      const idbEnv = await createTransactionalIdb();
+      const baseIdbA = idbEnv.createInstance();
+      const idbB = idbEnv.createInstance();
+      const accId = hasExistingBin ? "acc-r12-p1-exist" : "acc-r12-p1-legacy";
+      const legacyName = hasExistingBin ? "覆盖迁移号" : "旧名迁移号";
+
+      if (hasExistingBin) {
+        await baseIdbA.storeArrayBuffer(accId, new Uint8Array([1, 1]).buffer, {
+          credentialVersion: 0,
+          binVersion: 0,
+        });
+      } else {
+        await baseIdbA.storeArrayBuffer(
+          legacyName,
+          new Uint8Array([1, 1]).buffer,
+          { credentialVersion: 0, binVersion: 0 },
+        );
+      }
+
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: accId,
+              name: legacyName,
+              roleId: "9912",
+              token: JSON.stringify({
+                roleId: "9912",
+                roleToken: "old-token-r12-p1-0001",
+              }),
+              importMethod: "bin",
+              createdAt: "2026-11-01T00:00:00.000Z",
+            },
+          ]),
+        ],
+      ]);
+
+      let releaseAfterStore;
+      let storeDone;
+      const storedByTabA = new Promise((r) => {
+        storeDone = r;
+      });
+      const pauseIfTarget = async (key) => {
+        if (key === accId && storeDone) {
+          storeDone();
+          storeDone = null;
+          await new Promise((r) => {
+            releaseAfterStore = r;
+          });
+        }
+      };
+      const wrappedIdbA = {
+        ...baseIdbA,
+        storeArrayBuffer: async (key, data, meta) => {
+          const ok = await baseIdbA.storeArrayBuffer(key, data, meta);
+          await pauseIfTarget(key);
+          return ok;
+        },
+        storeArrayBufferIfMissing: async (key, data, meta) => {
+          const res = await baseIdbA.storeArrayBufferIfMissing(key, data, meta);
+          await pauseIfTarget(key);
+          return res;
+        },
+        storeArrayBufferIfUnchanged: async (key, data, expected, meta) => {
+          const res = await baseIdbA.storeArrayBufferIfUnchanged(
+            key,
+            data,
+            expected,
+            meta,
+          );
+          await pauseIfTarget(key);
+          return res;
+        },
+      };
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: wrappedIdbA,
+        transformTokenImpl: async () =>
+          JSON.stringify({ roleId: "9912", roleToken: "stale-refresh-r12" }),
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: idbB,
+      });
+
+      try {
+        // Tab A starts legacy migration (Variant A) or BIN overwrite (Variant B) and pauses right after writing IDB
+        const tabAPromise = hasExistingBin
+          ? tabA.store.commitCredentialUpdate(accId, {
+              expectedVersion: 0,
+              updates: {
+                token: JSON.stringify({
+                  roleId: "9912",
+                  roleToken: "stale-overwrite-r12",
+                }),
+              },
+              binData: new Uint8Array([2, 2]).buffer,
+            })
+          : tabA.store.refreshTokenManually(accId);
+
+        await storedByTabA;
+
+        // Tab B concurrently completes re-login with NEW_TOKEN and NEW_BIN [9, 9]
+        const tabBToken = JSON.stringify({
+          roleId: "9912",
+          roleToken: "fresh-relogin-token-r12",
+        });
+        const tabBCommit = await tabB.store.commitCredentialUpdate(accId, {
+          updates: { token: tabBToken, importMethod: "bin" },
+          binData: new Uint8Array([9, 9]).buffer,
+        });
+        assert.equal(tabBCommit.committed, true);
+
+        // Resume Tab A -> afterWriteCheck detects stale -> rollbackBin MUST verify binWriteToken and preserve [9, 9]!
+        releaseAfterStore();
+        const tabAResult = await tabAPromise;
+        if (hasExistingBin) {
+          assert.equal(tabAResult.committed, false);
+          assert.equal(tabAResult.stale, true);
+        } else {
+          assert.equal(tabAResult.status, "stale");
+        }
+
+        const persistedList = JSON.parse(sharedStorage.get("gameTokens"));
+        assert.equal(persistedList[0].token, tabBToken);
+        const liveBin = await idbB.getArrayBuffer(accId);
+        assert.ok(
+          liveBin,
+          `NEW_BIN must NOT be deleted by Tab A rollback (hasExistingBin=${hasExistingBin})`,
+        );
+        assert.deepEqual(
+          Array.from(new Uint8Array(liveBin)),
+          [9, 9],
+          `NEW_BIN must remain [9, 9] intact (hasExistingBin=${hasExistingBin})`,
+        );
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+      }
+    }
+
+    // Variant C: Uncontested localStorage write failure still cleanly rolls back its own writeToken
+    const idbEnvC = await createTransactionalIdb();
+    const idbC = idbEnvC.createInstance();
+    await idbC.storeArrayBuffer("acc-r12-c", new Uint8Array([3, 3]).buffer, {
+      credentialVersion: 0,
+      binVersion: 0,
+    });
+    const storageC = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc-r12-c",
+            name: "本地配额失败号",
+            roleId: "9913",
+            token: JSON.stringify({ roleId: "9913", roleToken: "old-c-0001" }),
+            importMethod: "bin",
+          },
+        ]),
+      ],
+    ]);
+    const tabC = await loadVueUseTabWithWindow({
+      sharedStorage: storageC,
+      sharedIdb: new Map(),
+      sharedLocks: null,
+      disableWebLocks: true,
+      idbOverride: idbC,
+      shouldFailSetItem: (k) => k === "gameTokens",
+    });
+    try {
+      const failCommit = await tabC.store.commitCredentialUpdate("acc-r12-c", {
+        updates: {
+          token: JSON.stringify({ roleId: "9913", roleToken: "new-c-0002" }),
+        },
+        binData: new Uint8Array([4, 4]).buffer,
+      });
+      assert.equal(failCommit.committed, false);
+      assert.equal(failCommit.reason, "storage_write_failed");
+      assert.equal(failCommit.binRolledBack, true);
+      assert.deepEqual(
+        Array.from(new Uint8Array(await idbC.getArrayBuffer("acc-r12-c"))),
+        [3, 3],
+        "uncontested rollback must still restore previous BIN [3, 3]",
+      );
+    } finally {
+      tabC.pinia._e.stop();
+    }
+  });
+
+  test("Round12 P2: pasting another role's Token is rejected with separate-import prompt; unconfirmed opaque Token keeps pending BIN backup paused until role is confirmed", async () => {
+    const expiredIso = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
+    const setupPausedScenario = async () => {
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: "acc-r12-p2",
+              name: "编辑Token号",
+              roleId: "9902",
+              token: JSON.stringify({
+                roleId: "9902",
+                roleToken: "old-tok-9902-0001",
+              }),
+              importMethod: "manual",
+              createdAt: expiredIso,
+              lastUsed: expiredIso,
+            },
+          ]),
+        ],
+      ]);
+      const sharedIdb = new Map([
+        ["acc-r12-p2", new Uint8Array([8, 8]).buffer],
+      ]);
+      let releaseDelete;
+      let deleteEntered;
+      const deleteStarted = new Promise((r) => {
+        deleteEntered = r;
+      });
+      let failStoreBin = true;
+      const createdClients = [];
+      class CapturingWsClient {
+        constructor() {
+          this.socket = { readyState: 1 };
+          createdClients.push(this);
+        }
+        setMessageListener(listener) {
+          this.listener = listener;
+        }
+        init() {
+          this.onConnect?.();
+        }
+        disconnect() {
+          if (this.socket) this.socket.readyState = 3;
+          this.socket = null;
+        }
+        send() {}
+        sendHeartbeat() {}
+      }
+
+      const sharedLocks = createLockManager();
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks,
+        wsClientClass: CapturingWsClient,
+        deleteArrayBufferImpl: async (k) => {
+          sharedIdb.delete(k);
+          deleteEntered?.();
+          deleteEntered = null;
+          if (releaseDelete !== "done") {
+            await new Promise((r) => {
+              releaseDelete = r;
+            });
+          }
+          return true;
+        },
+        storeArrayBufferImpl: async (k, buf) => {
+          if (failStoreBin) return false;
+          sharedIdb.set(k, buf);
+          return true;
+        },
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb,
+        sharedLocks: createLockManager(),
+      });
+
+      const cleanP = tabA.store.cleanExpiredTokensDetailed();
+      await deleteStarted;
+      await tabB.store.selectToken("acc-r12-p2");
+      const resolveDel = releaseDelete;
+      releaseDelete = "done";
+      resolveDel();
+      const cleanReport = await cleanP;
+      assert.equal(cleanReport.ok, false);
+      assert.deepEqual(
+        [...tabA.store.getPendingBinRestoreIds()],
+        ["acc-r12-p2"],
+      );
+      failStoreBin = false;
+      tabB.store.closeWebSocketConnection("acc-r12-p2");
+
+      return { tabA, tabB, sharedStorage, sharedIdb, createdClients };
+    };
+
+    // Scenario 1: Pasting another role's Token (JSON, Base64 JSON, JWT) is rejected; opaque Token pauses restore until same role confirmed
+    const s1 = await setupPausedScenario();
+    try {
+      const otherRoleJson = JSON.stringify({
+        roleId: "7777",
+        roleToken: "other-role-token-7777",
+      });
+      const toBase64Url = (text) =>
+        btoa(text).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      const otherRoleBase64 = btoa(otherRoleJson);
+      const otherRoleJwt = [
+        toBase64Url('{"alg":"none"}'),
+        toBase64Url(JSON.stringify({ roleId: "7777" })),
+        "sig",
+      ].join(".");
+
+      for (const badToken of [otherRoleJson, otherRoleBase64, otherRoleJwt]) {
+        const rejected = await s1.tabA.store.commitCredentialUpdate(
+          "acc-r12-p2",
+          {
+            updates: { token: badToken },
+          },
+        );
+        assert.equal(rejected.committed, false);
+        assert.equal(rejected.reason, "role_mismatch");
+        assert.match(rejected.message || "", /单独导入/);
+      }
+
+      // Now paste an opaque Token whose role cannot be decoded offline -> saved, backup kept AND paused!
+      const opaqueCommit = await s1.tabA.store.commitCredentialUpdate(
+        "acc-r12-p2",
+        {
+          updates: {
+            token: "opaque-unconfirmed-session-token-0001",
+            importMethod: "bin",
+          },
+        },
+      );
+      assert.equal(opaqueCommit.committed, true);
+      assert.equal(opaqueCommit.binRestorePaused, true);
+      assert.deepEqual(
+        [...s1.tabA.store.getPendingBinRestoreIds()],
+        ["acc-r12-p2"],
+      );
+      assert.deepEqual(
+        [...s1.tabA.store.getPausedBinRestoreIds()],
+        ["acc-r12-p2"],
+      );
+
+      // Retrying while paused MUST NOT restore old BIN [8, 8] into IDB yet and MUST keep backup!
+      const pausedRetry = await s1.tabA.store.retryPendingBinRestores();
+      assert.equal(pausedRetry.ok, true);
+      assert.deepEqual([...pausedRetry.restoredIds], []);
+      assert.deepEqual([...pausedRetry.pausedIds], ["acc-r12-p2"]);
+      assert.equal(s1.sharedIdb.has("acc-r12-p2"), false);
+      assert.deepEqual(
+        [...s1.tabA.store.getPendingBinRestoreIds()],
+        ["acc-r12-p2"],
+      );
+
+      // Simulate connecting with the opaque token and server confirming SAME role "9902"
+      await s1.tabA.store.createWebSocketConnection(
+        "acc-r12-p2",
+        "opaque-unconfirmed-session-token-0001",
+      );
+      const client = s1.createdClients.at(-1);
+      assert.ok(client?.listener);
+      await client.listener({
+        cmd: "role_getroleinforesp",
+        getData: () => ({ role: { roleId: "9902" } }),
+      });
+      assert.deepEqual([...s1.tabA.store.getPausedBinRestoreIds()], []);
+
+      // Now retry restores [8, 8] cleanly!
+      const confirmedRetry = await s1.tabA.store.retryPendingBinRestores();
+      assert.equal(confirmedRetry.ok, true);
+      assert.deepEqual([...confirmedRetry.restoredIds], ["acc-r12-p2"]);
+      assert.deepEqual(
+        Array.from(new Uint8Array(s1.sharedIdb.get("acc-r12-p2"))),
+        [8, 8],
+      );
+    } finally {
+      s1.tabA.pinia._e.stop();
+      s1.tabB.pinia._e.stop();
+    }
+
+    // Scenario 2: Opaque Token connects and server reveals DIFFERENT role "7777" -> old BIN backup immediately discarded!
+    const s2 = await setupPausedScenario();
+    try {
+      const opaqueCommit = await s2.tabA.store.commitCredentialUpdate(
+        "acc-r12-p2",
+        {
+          updates: {
+            token: "opaque-actually-role-7777-token-0002",
+            importMethod: "bin",
+          },
+        },
+      );
+      assert.equal(opaqueCommit.committed, true);
+      assert.equal(opaqueCommit.binRestorePaused, true);
+
+      await s2.tabA.store.createWebSocketConnection(
+        "acc-r12-p2",
+        "opaque-actually-role-7777-token-0002",
+      );
+      const client = s2.createdClients.at(-1);
+      await client.listener({
+        cmd: "role_getroleinforesp",
+        getData: () => ({ role: { roleId: "7777" } }),
+      });
+
+      assert.deepEqual(
+        [...s2.tabA.store.getPendingBinRestoreIds()],
+        [],
+        "old BIN backup must be discarded as soon as server reveals a different roleId",
+      );
+      const retryAfterDifferentRole =
+        await s2.tabA.store.retryPendingBinRestores();
+      assert.deepEqual([...retryAfterDifferentRole.restoredIds], []);
+      assert.equal(s2.sharedIdb.has("acc-r12-p2"), false);
+    } finally {
+      s2.tabA.pinia._e.stop();
+      s2.tabB.pinia._e.stop();
+    }
+  });
+
+  test("UserReq 1: refreshing or closing/reopening (including abrupt crash without pagehide) never falsely blocks login as another tab, while real second tab is respected and takeover works", async () => {
+    // Shared browser Web Locks manager supporting both request() and query()
+    const createLiveLockBrowser = () => {
+      const held = new Map(); // name -> { name, ownerTag }
+      const queues = new Map();
+      const makeForTab = (ownerTag) => ({
+        query: async () => ({
+          held: Array.from(held.values()).map(({ name }) => ({
+            name,
+            mode: "exclusive",
+          })),
+          pending: [],
+        }),
+        request: (name, optsOrCb, maybeCb) => {
+          const cb = typeof optsOrCb === "function" ? optsOrCb : maybeCb;
+          const prev = queues.get(name) || Promise.resolve();
+          const run = prev.then(async () => {
+            held.set(name, { name, ownerTag });
+            try {
+              return await cb({ name });
+            } finally {
+              if (held.get(name)?.ownerTag === ownerTag) {
+                held.delete(name);
+              }
+            }
+          });
+          queues.set(
+            name,
+            run.then(
+              () => {},
+              () => {},
+            ),
+          );
+          return run;
+        },
+        simulateCrash: () => {
+          for (const [name, entry] of Array.from(held.entries())) {
+            if (entry.ownerTag === ownerTag) held.delete(name);
+          }
+        },
+      });
+      return { makeForTab, held };
+    };
+
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "alpha",
+            name: "测试主号",
+            roleId: "1001",
+            token: "valid-alpha-token-0001",
+            importMethod: "bin",
+          },
+        ]),
+      ],
+    ]);
+    const browserLocks = createLiveLockBrowser();
+
+    // Case A: Normal refresh / tab close fires pagehide -> lease released synchronously -> new tab connects immediately
+    const tab1 = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb: new Map(),
+      sharedLocks: browserLocks.makeForTab("tab1"),
+    });
+    const tab2 = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb: new Map(),
+      sharedLocks: browserLocks.makeForTab("tab2"),
+    });
+    try {
+      const client1 = await tab1.store.createWebSocketConnection(
+        "alpha",
+        "valid-alpha-token-0001",
+      );
+      assert.ok(client1);
+      assert.equal(tab1.store.getWebSocketStatus("alpha"), "connected");
+      assert.equal(
+        JSON.parse(sharedStorage.get("ws_connection_alpha")).liveLock,
+        true,
+      );
+
+      // While Tab 1 is genuinely alive, Tab 2 MUST see it as active in another tab and refuse duplicate connection
+      assert.equal(tab2.store.isConnectionActiveInAnotherTab("alpha"), true);
+      const blockedClient = await tab2.store.createWebSocketConnection(
+        "alpha",
+        "valid-alpha-token-0001",
+      );
+      assert.equal(blockedClient, null);
+
+      // Now Tab 1 refreshes / closes (pagehide fires)
+      tab1.mockWindow.dispatchEvent({ type: "pagehide" });
+      assert.equal(
+        JSON.parse(sharedStorage.get("ws_connection_alpha")).action,
+        "disconnected",
+      );
+      assert.equal(tab2.store.isConnectionActiveInAnotherTab("alpha"), false);
+      const reloadedClient = await tab2.store.createWebSocketConnection(
+        "alpha",
+        "valid-alpha-token-0001",
+      );
+      assert.ok(
+        reloadedClient,
+        "reopened/refreshed tab must connect immediately after pagehide",
+      );
+      assert.equal(tab2.store.getWebSocketStatus("alpha"), "connected");
+    } finally {
+      tab1.pinia._e.stop();
+      tab2.pinia._e.stop();
+    }
+
+    // Case B: Abrupt crash / force-quit WITHOUT pagehide -> browser drops Tab 3's live Web Lock -> Tab 4 auto-clears ghost lease and connects!
+    sharedStorage.delete("ws_connection_alpha");
+    const locks3 = browserLocks.makeForTab("tab3");
+    const tab3 = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb: new Map(),
+      sharedLocks: locks3,
+    });
+    const tab4 = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb: new Map(),
+      sharedLocks: browserLocks.makeForTab("tab4"),
+    });
+    try {
+      const client3 = await tab3.store.createWebSocketConnection(
+        "alpha",
+        "valid-alpha-token-0001",
+      );
+      assert.ok(client3);
+      // Crash Tab 3 WITHOUT firing pagehide (ws_connection_alpha stays "connected" in localStorage!)
+      locks3.simulateCrash();
+      assert.equal(
+        JSON.parse(sharedStorage.get("ws_connection_alpha")).action,
+        "connected",
+      );
+
+      // Tab 4 opens and connects -> reconcileStaleCrossTabLeases sees dead lock and connects immediately!
+      const client4 = await tab4.store.createWebSocketConnection(
+        "alpha",
+        "valid-alpha-token-0001",
+      );
+      assert.ok(
+        client4,
+        "newly opened tab must recover from crashed tab ghost lease without waiting 2 minutes",
+      );
+      assert.equal(tab4.store.getWebSocketStatus("alpha"), "connected");
+
+      // Case C: Explicit user takeover from another genuinely live tab
+      const tab5 = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: browserLocks.makeForTab("tab5"),
+      });
+      try {
+        assert.equal(tab5.store.isConnectionActiveInAnotherTab("alpha"), true);
+        const takenOver = await tab5.store.takeOverCrossTabConnection("alpha");
+        assert.ok(takenOver);
+        assert.equal(tab5.store.getWebSocketStatus("alpha"), "connected");
+      } finally {
+        tab5.pinia._e.stop();
+      }
+    } finally {
+      tab3.pinia._e.stop();
+      tab4.pinia._e.stop();
+    }
+  });
+
+  test("UserReq 2: Apex guess card auto-expands on guess days, daily tasks auto-guess inside open windows, and remind clearly when outside window", async () => {
+    const actualMap = await import("../src/utils/apexStageMap.js");
+    const rules = await loadModule(
+      new URL("../src/utils/apexRules.js", import.meta.url),
+      { "./apexStageMap": actualMap },
+    );
+    const rewardState = await import("../src/utils/apexRewardState.js");
+    const rateLimit = {
+      ApexAction: { READ: "read", GUESS: "guess" },
+      isApexRateLimited: () => false,
+      runApexAction: async (_action, task) => task(0),
+    };
+    const apexHelper = await loadModule(
+      new URL("../src/utils/apexGuessHelper.js", import.meta.url),
+      {
+        "./apexRules.js": rules,
+        "./apexRateLimit.js": rateLimit,
+        "./apexRewardState.js": rewardState,
+      },
+    );
+
+    // 1. Verify getTodayApexGuessSchedule & describeApexGuessReminder using REAL UTC epoch timestamps
+    //    (proving identical behavior in UTC, Asia/Shanghai, and America/Los_Angeles!)
+    const nov22Noon = Date.parse("2026-11-22T12:00:00+08:00");
+    const nov23Morning = Date.parse("2026-11-23T11:00:00+08:00");
+    const nov23FightGap = Date.parse("2026-11-23T19:20:00+08:00");
+    const nov23LateNight = Date.parse("2026-11-23T22:00:00+08:00");
+
+    assert.equal(
+      rules.getTodayApexGuessSchedule(rules.toChinaWallClockMs(nov22Noon))
+        .isGuessDay,
+      false,
+    );
+    assert.equal(
+      apexHelper.describeApexGuessReminder({ nowMs: nov22Noon }),
+      "",
+    );
+
+    const morningSchedule = rules.getTodayApexGuessSchedule(
+      rules.toChinaWallClockMs(nov23Morning),
+    );
+    assert.equal(morningSchedule.isGuessDay, true);
+    assert.equal(morningSchedule.openStages.length, 1);
+    assert.equal(morningSchedule.openStages[0].title, "64强赛");
+    assert.equal(morningSchedule.upcomingStages.length, 1);
+    assert.equal(morningSchedule.upcomingStages[0].title, "32强赛");
+    assert.equal(morningSchedule.upcomingStages[0].timeRange, "19:45–21:30");
+    const morningReminder = apexHelper.describeApexGuessReminder({
+      nowMs: nov23Morning,
+    });
+    assert.match(morningReminder, /64强赛/);
+    assert.match(morningReminder, /自动竞猜/);
+    assert.match(morningReminder, /19:45–21:30/);
+
+    const gapSchedule = rules.getTodayApexGuessSchedule(
+      rules.toChinaWallClockMs(nov23FightGap),
+    );
+    assert.equal(gapSchedule.isGuessDay, true);
+    assert.equal(gapSchedule.openStages.length, 0);
+    assert.equal(gapSchedule.upcomingStages.length, 1);
+    const gapReminder = apexHelper.describeApexGuessReminder({
+      nowMs: nov23FightGap,
+    });
+    assert.match(gapReminder, /当前不在竞猜时段/);
+    assert.match(gapReminder, /32强赛/);
+    assert.match(gapReminder, /19:45–21:30/);
+
+    const nightReminder = apexHelper.describeApexGuessReminder({
+      nowMs: nov23LateNight,
+    });
+    assert.match(nightReminder, /今日逐鹿盐山竞猜时段已结束/);
+    assert.match(nightReminder, /11月24日 00:00/);
+
+    // 2. Verify runDailyApexGuessCheck inside DailyTaskRunner
+    const accountConnection = await import("../src/utils/accountConnection.js");
+    const arena = await import("../src/utils/daily/arena.js");
+    const dream = await import("../src/utils/daily/dream.js");
+    const settingsHelpers = await import("../src/utils/dailyTaskSettings.js");
+    const stateHelpers = await import("../src/utils/dailyTaskState.js");
+    const weeklyQuiz = await import("../src/utils/weeklyQuiz.js");
+    const { DailyTaskRunner } = await loadModule(
+      new URL("../src/utils/dailyTaskRunner.js", import.meta.url),
+      {
+        "@/utils/dailyTaskState": stateHelpers,
+        "@/utils/dailyTaskSettings": settingsHelpers,
+        "./accountConnection.js": accountConnection,
+        "./accountIdentity.js": accountIdentity,
+        "./daily/arena.js": arena,
+        "./daily/dream.js": dream,
+        "./weeklyQuiz.js": weeklyQuiz,
+      },
+    );
+
+    const allDailyDefs = [
+      [1, 1, 1],
+      [2, 2, 1],
+      [3, 3, 3],
+      [4, 4, 2],
+      [5, 5, 5],
+      [6, 6, 3],
+      [7, 7, 3],
+      [8, 13, 1],
+      [9, 12, 1],
+      [10, 14, 1],
+    ].map(([id, completeCondition, completeValue]) => ({
+      id,
+      completeCondition,
+      completeValue,
+    }));
+
+    const runDailyAt = async (nowMs) => {
+      const sentApex = [];
+      const logs = [];
+      const guessMap = {
+        // Pre-fill 31 of 32 teams for stage 4 (scheduleId 176) so only 1 matchup remains to guess
+        176: Array.from({ length: 31 }, (_, i) => `pre-${i + 1}`),
+      };
+      const fakeStore = {
+        gameTokens: [{ id: "acc-apex", name: "竞猜号", roleId: "555" }],
+        selectedToken: { id: "acc-apex", roleId: "555" },
+        wsConnections: { "acc-apex": { client: { socket: {} } } },
+        getWebSocketStatus: () => "connected",
+        sendGetRoleInfo: async () => ({
+          role: {
+            roleId: "555",
+            dailyTask: {
+              dailyTime: 1700000000,
+              complete: Object.fromEntries(
+                allDailyDefs.map((d) => [d.completeCondition, -1]),
+              ),
+              dailyPoint: 100,
+              dailyReward: { 1: true },
+              weekPoint: 100,
+              weekReward: { 1: true },
+            },
+            statistics: {
+              "artifact:normal:lottery:time": 1700000010,
+              "genie:sweep:buy": 3,
+            },
+            statisticsTime: {
+              "genie:sweep:buy": 1700000010,
+              "legion:sign:in": 1700000010,
+              "genie:daily:free:1": 1700000010,
+              "genie:daily:free:2": 1700000010,
+              "genie:daily:free:3": 1700000010,
+              "genie:daily:free:4": 1700000010,
+              "genie:daily:free:5": 1700000010,
+            },
+          },
+        }),
+        sendMessageWithPromise: async (_id, cmd, params) => {
+          if (cmd === "presetteam_getinfo") {
+            return { presetTeamInfo: { useTeamId: 1 } };
+          }
+          if (cmd.startsWith("apex_")) sentApex.push({ cmd, params });
+          if (cmd === "apex_getroleinfo") {
+            return {
+              apexRoleInfo: {
+                guessMap: structuredClone(guessMap),
+                resetTime: { season: 1 },
+              },
+            };
+          }
+          if (cmd === "apex_getguesslist") {
+            const matches = Array.from({ length: 31 }, (_, i) => [
+              { teamId: `pre-${i + 1}`, name: `已选${i + 1}`, cheerCnt: 50 },
+              { teamId: `opp-${i + 1}`, name: `对手${i + 1}`, cheerCnt: 10 },
+            ]);
+            matches.push([
+              { teamId: "win-team", name: "热门队", cheerCnt: 900 },
+              { teamId: "low-team", name: "冷门队", cheerCnt: 100 },
+            ]);
+            return {
+              apexGuessList: params.idx === 0 ? matches : [],
+              last: true,
+            };
+          }
+          if (cmd === "apex_guess") {
+            guessMap[176].push(params.teamId);
+            return {};
+          }
+          return {};
+        },
+      };
+      const runner = new DailyTaskRunner(
+        fakeStore,
+        { commandDelay: 0, taskDelay: 0 },
+        {
+          loadConfig: async () => ({
+            tasks: allDailyDefs,
+            dailyRewards: [{ id: 1, limit: 20 }],
+            weeklyRewards: [{ id: 1, limit: 100 }],
+          }),
+          sleep: async () => {},
+          runApexDailyGuess: ({ tokenId, checkInterrupted, log }) =>
+            apexHelper.runDailyApexGuessCheck({
+              tokenStore: fakeStore,
+              tokenId,
+              checkInterrupted,
+              log,
+              nowMs,
+            }),
+        },
+      );
+      const summary = await runner.run(
+        "acc-apex",
+        { onLog: (entry) => logs.push(entry) },
+        {
+          arenaFormation: 1,
+          bossFormation: 1,
+          bossTimes: 0,
+          claimBottle: false,
+          payRecruit: false,
+          openBox: false,
+          arenaEnable: false,
+          claimHangUp: false,
+          claimLegacy: false,
+          claimEmail: false,
+          weeklyQuizEnabled: false,
+          apexGuessEnabled: true,
+          blackMarketPurchase: false,
+          dreamShopPurchase: false,
+          freeGachaEnable: false,
+        },
+      );
+      return { summary, sentApex, logs };
+    };
+
+    // 2a. Non-guess day: skips without calling apex_getroleinfo
+    const offDay = await runDailyAt(nov22Noon);
+    assert.equal(offDay.sentApex.length, 0);
+    assert.equal(offDay.summary.failed, 0);
+    assert.deepEqual([...offDay.summary.reminders], []);
+
+    // 2b. Guess day INSIDE open window (11:00): auto-guesses higher-cheer team and reminds about evening 32强赛
+    const inWindow = await runDailyAt(nov23Morning);
+    assert.ok(
+      inWindow.sentApex.some(
+        (c) => c.cmd === "apex_guess" && c.params.teamId === "win-team",
+      ),
+      "daily task must auto-submit apex_guess when inside open guess window",
+    );
+    assert.equal(inWindow.summary.failed, 0);
+    assert.equal(inWindow.summary.incomplete, 0);
+    assert.equal(inWindow.summary.reminders.length, 1);
+    assert.match(inWindow.summary.reminders[0], /32强赛.*19:45–21:30/);
+
+    // 2c. Guess day OUTSIDE open window (19:20): no apex_guess sent, does NOT fail daily task, emits clear reminder!
+    const outsideWindow = await runDailyAt(nov23FightGap);
+    assert.equal(
+      outsideWindow.sentApex.some((c) => c.cmd === "apex_guess"),
+      false,
+    );
+    assert.equal(outsideWindow.summary.failed, 0);
+    assert.equal(outsideWindow.summary.incomplete, 0);
+    assert.equal(outsideWindow.summary.reminders.length, 1);
+    assert.match(outsideWindow.summary.reminders[0], /不在开放时段/);
+    assert.match(outsideWindow.summary.reminders[0], /32强赛.*19:45–21:30/);
+
+    // 3. Verify GameStatus.vue auto-expands #daily-apex-target on guess day and respects manual toggle
+    const gameStatusSource = await readFile(
+      new URL("../src/components/GameStatus.vue", import.meta.url),
+      "utf8",
+    );
+    assert.match(gameStatusSource, /:open="apexDetailsOpen"/);
+    assert.match(gameStatusSource, /getTodayApexGuessSchedule/);
+    assert.match(gameStatusSource, /apexDetailsUserToggled/);
+    assert.match(gameStatusSource, /if \(kind === "apex"\)/);
+
+    const dailyStatusSource = await readFile(
+      new URL("../src/components/Daily/DailyTaskStatus.vue", import.meta.url),
+      "utf8",
+    );
+    assert.match(dailyStatusSource, /settings\.apexGuessEnabled/);
+  });
+
+  test("Round12 Self-Audit regressions: CAS pre-write guard, clearAllTokens conditional delete, stale-socket & cross-tab opaque paste, locks.query TOCTOU, takeover close, and non-fatal Apex errors", async () => {
+    // 1. reconcileStaleCrossTabLeases TOCTOU: Tab B starts locks.query() BEFORE Tab A connects; Tab A writes liveLock lease while Tab B awaits -> Tab B MUST NOT delete Tab A's live lease!
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "alpha",
+            name: "并发活锁号",
+            roleId: "1001",
+            token: "valid-alpha-toctou-0001",
+            importMethod: "bin",
+          },
+        ]),
+      ],
+    ]);
+    const held = new Map();
+    const queues = new Map();
+    let releaseQueryB;
+    let queryBEntered;
+    const queryBStarted = new Promise((r) => {
+      queryBEntered = r;
+    });
+    const makeLocks = (ownerTag, pauseFirstQuery = false) => {
+      let queryCount = 0;
+      return {
+        query: async () => {
+          const snapshot = Array.from(held.values()).map(({ name }) => ({
+            name,
+            mode: "exclusive",
+          }));
+          if (pauseFirstQuery && ++queryCount === 1) {
+            queryBEntered?.();
+            await new Promise((r) => {
+              releaseQueryB = r;
+            });
+          }
+          return { held: snapshot, pending: [] };
+        },
+        request: (name, optsOrCb, maybeCb) => {
+          const cb = typeof optsOrCb === "function" ? optsOrCb : maybeCb;
+          const prev = queues.get(name) || Promise.resolve();
+          const run = prev.then(async () => {
+            held.set(name, { name, ownerTag });
+            try {
+              return await cb({ name });
+            } finally {
+              if (held.get(name)?.ownerTag === ownerTag) held.delete(name);
+            }
+          });
+          queues.set(
+            name,
+            run.then(
+              () => {},
+              () => {},
+            ),
+          );
+          return run;
+        },
+      };
+    };
+
+    // Seed an unrelated dead lease so Tab B actually enters locks.query()
+    sharedStorage.set(
+      "ws_connection_dead",
+      JSON.stringify({
+        action: "connected",
+        sessionId: "dead-session",
+        timestamp: Date.now(),
+        liveLock: true,
+      }),
+    );
+
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb: new Map(),
+      sharedLocks: makeLocks("tabA", false),
+    });
+    const tabB = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb: new Map(),
+      sharedLocks: makeLocks("tabB", true),
+    });
+    try {
+      const reconcileP = tabB.store.reconcileStaleCrossTabLeases();
+      await queryBStarted;
+
+      // While Tab B is suspended inside locks.query() with stale held=[], Tab A connects to "alpha"
+      const clientA = await tabA.store.createWebSocketConnection(
+        "alpha",
+        "valid-alpha-toctou-0001",
+      );
+      assert.ok(clientA);
+      assert.ok(sharedStorage.get("ws_connection_alpha"));
+
+      // Resume Tab B with stale snapshot -> dead lease cleaned, but Tab A's brand-new live lease MUST remain untouched!
+      releaseQueryB();
+      await reconcileP;
+      assert.equal(sharedStorage.has("ws_connection_dead"), false);
+      assert.ok(
+        sharedStorage.get("ws_connection_alpha"),
+        "reconcileStaleCrossTabLeases MUST NOT delete a brand-new live lease created during locks.query()",
+      );
+      assert.equal(
+        JSON.parse(sharedStorage.get("ws_connection_alpha")).sessionId,
+        tabA.store.currentSessionId(),
+      );
+
+      // 2. Takeover broadcasts "connecting" -> Tab A's storage listener closes Tab A's local socket immediately!
+      tabA.store.initConnectionCoordination();
+      const takeoverClient =
+        await tabB.store.takeOverCrossTabConnection("alpha");
+      assert.ok(takeoverClient);
+      const connectingEvent = {
+        key: "ws_connection_alpha",
+        newValue: JSON.stringify({
+          action: "connecting",
+          sessionId: tabB.store.currentSessionId(),
+          timestamp: Date.now(),
+          liveLock: true,
+        }),
+      };
+      tabA.mockWindow.dispatchEvent({ type: "storage", ...connectingEvent });
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(
+        tabA.store.getWebSocketStatus("alpha"),
+        "disconnected",
+        "Tab A must close its socket immediately upon receiving another tab's connecting takeover",
+      );
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+
+    // 3. Stale socket & cross-tab opaque paste + multiline Base64 role mismatch + backup.roleId=null never blindly unpauses
+    const expiredIso = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
+    const roleStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc-audit-p2",
+            name: "跨页编辑号",
+            roleId: "9902",
+            token: JSON.stringify({
+              roleId: "9902",
+              roleToken: "old-9902-tok-0001",
+            }),
+            importMethod: "manual",
+            createdAt: expiredIso,
+            lastUsed: expiredIso,
+          },
+          {
+            id: "acc-null-role",
+            name: "无RoleId号",
+            roleId: null,
+            token: "old-null-role-tok-0001",
+            importMethod: "manual",
+            createdAt: expiredIso,
+            lastUsed: expiredIso,
+          },
+        ]),
+      ],
+    ]);
+    const roleIdb = new Map([
+      ["acc-audit-p2", new Uint8Array([8, 8]).buffer],
+      ["acc-null-role", new Uint8Array([6, 6]).buffer],
+    ]);
+    let failRoleStore = true;
+    let releaseDel1;
+    let del1Entered;
+    const del1Started = new Promise((r) => {
+      del1Entered = r;
+    });
+    const clientsAudit = [];
+    class AuditWsClient {
+      constructor() {
+        this.socket = { readyState: 1 };
+        clientsAudit.push(this);
+      }
+      setMessageListener(fn) {
+        this.listener = fn;
+      }
+      init() {
+        this.onConnect?.();
+      }
+      disconnect() {
+        if (this.socket) this.socket.readyState = 3;
+        this.socket = null;
+      }
+      send() {}
+      sendHeartbeat() {}
+    }
+    const locksRole = createLockManager();
+    const tabRoleA = await loadVueUseTabWithWindow({
+      sharedStorage: roleStorage,
+      sharedIdb: roleIdb,
+      sharedLocks: locksRole,
+      wsClientClass: AuditWsClient,
+      deleteArrayBufferImpl: async (k) => {
+        roleIdb.delete(k);
+        if (k === "acc-audit-p2" && del1Entered) {
+          del1Entered();
+          del1Entered = null;
+          await new Promise((r) => {
+            releaseDel1 = r;
+          });
+        }
+        return true;
+      },
+      storeArrayBufferImpl: async (k, buf) => {
+        if (failRoleStore) return false;
+        roleIdb.set(k, buf);
+        return true;
+      },
+    });
+    const tabRoleB = await loadVueUseTabWithWindow({
+      sharedStorage: roleStorage,
+      sharedIdb: roleIdb,
+      sharedLocks: createLockManager(),
+    });
+    try {
+      // Queue backups for acc-audit-p2 (roleId "9902")
+      const cleanP = tabRoleA.store.cleanExpiredTokensDetailed();
+      await del1Started;
+      await tabRoleB.store.selectToken("acc-audit-p2");
+      await tabRoleB.store.selectToken("acc-null-role");
+      releaseDel1();
+      await cleanP;
+      failRoleStore = false;
+      tabRoleB.store.closeWebSocketConnection("acc-audit-p2");
+      tabRoleB.store.closeWebSocketConnection("acc-null-role");
+
+      // 3a. Multiline wrapped Base64 JSON for role 7777 must STILL be rejected as role_mismatch
+      const rawB64 = btoa(
+        JSON.stringify({ roleId: "7777", token: "other-role-multiline-0001" }),
+      );
+      const wrappedB64 = `${rawB64.slice(0, 12)}\n${rawB64.slice(12, 24)} ${rawB64.slice(24)}`;
+      const rejectedWrapped = await tabRoleA.store.commitCredentialUpdate(
+        "acc-audit-p2",
+        { updates: { token: wrappedB64 } },
+      );
+      assert.equal(rejectedWrapped.committed, false);
+      assert.equal(rejectedWrapped.reason, "role_mismatch");
+
+      // 3b. Cross-tab opaque paste in Tab B must cause Tab A's retryPendingBinRestores() to PAUSE and NOT restore [8, 8]!
+      const crossTabOpaque = await tabRoleB.store.commitCredentialUpdate(
+        "acc-audit-p2",
+        { updates: { token: "cross-tab-opaque-token-0001" } },
+      );
+      assert.equal(crossTabOpaque.committed, true);
+      const retryCrossTab = await tabRoleA.store.retryPendingBinRestores();
+      assert.deepEqual([...retryCrossTab.restoredIds], []);
+      assert.ok(retryCrossTab.pausedIds.includes("acc-audit-p2"));
+      assert.equal(roleIdb.has("acc-audit-p2"), false);
+
+      // 3c. Old socket from old token receiving role_getroleinforesp MUST NOT unpause the backup!
+      await tabRoleA.store.createWebSocketConnection(
+        "acc-audit-p2",
+        JSON.stringify({ roleId: "9902", roleToken: "old-9902-tok-0001" }),
+      );
+      const staleClient = clientsAudit.at(-1);
+      await staleClient.listener({
+        cmd: "role_getroleinforesp",
+        getData: () => ({ role: { roleId: "9902" } }),
+      });
+      assert.ok(
+        tabRoleA.store.getPausedBinRestoreIds().includes("acc-audit-p2"),
+        "stale socket carrying old token must NOT unpause pending BIN restore",
+      );
+    } finally {
+      tabRoleA.pinia._e.stop();
+      tabRoleB.pinia._e.stop();
+    }
+
+    // 4. Non-fatal Apex error (e.g. account hasn't unlocked Apex / rate limit 200400) inside DailyTaskRunner does NOT abort the run!
+    const actualMap = await import("../src/utils/apexStageMap.js");
+    const rules = await loadModule(
+      new URL("../src/utils/apexRules.js", import.meta.url),
+      { "./apexStageMap": actualMap },
+    );
+    const rewardState = await import("../src/utils/apexRewardState.js");
+    const apexHelper = await loadModule(
+      new URL("../src/utils/apexGuessHelper.js", import.meta.url),
+      {
+        "./apexRules.js": rules,
+        "./apexRateLimit.js": {
+          ApexAction: { READ: "read", GUESS: "guess" },
+          isApexRateLimited: () => false,
+          runApexAction: async (_a, task) => task(0),
+        },
+        "./apexRewardState.js": rewardState,
+      },
+    );
+    const errorOutcome = await apexHelper.runDailyApexGuessCheck({
+      tokenStore: {
+        wsConnections: {},
+        sendMessageWithPromise: async () => {
+          throw new Error("操作太快，请稍后再试 (200400)");
+        },
+      },
+      tokenId: "acc-rate-limit",
+      nowMs: Date.parse("2026-11-23T11:00:00+08:00"),
+    });
+    assert.equal(errorOutcome.ok, false);
+    assert.equal(errorOutcome.status, "partial");
+
+    // 5. Pass 2 audit fix: clearAllTokens() without Web Locks on a manual account (no initial BIN) must NOT delete a brand-new BIN concurrently written by Tab B!
+    const clearRecords = new Map();
+    const clearDb = {
+      put: async (_s, item) => {
+        clearRecords.set(item.id, item);
+      },
+      get: async (_s, key) => clearRecords.get(key),
+      getAllKeys: async () => Array.from(clearRecords.keys()),
+      delete: async (_s, key) => {
+        clearRecords.delete(key);
+      },
+      clear: async () => {
+        clearRecords.clear();
+      },
+      getAll: async () => Array.from(clearRecords.values()),
+      transaction: () => ({
+        objectStore: () => ({
+          get: async (key) => clearRecords.get(key),
+          put: async (item) => {
+            clearRecords.set(item.id, item);
+          },
+          delete: async (key) => {
+            clearRecords.delete(key);
+          },
+        }),
+        done: Promise.resolve(),
+      }),
+    };
+    const { default: useClearIdb } = await loadModule(
+      new URL("../src/hooks/useIndexedDB.ts", import.meta.url),
+      { idb: { openDB: async () => clearDb }, vue },
+      {
+        console: { log() {}, warn() {}, error() {} },
+        setTimeout,
+        clearTimeout,
+      },
+    );
+    const idbClearA = useClearIdb();
+    const idbClearB = useClearIdb();
+    const clearStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc-manual-clear",
+            name: "清空并发号",
+            roleId: "5501",
+            token: JSON.stringify({ roleId: "5501", roleToken: "manual-0001" }),
+            importMethod: "manual",
+          },
+        ]),
+      ],
+    ]);
+    let clearBackupDone;
+    let releaseClearDelete;
+    const clearBackupReady = new Promise((r) => {
+      clearBackupDone = r;
+    });
+    const wrappedIdbClearA = {
+      ...idbClearA,
+      deleteArrayBufferIfUnchanged: async (key, expected) => {
+        if (key === "acc-manual-clear" && clearBackupDone) {
+          clearBackupDone();
+          clearBackupDone = null;
+          await new Promise((r) => {
+            releaseClearDelete = r;
+          });
+        }
+        return idbClearA.deleteArrayBufferIfUnchanged(key, expected);
+      },
+    };
+    const tabClearA = await loadVueUseTabWithWindow({
+      sharedStorage: clearStorage,
+      sharedIdb: new Map(),
+      sharedLocks: null,
+      disableWebLocks: true,
+      idbOverride: wrappedIdbClearA,
+    });
+    const tabClearB = await loadVueUseTabWithWindow({
+      sharedStorage: clearStorage,
+      sharedIdb: new Map(),
+      sharedLocks: null,
+      disableWebLocks: true,
+      idbOverride: idbClearB,
+    });
+    try {
+      const clearP = tabClearA.store.clearAllTokens();
+      await clearBackupReady;
+
+      // Tab B re-logs in acc-manual-clear with a brand-new BIN while Tab A is clearing!
+      const reloginB = await tabClearB.store.commitCredentialUpdate(
+        "acc-manual-clear",
+        {
+          updates: {
+            token: JSON.stringify({
+              roleId: "5501",
+              roleToken: "bin-new-0002",
+            }),
+            importMethod: "bin",
+          },
+          binData: new Uint8Array([77, 88]).buffer,
+          binStorage: idbClearB,
+        },
+      );
+      assert.equal(reloginB.committed, true);
+
+      releaseClearDelete();
+      const clearRes = await clearP;
+      assert.equal(
+        clearRes.ok,
+        false,
+        "clearAllTokens must detect concurrent brand-new BIN write and abort",
+      );
+      const survivedBin = await idbClearB.getArrayBuffer("acc-manual-clear");
+      assert.ok(
+        survivedBin,
+        "Tab B's brand-new BIN for originally manual account must NOT be deleted",
+      );
+      assert.deepEqual(Array.from(new Uint8Array(survivedBin)), [77, 88]);
+    } finally {
+      tabClearA.pinia._e.stop();
+      tabClearB.pinia._e.stop();
     }
   });
 });

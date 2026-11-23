@@ -40,6 +40,9 @@ export type ConditionalDeleteResult =
 
 export type ConditionalStoreResult = "stored" | "exists" | "error";
 
+export type ConditionalReplaceResult =
+  "stored" | "changed" | "missing" | "error";
+
 const arrayBuffersEqual = (
   a: ArrayBuffer | null | undefined,
   b: ArrayBuffer | null | undefined,
@@ -52,6 +55,64 @@ const arrayBuffersEqual = (
     if (viewA[i] !== viewB[i]) return false;
   }
   return true;
+};
+
+const isStoredRecordChanged = (
+  current: {
+    data: ArrayBuffer;
+    updatedAt?: Date | number;
+    metadata?: Record<string, any>;
+  },
+  expected: ConditionalDeleteExpected,
+): boolean => {
+  const currentMeta = current.metadata || {};
+  const currentMetaVer =
+    typeof currentMeta.credentialVersion === "number" &&
+    Number.isFinite(currentMeta.credentialVersion)
+      ? currentMeta.credentialVersion
+      : null;
+  const currentBinVer =
+    typeof currentMeta.binVersion === "number" &&
+    Number.isFinite(currentMeta.binVersion)
+      ? currentMeta.binVersion
+      : null;
+  const currentWriteToken =
+    typeof currentMeta.binWriteToken === "string" && currentMeta.binWriteToken
+      ? currentMeta.binWriteToken
+      : null;
+  const currentUpdatedAtMs =
+    current.updatedAt instanceof Date
+      ? current.updatedAt.getTime()
+      : typeof current.updatedAt === "number"
+        ? current.updatedAt
+        : null;
+
+  return (
+    expected.expectedData === null ||
+    (expected.expectedBinWriteToken !== undefined &&
+      currentWriteToken !== expected.expectedBinWriteToken) ||
+    (expected.expectedCredentialVersion !== undefined &&
+      expected.expectedCredentialVersion !== null &&
+      currentMetaVer !== null &&
+      currentMetaVer !== expected.expectedCredentialVersion) ||
+    (expected.maxExpectedCredentialVersion !== undefined &&
+      expected.maxExpectedCredentialVersion !== null &&
+      currentMetaVer !== null &&
+      currentMetaVer > expected.maxExpectedCredentialVersion) ||
+    (expected.expectedBinVersion !== undefined &&
+      expected.expectedBinVersion !== null &&
+      currentBinVer !== null &&
+      currentBinVer !== expected.expectedBinVersion) ||
+    (expected.maxExpectedBinVersion !== undefined &&
+      expected.maxExpectedBinVersion !== null &&
+      currentBinVer !== null &&
+      currentBinVer > expected.maxExpectedBinVersion) ||
+    (expected.expectedUpdatedAtMs !== undefined &&
+      expected.expectedUpdatedAtMs !== null &&
+      currentUpdatedAtMs !== expected.expectedUpdatedAtMs) ||
+    (expected.expectedData !== undefined &&
+      !arrayBuffersEqual(current.data, expected.expectedData))
+  );
 };
 
 // Hook 返回类型
@@ -71,6 +132,12 @@ interface UseIndexedDBReturn {
     data: ArrayBuffer,
     metadata?: Record<string, any>,
   ) => Promise<ConditionalStoreResult>;
+  storeArrayBufferIfUnchanged: (
+    key: string,
+    data: ArrayBuffer,
+    expected?: ConditionalDeleteExpected,
+    metadata?: Record<string, any>,
+  ) => Promise<ConditionalReplaceResult>;
   getArrayBuffer: (key: string) => Promise<ArrayBuffer | null>;
   getArrayBufferRecord: (key: string) => Promise<ArrayBufferRecord | null>;
   getAllKeys: () => Promise<string[]>;
@@ -329,6 +396,64 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
   };
 
   /**
+   * 在单个 IndexedDB 读写事务内仅当当前记录仍匹配预期（如本次写入的 binWriteToken）
+   * 时才替换回旧 ArrayBuffer，避免无 Web Locks 环境下回滚覆盖另一标签页刚重登的新 BIN。
+   */
+  const storeArrayBufferIfUnchanged = async (
+    key: string,
+    data: ArrayBuffer,
+    expected: ConditionalDeleteExpected = {},
+    metadata?: Record<string, any>,
+  ): Promise<ConditionalReplaceResult> => {
+    const database = await ensureReady();
+    if (!database) {
+      return "error";
+    }
+
+    try {
+      const tx = database.transaction(storeName, "readwrite");
+      const store = tx.objectStore(storeName);
+      const current = await store.get(key);
+      if (!current) {
+        await tx.done;
+        return "missing";
+      }
+
+      if (isStoredRecordChanged(current, expected)) {
+        await tx.done;
+        return "changed";
+      }
+
+      const binWriteToken =
+        typeof metadata?.binWriteToken === "string" && metadata.binWriteToken
+          ? metadata.binWriteToken
+          : `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const item = {
+        id: key,
+        data,
+        metadata: {
+          ...(metadata || {}),
+          binWriteToken,
+        },
+        createdAt: current.createdAt || new Date(),
+        updatedAt: new Date(),
+      };
+
+      await store.put(item);
+      await tx.done;
+      console.log(
+        `✅ ArrayBuffer 条件回滚成功，键: ${key}, 大小: ${data.byteLength} 字节`,
+      );
+      return "stored";
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "未知错误";
+      error.value = `条件回滚数据失败: ${errorMessage}`;
+      console.error("❌ 条件回滚 ArrayBuffer 错误:", err);
+      return "error";
+    }
+  };
+
+  /**
    * 获取 ArrayBuffer 数据及其元数据快照（用于跨标签页条件删除校验）
    */
   const getArrayBufferRecord = async (
@@ -456,56 +581,7 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
         return "missing";
       }
 
-      const currentMeta = current.metadata || {};
-      const currentMetaVer =
-        typeof currentMeta.credentialVersion === "number" &&
-        Number.isFinite(currentMeta.credentialVersion)
-          ? currentMeta.credentialVersion
-          : null;
-      const currentBinVer =
-        typeof currentMeta.binVersion === "number" &&
-        Number.isFinite(currentMeta.binVersion)
-          ? currentMeta.binVersion
-          : null;
-      const currentWriteToken =
-        typeof currentMeta.binWriteToken === "string" &&
-        currentMeta.binWriteToken
-          ? currentMeta.binWriteToken
-          : null;
-      const currentUpdatedAtMs =
-        current.updatedAt instanceof Date
-          ? current.updatedAt.getTime()
-          : typeof current.updatedAt === "number"
-            ? current.updatedAt
-            : null;
-
-      const changed =
-        expected.expectedData === null ||
-        (expected.expectedBinWriteToken !== undefined &&
-          currentWriteToken !== expected.expectedBinWriteToken) ||
-        (expected.expectedCredentialVersion !== undefined &&
-          expected.expectedCredentialVersion !== null &&
-          currentMetaVer !== null &&
-          currentMetaVer !== expected.expectedCredentialVersion) ||
-        (expected.maxExpectedCredentialVersion !== undefined &&
-          expected.maxExpectedCredentialVersion !== null &&
-          currentMetaVer !== null &&
-          currentMetaVer > expected.maxExpectedCredentialVersion) ||
-        (expected.expectedBinVersion !== undefined &&
-          expected.expectedBinVersion !== null &&
-          currentBinVer !== null &&
-          currentBinVer !== expected.expectedBinVersion) ||
-        (expected.maxExpectedBinVersion !== undefined &&
-          expected.maxExpectedBinVersion !== null &&
-          currentBinVer !== null &&
-          currentBinVer > expected.maxExpectedBinVersion) ||
-        (expected.expectedUpdatedAtMs !== undefined &&
-          expected.expectedUpdatedAtMs !== null &&
-          currentUpdatedAtMs !== expected.expectedUpdatedAtMs) ||
-        (expected.expectedData !== undefined &&
-          !arrayBuffersEqual(current.data, expected.expectedData));
-
-      if (changed) {
+      if (isStoredRecordChanged(current, expected)) {
         await tx.done;
         return "changed";
       }
@@ -580,6 +656,7 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
     // 方法
     storeArrayBuffer,
     storeArrayBufferIfMissing,
+    storeArrayBufferIfUnchanged,
     getArrayBuffer,
     getArrayBufferRecord,
     getAllKeys,

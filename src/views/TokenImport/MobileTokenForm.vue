@@ -166,7 +166,15 @@ import { encodeCombUserBin } from "@/utils/xyzwRuntime";
 const emit = defineEmits(["cancel", "ok"]);
 const message = useMessage();
 const tokenStore = useTokenStore();
-const { storeArrayBuffer, getArrayBuffer, deleteArrayBuffer } = useIndexedDB();
+const {
+  storeArrayBuffer,
+  storeArrayBufferIfMissing,
+  storeArrayBufferIfUnchanged,
+  getArrayBuffer,
+  getArrayBufferRecord,
+  deleteArrayBuffer,
+  deleteArrayBufferIfUnchanged,
+} = useIndexedDB();
 
 const HORTOR_PROXY_PREFIX = "/api/hortor";
 const HORTOR_UCENTER_PROXY_PREFIX = "/api/hortor-ucenter";
@@ -529,8 +537,12 @@ const handleImport = async () => {
       roles: rolesToImport,
       tokenStore,
       getArrayBuffer,
+      getArrayBufferRecord,
       storeArrayBuffer,
+      storeArrayBufferIfMissing,
+      storeArrayBufferIfUnchanged,
       deleteArrayBuffer,
+      deleteArrayBufferIfUnchanged,
       allowPartial: true,
     });
     roleList.value = pruneSucceededImportRoles(

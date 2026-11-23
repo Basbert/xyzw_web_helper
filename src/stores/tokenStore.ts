@@ -30,6 +30,7 @@ const {
   getArrayBufferRecord,
   storeArrayBuffer,
   storeArrayBufferIfMissing,
+  storeArrayBufferIfUnchanged,
   deleteArrayBuffer,
   deleteArrayBufferIfUnchanged,
   getAllKeys,
@@ -127,6 +128,7 @@ declare interface CrossTabConnectionState {
   action: string;
   sessionId: string;
   timestamp: number;
+  liveLock?: boolean;
 }
 
 const getErrorMessage = (error: unknown, fallback = "未知错误") =>
@@ -561,6 +563,8 @@ export const useTokenStore = defineStore("tokens", () => {
       binVersion: number;
       roleId: string | null;
       name: string;
+      expectedToken: string;
+      pausedForRoleVerification?: boolean;
     }
   >();
   let storeWriteQueue: Promise<unknown> = Promise.resolve();
@@ -727,16 +731,127 @@ export const useTokenStore = defineStore("tokens", () => {
     }
   };
 
+  const BASE64_ALPHABET =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+  const decodeBase64Text = (value: string): string | null => {
+    const compact = value.replace(/\s+/g, "");
+    if (!compact) return null;
+    const unpadded = compact
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .replace(/=+$/, "");
+    if (!unpadded || unpadded.length % 4 === 1) return null;
+    if (!/^[A-Z0-9+/]+$/i.test(unpadded)) return null;
+    const padLen = (4 - (unpadded.length % 4)) % 4;
+    const padded = unpadded + "=".repeat(padLen);
+
+    let bytes: Uint8Array;
+    if (typeof atob === "function") {
+      try {
+        const binary = atob(padded);
+        bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+      } catch {
+        return null;
+      }
+    } else {
+      const out: number[] = [];
+      for (let i = 0; i < padded.length; i += 4) {
+        const c0 = BASE64_ALPHABET.indexOf(padded[i]!);
+        const c1 = BASE64_ALPHABET.indexOf(padded[i + 1]!);
+        const c2 =
+          padded[i + 2] === "=" ? -1 : BASE64_ALPHABET.indexOf(padded[i + 2]!);
+        const c3 =
+          padded[i + 3] === "=" ? -1 : BASE64_ALPHABET.indexOf(padded[i + 3]!);
+        if (c0 < 0 || c1 < 0) return null;
+        out.push((c0 << 2) | (c1 >> 4));
+        if (c2 >= 0) out.push(((c1 & 0x0f) << 4) | (c2 >> 2));
+        if (c3 >= 0) out.push(((c2 & 0x03) << 6) | c3);
+      }
+      bytes = new Uint8Array(out);
+    }
+
+    if (typeof TextDecoder === "function") {
+      try {
+        return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+      } catch {
+        // Fall through to Latin-1 decoding.
+      }
+    }
+    let text = "";
+    for (let i = 0; i < bytes.length; i += 1) {
+      text += String.fromCharCode(bytes[i]!);
+    }
+    return text;
+  };
+
   const extractRoleIdFromSessionToken = (
     sessionToken: string,
+    depth = 0,
   ): string | null => {
-    if (typeof sessionToken !== "string" || !sessionToken.trim()) return null;
-    try {
-      const parsed = JSON.parse(sessionToken);
-      return normalizeRoleId(parsed?.roleId ?? parsed?.role?.roleId);
-    } catch {
+    if (depth > 2 || typeof sessionToken !== "string") return null;
+    const trimmed = sessionToken.trim();
+    if (!trimmed) return null;
+
+    const extractFromParsed = (parsed: unknown): string | null => {
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return null;
+      }
+      const record = parsed as Record<string, unknown>;
+      const roleObj =
+        record.role && typeof record.role === "object"
+          ? (record.role as Record<string, unknown>)
+          : null;
+      const direct = normalizeRoleId(record.roleId ?? roleObj?.roleId);
+      if (direct) return direct;
+      for (const nestedKey of ["token", "roleToken", "gameToken"]) {
+        const nested = record[nestedKey];
+        if (typeof nested === "string" && nested.trim() && nested !== trimmed) {
+          const nestedRoleId = extractRoleIdFromSessionToken(nested, depth + 1);
+          if (nestedRoleId) return nestedRoleId;
+        }
+      }
       return null;
+    };
+
+    try {
+      const parsed = JSON.parse(trimmed);
+      const fromJson = extractFromParsed(parsed);
+      if (fromJson) return fromJson;
+    } catch {
+      // Fall through to JWT / Base64 JSON decoding.
     }
+
+    const jwtParts = trimmed.split(".");
+    if (jwtParts.length === 3 && jwtParts[1]) {
+      const decodedPayload = decodeBase64Text(jwtParts[1]);
+      if (decodedPayload) {
+        try {
+          const fromJwt = extractFromParsed(JSON.parse(decodedPayload));
+          if (fromJwt) return fromJwt;
+        } catch {
+          // Ignore non-JSON JWT payload.
+        }
+      }
+    }
+
+    const cleanBase64 = trimmed.replace(/^data:.*base64,/, "").trim();
+    if (cleanBase64) {
+      const decoded = decodeBase64Text(cleanBase64);
+      if (decoded && decoded !== trimmed) {
+        try {
+          const fromBase64 = extractFromParsed(JSON.parse(decoded));
+          if (fromBase64) return fromBase64;
+        } catch {
+          // Ignore non-JSON Base64 text.
+        }
+      }
+    }
+
+    return null;
   };
 
   const runWithStoreWriteLock = <T>(task: () => Promise<T>): Promise<T> => {
@@ -815,12 +930,34 @@ export const useTokenStore = defineStore("tokens", () => {
 
   interface CredentialBinStorage {
     getArrayBuffer?: (key: string) => Promise<ArrayBuffer | null>;
+    getArrayBufferRecord?: (key: string) => Promise<{
+      data: ArrayBuffer;
+      updatedAtMs: number | null;
+      credentialVersion: number | null;
+      binVersion: number | null;
+      binWriteToken: string | null;
+    } | null>;
     storeArrayBuffer?: (
       key: string,
       data: ArrayBuffer,
       metadata?: Record<string, any>,
     ) => Promise<boolean>;
+    storeArrayBufferIfMissing?: (
+      key: string,
+      data: ArrayBuffer,
+      metadata?: Record<string, any>,
+    ) => Promise<"stored" | "exists" | "error">;
+    storeArrayBufferIfUnchanged?: (
+      key: string,
+      data: ArrayBuffer,
+      expected?: Record<string, any>,
+      metadata?: Record<string, any>,
+    ) => Promise<"stored" | "changed" | "missing" | "error">;
     deleteArrayBuffer?: (key: string) => Promise<boolean>;
+    deleteArrayBufferIfUnchanged?: (
+      key: string,
+      expected?: Record<string, any>,
+    ) => Promise<"deleted" | "changed" | "missing" | "error">;
   }
 
   interface CommitCredentialOptions {
@@ -831,6 +968,7 @@ export const useTokenStore = defineStore("tokens", () => {
     binData?: ArrayBuffer | null;
     binStorage?: CredentialBinStorage;
     deleteOldBinKey?: string | null;
+    deleteOldBinWriteToken?: string | null;
     closeActiveConnection?: boolean;
     lockWaitTimeoutMs?: number;
   }
@@ -915,10 +1053,10 @@ export const useTokenStore = defineStore("tokens", () => {
     updates: Partial<TokenData>,
     options: { bumpBin?: boolean } = {},
   ):
-    | { ok: true; token: TokenData }
+    | { ok: true; token: TokenData; binRestorePaused?: boolean }
     | {
         ok: false;
-        reason: "token_missing" | "storage_write_failed";
+        reason: "token_missing" | "storage_write_failed" | "role_mismatch";
         error?: unknown;
       } => {
     syncGameTokensFromStorage();
@@ -926,6 +1064,28 @@ export const useTokenStore = defineStore("tokens", () => {
     const existing = gameTokens.value[index];
     if (index === -1 || !existing) {
       return { ok: false, reason: "token_missing" };
+    }
+
+    const tokenChanged =
+      typeof updates.token === "string" && updates.token !== existing.token;
+    const existingBackupBeforeUpdate = pendingBinRestoreBackups.get(tokenId);
+    const targetRoleId =
+      normalizeRoleId(existing.roleId) ||
+      existingBackupBeforeUpdate?.roleId ||
+      null;
+    const parsedIncomingRoleId = tokenChanged
+      ? extractRoleIdFromSessionToken(updates.token!)
+      : null;
+    const explicitIncomingRoleId = normalizeRoleId(updates.roleId);
+    if (tokenChanged && targetRoleId) {
+      if (
+        (parsedIncomingRoleId && parsedIncomingRoleId !== targetRoleId) ||
+        (explicitIncomingRoleId &&
+          explicitIncomingRoleId !== targetRoleId &&
+          !options.bumpBin)
+      ) {
+        return { ok: false, reason: "role_mismatch" };
+      }
     }
 
     const previousExisting = { ...existing };
@@ -981,20 +1141,48 @@ export const useTokenStore = defineStore("tokens", () => {
         error: persisted.error,
       };
     }
+    let binRestorePaused = false;
     if (options.bumpBin) {
       pendingBinRestoreBackups.delete(tokenId);
     } else {
       const existingBackup = pendingBinRestoreBackups.get(tokenId);
-      const nextRoleId = normalizeRoleId(nextToken.roleId);
-      if (
-        existingBackup?.roleId &&
-        nextRoleId &&
-        nextRoleId !== existingBackup.roleId
-      ) {
-        pendingBinRestoreBackups.delete(tokenId);
+      if (existingBackup) {
+        const nextRoleId = normalizeRoleId(nextToken.roleId);
+        if (
+          existingBackup.roleId &&
+          nextRoleId &&
+          nextRoleId !== existingBackup.roleId
+        ) {
+          pendingBinRestoreBackups.delete(tokenId);
+        } else if (tokenChanged) {
+          const confirmedRoleId =
+            parsedIncomingRoleId || explicitIncomingRoleId;
+          if (
+            existingBackup.roleId &&
+            confirmedRoleId &&
+            confirmedRoleId === existingBackup.roleId
+          ) {
+            existingBackup.pausedForRoleVerification = false;
+            existingBackup.expectedToken = nextToken.token;
+          } else {
+            existingBackup.pausedForRoleVerification = true;
+            binRestorePaused = true;
+          }
+        } else if (
+          existingBackup.roleId &&
+          explicitIncomingRoleId &&
+          explicitIncomingRoleId === existingBackup.roleId &&
+          nextToken.token === existingBackup.expectedToken
+        ) {
+          existingBackup.pausedForRoleVerification = false;
+        }
       }
     }
-    return { ok: true, token: nextToken };
+    return {
+      ok: true,
+      token: nextToken,
+      ...(binRestorePaused ? { binRestorePaused: true } : {}),
+    };
   };
 
   const executeCredentialUpdateLocked = async (
@@ -1014,6 +1202,33 @@ export const useTokenStore = defineStore("tokens", () => {
           stale: false,
           reason: "token_missing" as const,
         };
+      }
+      if (
+        typeof options.updates.token === "string" &&
+        options.updates.token !== latest.token
+      ) {
+        const targetRoleId =
+          normalizeRoleId(latest.roleId) ||
+          pendingBinRestoreBackups.get(tokenId)?.roleId ||
+          null;
+        const parsedIncomingRoleId = extractRoleIdFromSessionToken(
+          options.updates.token,
+        );
+        const explicitIncomingRoleId = normalizeRoleId(options.updates.roleId);
+        if (
+          targetRoleId &&
+          ((parsedIncomingRoleId && parsedIncomingRoleId !== targetRoleId) ||
+            (explicitIncomingRoleId &&
+              explicitIncomingRoleId !== targetRoleId &&
+              !options.binData))
+        ) {
+          return {
+            ok: false as const,
+            stale: false,
+            reason: "role_mismatch" as const,
+            message: "新 Token 对应的角色与当前账号不一致，请单独导入为新账号",
+          };
+        }
       }
       if (options.expectedVersion !== undefined) {
         const { hasList, token: persisted } = readPersistedTokenState(tokenId);
@@ -1049,19 +1264,33 @@ export const useTokenStore = defineStore("tokens", () => {
     const initialCheck = checkCommitValidity();
     if (!initialCheck.ok) {
       return {
-        committed: false,
+        committed: false as const,
         stale: initialCheck.stale,
         reason: initialCheck.reason,
+        ...("message" in initialCheck && initialCheck.message
+          ? { message: initialCheck.message }
+          : {}),
       };
     }
 
     const storage: CredentialBinStorage = options.binStorage ?? {
       getArrayBuffer,
+      getArrayBufferRecord,
       storeArrayBuffer,
+      storeArrayBufferIfMissing,
+      storeArrayBufferIfUnchanged,
       deleteArrayBuffer,
+      deleteArrayBufferIfUnchanged,
     };
+    const startCredVersion = getCredentialVersion(tokenId);
+    const startBinVersion = getBinVersion(tokenId);
     let binWritten = false;
+    let writtenBinToken: string | null = null;
+    let hadPreviousRecord = false;
     let previousBin: ArrayBuffer | null = null;
+    let previousBinCredVersion: number | null = null;
+    let previousBinVer: number | null = null;
+    let previousBinWriteToken: string | null = null;
 
     const rollbackBin = async (): Promise<boolean> => {
       if (!binWritten) return true;
@@ -1069,28 +1298,68 @@ export const useTokenStore = defineStore("tokens", () => {
       const { hasList, token: persisted } = readPersistedTokenState(tokenId);
       const stillExistsInMem = gameTokens.value.some((t) => t.id === tokenId);
       const stillExists = stillExistsInMem && (!hasList || persisted !== null);
+      const binVersionAdvanced = getBinVersion(tokenId) !== startBinVersion;
+      const versionAdvanced =
+        getCredentialVersion(tokenId) !== startCredVersion ||
+        binVersionAdvanced;
       try {
-        if (!stillExists) {
+        if (!stillExists || !previousBin) {
+          if (
+            writtenBinToken &&
+            typeof storage.deleteArrayBufferIfUnchanged === "function"
+          ) {
+            const deleteStatus = await storage.deleteArrayBufferIfUnchanged(
+              tokenId,
+              { expectedBinWriteToken: writtenBinToken },
+            );
+            return (
+              deleteStatus === "deleted" ||
+              deleteStatus === "missing" ||
+              deleteStatus === "changed"
+            );
+          }
+          if (!hasCrossTabWebLocks() && versionAdvanced) {
+            return true;
+          }
           if (typeof storage.deleteArrayBuffer === "function") {
             const deleted = await storage.deleteArrayBuffer(tokenId);
             return deleted !== false;
           }
           return false;
         }
-        if (previousBin && typeof storage.storeArrayBuffer === "function") {
+        if (!hasCrossTabWebLocks() && binVersionAdvanced) {
+          return true;
+        }
+        const restoreMeta = {
+          credentialVersion: previousBinCredVersion ?? startCredVersion,
+          binVersion: previousBinVer ?? startBinVersion,
+        };
+        if (
+          writtenBinToken &&
+          typeof storage.storeArrayBufferIfUnchanged === "function"
+        ) {
+          const replaceStatus = await storage.storeArrayBufferIfUnchanged(
+            tokenId,
+            previousBin,
+            { expectedBinWriteToken: writtenBinToken },
+            restoreMeta,
+          );
+          return (
+            replaceStatus === "stored" ||
+            replaceStatus === "changed" ||
+            replaceStatus === "missing"
+          );
+        }
+        if (!hasCrossTabWebLocks() && versionAdvanced) {
+          return true;
+        }
+        if (typeof storage.storeArrayBuffer === "function") {
           const restored = await storage.storeArrayBuffer(
             tokenId,
             previousBin,
-            {
-              credentialVersion: getCredentialVersion(tokenId),
-              binVersion: getBinVersion(tokenId),
-            },
+            restoreMeta,
           );
           return Boolean(restored);
-        }
-        if (typeof storage.deleteArrayBuffer === "function") {
-          const deleted = await storage.deleteArrayBuffer(tokenId);
-          return deleted !== false;
         }
         return false;
       } catch (rollbackError) {
@@ -1101,37 +1370,108 @@ export const useTokenStore = defineStore("tokens", () => {
 
     if (options.binData) {
       if (
-        typeof storage.getArrayBuffer !== "function" ||
+        (typeof storage.getArrayBuffer !== "function" &&
+          typeof storage.getArrayBufferRecord !== "function") ||
         typeof storage.storeArrayBuffer !== "function"
       ) {
         return {
-          committed: false,
+          committed: false as const,
           stale: false,
           reason: "bin_write_failed" as const,
           binRolledBack: true,
         };
       }
-      previousBin = await storage.getArrayBuffer(tokenId);
+      if (typeof storage.getArrayBufferRecord === "function") {
+        const previousRecord = await storage.getArrayBufferRecord(tokenId);
+        hadPreviousRecord = Boolean(previousRecord);
+        previousBin = previousRecord?.data ?? null;
+        previousBinCredVersion = previousRecord?.credentialVersion ?? null;
+        previousBinVer = previousRecord?.binVersion ?? null;
+        previousBinWriteToken = previousRecord?.binWriteToken ?? null;
+      } else if (typeof storage.getArrayBuffer === "function") {
+        previousBin = await storage.getArrayBuffer(tokenId);
+        hadPreviousRecord = Boolean(previousBin);
+      }
       const beforeWriteCheck = checkCommitValidity();
       if (!beforeWriteCheck.ok) {
         return {
-          committed: false,
+          committed: false as const,
           stale: beforeWriteCheck.stale,
           reason: beforeWriteCheck.reason,
           binRolledBack: true,
+          ...("message" in beforeWriteCheck && beforeWriteCheck.message
+            ? { message: beforeWriteCheck.message }
+            : {}),
         };
       }
       const nextCredVersion =
         Math.max(getCredentialVersion(tokenId), credentialVersionSeed) + 1;
       const nextBinVersion =
         Math.max(getBinVersion(tokenId), binVersionSeed) + 1;
-      const saved = await storage.storeArrayBuffer(tokenId, options.binData, {
+      writtenBinToken = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const nextMeta = {
         credentialVersion: nextCredVersion,
         binVersion: nextBinVersion,
-      });
+        binWriteToken: writtenBinToken,
+      };
+      let saved = false;
+      if (
+        !hasCrossTabWebLocks() &&
+        hadPreviousRecord &&
+        typeof storage.storeArrayBufferIfUnchanged === "function"
+      ) {
+        const casStatus = await storage.storeArrayBufferIfUnchanged(
+          tokenId,
+          options.binData,
+          {
+            expectedBinWriteToken: previousBinWriteToken,
+            ...(options.expectedVersion !== undefined
+              ? {
+                  maxExpectedCredentialVersion: startCredVersion,
+                  maxExpectedBinVersion: startBinVersion,
+                }
+              : {}),
+          },
+          nextMeta,
+        );
+        if (casStatus === "changed" || casStatus === "missing") {
+          return {
+            committed: false as const,
+            stale: true,
+            reason: "stale" as const,
+            binRolledBack: true,
+          };
+        }
+        saved = casStatus === "stored";
+      } else if (
+        !hasCrossTabWebLocks() &&
+        !hadPreviousRecord &&
+        typeof storage.storeArrayBufferIfMissing === "function"
+      ) {
+        const casStatus = await storage.storeArrayBufferIfMissing(
+          tokenId,
+          options.binData,
+          nextMeta,
+        );
+        if (casStatus === "exists") {
+          return {
+            committed: false as const,
+            stale: true,
+            reason: "stale" as const,
+            binRolledBack: true,
+          };
+        }
+        saved = casStatus === "stored";
+      } else {
+        saved = await storage.storeArrayBuffer(
+          tokenId,
+          options.binData,
+          nextMeta,
+        );
+      }
       if (!saved) {
         return {
-          committed: false,
+          committed: false as const,
           stale: false,
           reason: "bin_write_failed" as const,
           binRolledBack: true,
@@ -1145,10 +1485,13 @@ export const useTokenStore = defineStore("tokens", () => {
       if (!afterWriteCheck.ok) {
         const binRolledBack = await rollbackBin();
         return {
-          committed: false,
+          committed: false as const,
           stale: afterWriteCheck.stale,
           reason: afterWriteCheck.reason,
           binRolledBack,
+          ...("message" in afterWriteCheck && afterWriteCheck.message
+            ? { message: afterWriteCheck.message }
+            : {}),
         };
       }
     }
@@ -1159,23 +1502,34 @@ export const useTokenStore = defineStore("tokens", () => {
     if (!applyResult.ok) {
       const binRolledBack = await rollbackBin();
       return {
-        committed: false,
+        committed: false as const,
         stale: false,
         reason: applyResult.reason,
         binRolledBack,
+        ...(applyResult.reason === "role_mismatch"
+          ? {
+              message:
+                "新 Token 对应的角色与当前账号不一致，请单独导入为新账号",
+            }
+          : {}),
         ...(applyResult.reason === "storage_write_failed"
           ? { error: applyResult.error }
           : {}),
       };
     }
 
-    if (
-      options.deleteOldBinKey &&
-      options.deleteOldBinKey !== tokenId &&
-      typeof storage.deleteArrayBuffer === "function"
-    ) {
+    if (options.deleteOldBinKey && options.deleteOldBinKey !== tokenId) {
       try {
-        await storage.deleteArrayBuffer(options.deleteOldBinKey);
+        if (
+          options.deleteOldBinWriteToken !== undefined &&
+          typeof storage.deleteArrayBufferIfUnchanged === "function"
+        ) {
+          await storage.deleteArrayBufferIfUnchanged(options.deleteOldBinKey, {
+            expectedBinWriteToken: options.deleteOldBinWriteToken,
+          });
+        } else if (typeof storage.deleteArrayBuffer === "function") {
+          await storage.deleteArrayBuffer(options.deleteOldBinKey);
+        }
       } catch (cleanupError) {
         wsLogger.warn(
           `清理旧 BIN 键失败 [${options.deleteOldBinKey}]:`,
@@ -1196,10 +1550,11 @@ export const useTokenStore = defineStore("tokens", () => {
     }
 
     return {
-      committed: true,
+      committed: true as const,
       stale: false,
       reason: null,
       token: applyResult.token,
+      ...(applyResult.binRestorePaused ? { binRestorePaused: true } : {}),
     };
   };
 
@@ -1231,8 +1586,12 @@ export const useTokenStore = defineStore("tokens", () => {
       const needsBin = Boolean(options.needsBin);
       const storage: CredentialBinStorage = options.binStorage ?? {
         getArrayBuffer,
+        getArrayBufferRecord,
         storeArrayBuffer,
+        storeArrayBufferIfMissing,
+        storeArrayBufferIfUnchanged,
         deleteArrayBuffer,
+        deleteArrayBufferIfUnchanged,
       };
       const existing = options.findExisting
         ? options.findExisting(gameTokens.value, selectedTokenId.value)
@@ -1245,11 +1604,13 @@ export const useTokenStore = defineStore("tokens", () => {
       if (existing) {
         let freshBin: ArrayBuffer | null = null;
         let tempBinKey: string | null = null;
+        let tempBinWriteToken: string | null | undefined;
 
         if (needsBin) {
           if (
             !role.id ||
-            typeof storage.getArrayBuffer !== "function" ||
+            (typeof storage.getArrayBuffer !== "function" &&
+              typeof storage.getArrayBufferRecord !== "function") ||
             typeof storage.storeArrayBuffer !== "function"
           ) {
             return {
@@ -1259,7 +1620,13 @@ export const useTokenStore = defineStore("tokens", () => {
               reason: "bin_storage_unavailable" as const,
             };
           }
-          freshBin = await storage.getArrayBuffer(role.id);
+          if (typeof storage.getArrayBufferRecord === "function") {
+            const tempRecord = await storage.getArrayBufferRecord(role.id);
+            freshBin = tempRecord?.data ?? null;
+            tempBinWriteToken = tempRecord?.binWriteToken ?? null;
+          } else if (typeof storage.getArrayBuffer === "function") {
+            freshBin = await storage.getArrayBuffer(role.id);
+          }
           if (
             !freshBin ||
             (freshBin instanceof ArrayBuffer && freshBin.byteLength === 0)
@@ -1297,6 +1664,7 @@ export const useTokenStore = defineStore("tokens", () => {
             binData: needsBin ? freshBin : null,
             binStorage: storage,
             deleteOldBinKey: tempBinKey,
+            deleteOldBinWriteToken: tempBinWriteToken,
             closeActiveConnection: true,
           },
           isActive,
@@ -1434,12 +1802,49 @@ export const useTokenStore = defineStore("tokens", () => {
   };
 
   // A newly imported token can change, but the game role ID remains stable.
-  const rememberRoleId = (tokenId: string, role: any) => {
+  const resolveActualTokenString = (rawToken: string): string => {
+    const parsed = parseBase64Token(rawToken);
+    return parsed.success ? parsed.data.actualToken : rawToken;
+  };
+
+  const rememberRoleId = (
+    tokenId: string,
+    role: any,
+    sourceActualToken?: string | null,
+  ) => {
     const roleId = role?.roleId;
     const identity = normalizeRoleId(roleId);
     if (!identity) return;
+    syncGameTokensFromStorage();
     const token = gameTokens.value.find((item) => item.id === tokenId);
-    if (token && normalizeRoleId(token.roleId) !== identity) {
+    if (!token) return;
+    // Ignore responses arriving from an outdated WebSocket whose token no longer
+    // matches the account's current token (e.g., right after editing Token).
+    if (
+      sourceActualToken &&
+      resolveActualTokenString(token.token) !== sourceActualToken
+    ) {
+      return;
+    }
+    const backup = pendingBinRestoreBackups.get(tokenId);
+    if (backup) {
+      if (backup.roleId && identity !== backup.roleId) {
+        pendingBinRestoreBackups.delete(tokenId);
+      } else if (backup.roleId && identity === backup.roleId) {
+        backup.pausedForRoleVerification = false;
+        backup.expectedToken = token.token;
+      } else if (
+        !backup.roleId &&
+        !backup.pausedForRoleVerification &&
+        token.token === backup.expectedToken
+      ) {
+        backup.roleId = identity;
+      }
+      // When backup.roleId is null AND pausedForRoleVerification is true, we never
+      // knew which role the old BIN belonged to, so any server roleId from the new
+      // token cannot prove a match -> keep paused until replaced or deleted.
+    }
+    if (normalizeRoleId(token.roleId) !== identity) {
       commitMetadataUpdate(tokenId, { roleId }).catch((error) => {
         wsLogger.warn(`保存角色 ID 失败 [${tokenId}]:`, error);
       });
@@ -1912,6 +2317,7 @@ export const useTokenStore = defineStore("tokens", () => {
                   binVersion: startBinVersion,
                   roleId: normalizeRoleId(latestAfterBinDelete.roleId),
                   name: latestAfterBinDelete.name || tokenId,
+                  expectedToken: latestAfterBinDelete.token,
                 });
               }
             }
@@ -1980,6 +2386,7 @@ export const useTokenStore = defineStore("tokens", () => {
                   binVersion: startBinVersion,
                   roleId: normalizeRoleId(latestAfterBinDelete.roleId),
                   name: latestAfterBinDelete.name || tokenId,
+                  expectedToken: latestAfterBinDelete.token,
                 });
               }
             }
@@ -2239,6 +2646,7 @@ export const useTokenStore = defineStore("tokens", () => {
       let updates: Partial<TokenData> | null = null;
       let binData: ArrayBuffer | null = null;
       let deleteOldBinKey: string | null = null;
+      let deleteOldBinWriteToken: string | null | undefined;
 
       if (refreshInput.importMethod === "url" && refreshInput.sourceUrl) {
         const data = await scheduleAuthUserRequest(async () => {
@@ -2305,10 +2713,19 @@ export const useTokenStore = defineStore("tokens", () => {
         let usedOldKey = false;
 
         if (!userToken && refreshInput.name) {
-          const tokenByName = await getArrayBuffer(refreshInput.name);
-          if (tokenByName) {
-            userToken = tokenByName;
-            usedOldKey = true;
+          if (typeof getArrayBufferRecord === "function") {
+            const legacyRecord = await getArrayBufferRecord(refreshInput.name);
+            if (legacyRecord?.data) {
+              userToken = legacyRecord.data;
+              deleteOldBinWriteToken = legacyRecord.binWriteToken;
+              usedOldKey = true;
+            }
+          } else {
+            const tokenByName = await getArrayBuffer(refreshInput.name);
+            if (tokenByName) {
+              userToken = tokenByName;
+              usedOldKey = true;
+            }
           }
         }
 
@@ -2371,6 +2788,7 @@ export const useTokenStore = defineStore("tokens", () => {
         updates: updates!,
         binData,
         deleteOldBinKey,
+        deleteOldBinWriteToken,
       });
 
       if (commit.stale) {
@@ -2392,11 +2810,13 @@ export const useTokenStore = defineStore("tokens", () => {
         return {
           status: "failed",
           message:
-            commit.reason === "bin_write_failed"
-              ? "迁移本地 BIN 凭据失败，已保留原凭据"
-              : commit.reason === "storage_write_failed"
-                ? "保存账号列表到本地存储失败（可能存储空间不足），已保留原凭据"
-                : "更新账号凭据失败",
+            commit.reason === "role_mismatch"
+              ? "刷新返回的 Token 对应角色与当前账号不一致，已保留原凭据"
+              : commit.reason === "bin_write_failed"
+                ? "迁移本地 BIN 凭据失败，已保留原凭据"
+                : commit.reason === "storage_write_failed"
+                  ? "保存账号列表到本地存储失败（可能存储空间不足），已保留原凭据"
+                  : "更新账号凭据失败",
         };
       }
       return {
@@ -2525,7 +2945,12 @@ export const useTokenStore = defineStore("tokens", () => {
 
       if (cmd === "role_getroleinforesp") {
         syncRandomSeedFromStatistics(tokenId, body, client);
-        rememberRoleId(tokenId, body?.role);
+        const connForClient =
+          wsConnections.value[tokenId] &&
+          toRaw(wsConnections.value[tokenId].client) === toRaw(client)
+            ? wsConnections.value[tokenId]
+            : null;
+        rememberRoleId(tokenId, body?.role, connForClient?.actualToken ?? null);
 
         // 更新头像
         if (body?.role?.headImg) {
@@ -2686,6 +3111,74 @@ export const useTokenStore = defineStore("tokens", () => {
   const generateSessionId = () =>
     `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
   const currentSessionId = generateSessionId();
+  const crossTabLeaseRevision = ref(0);
+  const liveConnectionLocks = new Map<string, () => void>();
+  const LIVE_CONNECTION_LOCK_PREFIX = "xyzw-ws-live:";
+
+  const hasLiveLockSupport = () =>
+    typeof navigator !== "undefined" &&
+    typeof navigator.locks?.request === "function" &&
+    typeof navigator.locks?.query === "function";
+
+  const liveConnectionLockName = (tokenId: string, sessionId: string) =>
+    `${LIVE_CONNECTION_LOCK_PREFIX}${tokenId}:${sessionId}`;
+
+  const releaseLiveConnectionLock = (tokenId: string) => {
+    const release = liveConnectionLocks.get(tokenId);
+    if (release) {
+      liveConnectionLocks.delete(tokenId);
+      try {
+        release();
+      } catch {
+        // Ignore release errors during teardown.
+      }
+    }
+  };
+
+  const releaseAllLiveConnectionLocks = () => {
+    for (const tokenId of Array.from(liveConnectionLocks.keys())) {
+      releaseLiveConnectionLock(tokenId);
+    }
+  };
+
+  const acquireLiveConnectionLock = async (
+    tokenId: string,
+  ): Promise<boolean> => {
+    if (!hasLiveLockSupport()) return false;
+    if (liveConnectionLocks.has(tokenId)) return true;
+    try {
+      let releaseLock: (() => void) | null = null;
+      let resolveEntered: (() => void) | null = null;
+      const entered = new Promise<void>((resolve) => {
+        resolveEntered = resolve;
+      });
+      const lockPromise = navigator.locks.request(
+        liveConnectionLockName(tokenId, currentSessionId),
+        () =>
+          new Promise<void>((resolve) => {
+            releaseLock = resolve;
+            resolveEntered?.();
+          }),
+      );
+      lockPromise.catch(() => {
+        if (releaseLock) {
+          if (liveConnectionLocks.get(tokenId) === releaseLock) {
+            liveConnectionLocks.delete(tokenId);
+          }
+        }
+        resolveEntered?.();
+      });
+      await entered;
+      if (releaseLock) {
+        liveConnectionLocks.set(tokenId, releaseLock);
+        return true;
+      }
+      return false;
+    } catch (error) {
+      wsLogger.warn(`获取活跃连接锁失败 [${tokenId}]:`, error);
+      return false;
+    }
+  };
 
   // 获取连接锁
   const acquireConnectionLock = async (
@@ -2733,6 +3226,9 @@ export const useTokenStore = defineStore("tokens", () => {
     sessionId: string = currentSessionId,
   ) => {
     const key = `ws_connection_${tokenId}`;
+    if (action === "disconnected" && sessionId === currentSessionId) {
+      releaseLiveConnectionLock(tokenId);
+    }
     try {
       const previous = JSON.parse(localStorage.getItem(key) || "null");
       if (
@@ -2741,7 +3237,16 @@ export const useTokenStore = defineStore("tokens", () => {
         previous.sessionId !== sessionId
       )
         return;
-      const state = { action, sessionId, timestamp: Date.now() };
+      const state: CrossTabConnectionState = {
+        action,
+        sessionId,
+        timestamp: Date.now(),
+        ...(sessionId === currentSessionId &&
+        (action === "connecting" || action === "connected") &&
+        liveConnectionLocks.has(tokenId)
+          ? { liveLock: true }
+          : {}),
+      };
       localStorage.setItem(key, JSON.stringify(state));
       if (activeConnections.value) {
         writeActiveConnections({
@@ -2749,6 +3254,7 @@ export const useTokenStore = defineStore("tokens", () => {
           [tokenId]: state,
         });
       }
+      crossTabLeaseRevision.value += 1;
     } catch (error) {
       wsLogger.warn("更新跨标签页连接状态失败", error);
     }
@@ -2756,6 +3262,8 @@ export const useTokenStore = defineStore("tokens", () => {
 
   // 检查是否有其他标签页的活跃连接
   const checkCrossTabConnection = (tokenId: string) => {
+    // 订阅响应式版本，确保跨标签页释放或僵尸租约清理后视图即时刷新
+    void crossTabLeaseRevision.value;
     const storageKey = `ws_connection_${tokenId}`;
     try {
       const stored = localStorage.getItem(storageKey);
@@ -2781,6 +3289,102 @@ export const useTokenStore = defineStore("tokens", () => {
   };
   const isConnectionActiveInAnotherTab = (tokenId: string) =>
     Boolean(checkCrossTabConnection(tokenId));
+
+  /**
+   * 核查本地残留的跨标签页连接租约：若声明持有浏览器活跃 Web Lock 的旧会话
+   * 已不在 navigator.locks.query().held 中（刷新、关闭、崩溃后浏览器自动释放），
+   * 则立即清理僵尸租约并唤醒等待中的恢复任务，避免误报「在其他网页登录」。
+   */
+  const reconcileStaleCrossTabLeases = async (
+    targetTokenId?: string,
+  ): Promise<boolean> => {
+    if (!hasLiveLockSupport() || typeof localStorage === "undefined") {
+      return false;
+    }
+    // Snapshot candidate leases BEFORE awaiting navigator.locks.query() so a
+    // brand-new live lease acquired during the query can never be misclassified
+    // as dead against a stale locks snapshot.
+    const keys = targetTokenId
+      ? [`ws_connection_${targetTokenId}`]
+      : listLocalStorageKeys().filter((key) =>
+          key.startsWith("ws_connection_"),
+        );
+    const candidates: Array<{
+      key: string;
+      id: string;
+      raw: string;
+      sessionId: string;
+    }> = [];
+    for (const key of keys) {
+      try {
+        const raw = localStorage.getItem(key);
+        if (!raw) continue;
+        const state = JSON.parse(raw) as Partial<CrossTabConnectionState>;
+        if (
+          !state?.sessionId ||
+          state.sessionId === currentSessionId ||
+          (state.action !== "connecting" && state.action !== "connected") ||
+          state.liveLock !== true
+        ) {
+          continue;
+        }
+        candidates.push({
+          key,
+          id: key.replace("ws_connection_", ""),
+          raw,
+          sessionId: state.sessionId,
+        });
+      } catch {
+        // Ignore malformed lease entries.
+      }
+    }
+    if (candidates.length === 0) {
+      return false;
+    }
+
+    let snapshot: { held?: Array<{ name?: string }> };
+    try {
+      snapshot = await navigator.locks.query();
+    } catch (error) {
+      wsLogger.warn("查询活跃连接锁状态失败:", error);
+      return false;
+    }
+    const heldNames = new Set(
+      (snapshot?.held || [])
+        .map((entry) => entry?.name)
+        .filter((name): name is string => typeof name === "string"),
+    );
+
+    const clearedIds = new Set<string>();
+    for (const candidate of candidates) {
+      if (
+        heldNames.has(liveConnectionLockName(candidate.id, candidate.sessionId))
+      ) {
+        continue;
+      }
+      try {
+        // Only remove if the exact pre-query lease is still present.
+        if (localStorage.getItem(candidate.key) === candidate.raw) {
+          localStorage.removeItem(candidate.key);
+          clearedIds.add(candidate.id);
+        }
+      } catch {
+        // Ignore storage errors during cleanup.
+      }
+    }
+
+    if (clearedIds.size > 0) {
+      pruneActiveConnections((id) => clearedIds.has(id));
+      crossTabLeaseRevision.value += 1;
+      for (const id of clearedIds) {
+        if (shouldKeepRecovering(id)) {
+          connectionRecovery.schedule(id, { reset: true, immediate: true });
+        }
+      }
+      return true;
+    }
+    return false;
+  };
 
   // A background tab can hold a Web Lock indefinitely. Stop waiting and
   // invalidate any callback that resumes after the deadline.
@@ -2887,6 +3491,7 @@ export const useTokenStore = defineStore("tokens", () => {
       );
       desiredConnections.delete(tokenId);
       connectionRecovery.cancel(tokenId);
+      releaseLiveConnectionLock(tokenId);
       accountGameData.remove(tokenId);
       const conn = wsConnections.value[tokenId];
       if (conn) {
@@ -2938,13 +3543,56 @@ export const useTokenStore = defineStore("tokens", () => {
     }
   };
   const handleVisibilityChange = () => {
-    if (document.visibilityState === "visible") restoreSelectedConnection();
+    if (document.visibilityState === "visible") {
+      reconcileStaleCrossTabLeases().catch(() => {});
+      restoreSelectedConnection();
+    }
+  };
+  /**
+   * 页面刷新（F5/Cmd+R）或关闭标签页时同步释放本页持有的所有跨标签页连接租约与本地连接，
+   * 防止刷新或关掉重开后因残留 ws_connection_* 租约被误判为「已在其他网页登录」。
+   */
+  const handlePageUnload = () => {
+    releaseAllLiveConnectionLocks();
+    const ownTokenIds = new Set<string>(Object.keys(wsConnections.value));
+    if (typeof localStorage !== "undefined") {
+      for (const key of listLocalStorageKeys()) {
+        if (!key.startsWith("ws_connection_")) continue;
+        try {
+          const raw = localStorage.getItem(key);
+          if (!raw) continue;
+          const parsed = JSON.parse(raw) as Partial<CrossTabConnectionState>;
+          if (
+            parsed?.sessionId === currentSessionId &&
+            (parsed.action === "connecting" || parsed.action === "connected")
+          ) {
+            ownTokenIds.add(key.replace("ws_connection_", ""));
+          }
+        } catch {
+          // Ignore malformed lease entries during page unload.
+        }
+      }
+    }
+    for (const tokenId of ownTokenIds) {
+      const conn = wsConnections.value[tokenId];
+      if (conn) {
+        conn.status = "disconnecting";
+        try {
+          conn.client?.disconnect?.();
+        } catch {
+          // Ignore transport teardown errors during page unload.
+        }
+      }
+      updateCrossTabConnectionState(tokenId, "disconnected");
+    }
   };
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", handleVisibilityChange);
   }
   if (typeof window !== "undefined" && window.addEventListener) {
     window.addEventListener("online", restoreSelectedConnection);
+    window.addEventListener("pagehide", handlePageUnload);
+    window.addEventListener("beforeunload", handlePageUnload);
   }
   onScopeDispose(() => {
     if (typeof document !== "undefined") {
@@ -2952,11 +3600,14 @@ export const useTokenStore = defineStore("tokens", () => {
     }
     if (typeof window !== "undefined" && window.removeEventListener) {
       window.removeEventListener("online", restoreSelectedConnection);
+      window.removeEventListener("pagehide", handlePageUnload);
+      window.removeEventListener("beforeunload", handlePageUnload);
       if (storageListener) {
         window.removeEventListener("storage", storageListener);
         storageListener = null;
       }
     }
+    releaseAllLiveConnectionLocks();
     connectionMonitor.stopMonitoring();
     connectionRecovery.dispose();
     gameTokensSyncListeners.delete(reconcileRemovedAccountConnections);
@@ -2970,6 +3621,7 @@ export const useTokenStore = defineStore("tokens", () => {
     base64Token: string,
     customWsUrl: string | null = null,
     fromRecovery = false,
+    forceTakeover = false,
   ) => {
     wsLogger.info(`开始创建连接: ${tokenId}`);
     const generation = connectionGeneration.get(tokenId) || 0;
@@ -3017,7 +3669,15 @@ export const useTokenStore = defineStore("tokens", () => {
           (connectionGeneration.get(tokenId) || 0) !== generation
         )
           return false;
-        if (checkCrossTabConnection(tokenId)) return false;
+        if (!forceTakeover && checkCrossTabConnection(tokenId)) {
+          await reconcileStaleCrossTabLeases(tokenId);
+          if (
+            !isActive() ||
+            (connectionGeneration.get(tokenId) || 0) !== generation
+          )
+            return false;
+          if (checkCrossTabConnection(tokenId)) return false;
+        }
         const previousConnection = wsConnections.value[tokenId];
         if (previousConnection) {
           wsLogger.debug(`优雅关闭现有连接: ${tokenId}`);
@@ -3046,7 +3706,24 @@ export const useTokenStore = defineStore("tokens", () => {
               selectedTokenId.value !== tokenId))
         )
           return false;
-        if (checkCrossTabConnection(tokenId)) return false;
+        if (!forceTakeover && checkCrossTabConnection(tokenId)) {
+          await reconcileStaleCrossTabLeases(tokenId);
+          if (
+            !isActive() ||
+            (connectionGeneration.get(tokenId) || 0) !== generation
+          )
+            return false;
+          if (checkCrossTabConnection(tokenId)) return false;
+        }
+        await acquireLiveConnectionLock(tokenId);
+        if (
+          !isActive() ||
+          (connectionGeneration.get(tokenId) || 0) !== generation ||
+          (!forceTakeover && checkCrossTabConnection(tokenId))
+        ) {
+          releaseLiveConnectionLock(tokenId);
+          return false;
+        }
         updateCrossTabConnectionState(tokenId, "connecting");
         return true;
       };
@@ -3583,6 +4260,7 @@ export const useTokenStore = defineStore("tokens", () => {
     retryCount = 0,
   ) => {
     try {
+      const sentActualToken = wsConnections.value[tokenId]?.actualToken ?? null;
       // 增加超时时间到15秒，并添加重试机制
       const timeout = 15000;
       const roleInfo = (await sendMessageWithPromise(
@@ -3594,7 +4272,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
       // 手动更新游戏数据（因为响应可能不会自动触发消息处理）
       if (roleInfo) {
-        rememberRoleId(tokenId, roleInfo.role);
+        rememberRoleId(tokenId, roleInfo.role, sentActualToken);
         const accountData = accountGameData.forToken(tokenId);
         accountData.value.roleInfo = roleInfo;
         accountData.value.lastUpdated = new Date().toISOString();
@@ -3841,7 +4519,15 @@ export const useTokenStore = defineStore("tokens", () => {
           // pending-import BINs) before clearing, aborting immediately if backup
           // or DB open fails so pending BINs are never lost on rollback.
           resetStaleIdbError();
-          const backedUpBins = new Map<string, ArrayBuffer>();
+          const backedUpBins = new Map<
+            string,
+            {
+              data: ArrayBuffer;
+              credentialVersion: number | null;
+              binVersion: number | null;
+              binWriteToken: string | null;
+            }
+          >();
           const hasGetAllKeys = typeof getAllKeys === "function";
           let existingIdbKeys: string[] = [];
           if (hasGetAllKeys) {
@@ -3882,11 +4568,30 @@ export const useTokenStore = defineStore("tokens", () => {
             await Promise.all(
               keysToBackup.map(async (key) => {
                 try {
-                  const buf = await getArrayBuffer(key);
-                  if (buf) {
-                    backedUpBins.set(key, buf);
-                  } else if (hasGetAllKeys && existingKeySet.has(key)) {
-                    backupFailed = true;
+                  if (typeof getArrayBufferRecord === "function") {
+                    const rec = await getArrayBufferRecord(key);
+                    if (rec?.data) {
+                      backedUpBins.set(key, {
+                        data: rec.data,
+                        credentialVersion: rec.credentialVersion,
+                        binVersion: rec.binVersion,
+                        binWriteToken: rec.binWriteToken,
+                      });
+                    } else if (hasGetAllKeys && existingKeySet.has(key)) {
+                      backupFailed = true;
+                    }
+                  } else {
+                    const buf = await getArrayBuffer(key);
+                    if (buf) {
+                      backedUpBins.set(key, {
+                        data: buf,
+                        credentialVersion: null,
+                        binVersion: null,
+                        binWriteToken: null,
+                      });
+                    } else if (hasGetAllKeys && existingKeySet.has(key)) {
+                      backupFailed = true;
+                    }
                   }
                 } catch {
                   backupFailed = true;
@@ -3912,10 +4617,36 @@ export const useTokenStore = defineStore("tokens", () => {
           let binCleared = true;
           try {
             if (hasGetAllKeys) {
-              if (keysToBackup.length > 0) {
+              const keysToDelete =
+                typeof deleteArrayBufferIfUnchanged === "function"
+                  ? Array.from(
+                      new Set([
+                        ...keysToBackup,
+                        ...previousTokens.map((token) => token.id),
+                      ]),
+                    )
+                  : keysToBackup;
+              if (keysToDelete.length > 0) {
                 resetStaleIdbError();
                 const results = await Promise.all(
-                  keysToBackup.map((key) => deleteArrayBuffer(key)),
+                  keysToDelete.map(async (key) => {
+                    const snap = backedUpBins.get(key);
+                    if (typeof deleteArrayBufferIfUnchanged === "function") {
+                      const condStatus = await deleteArrayBufferIfUnchanged(
+                        key,
+                        snap
+                          ? {
+                              expectedBinWriteToken: snap.binWriteToken,
+                              expectedData: snap.data,
+                            }
+                          : { expectedData: null },
+                      );
+                      return (
+                        condStatus === "deleted" || condStatus === "missing"
+                      );
+                    }
+                    return (await deleteArrayBuffer(key)) !== false;
+                  }),
                 );
                 if (results.includes(false) || hasIdbError()) {
                   binCleared = false;
@@ -3936,10 +4667,15 @@ export const useTokenStore = defineStore("tokens", () => {
           const restoreBackedUpBins = async () => {
             let allBinsRestored = true;
             await Promise.all(
-              Array.from(backedUpBins.entries()).map(async ([key, buf]) => {
+              Array.from(backedUpBins.entries()).map(async ([key, snap]) => {
                 try {
-                  const ok = await storeArrayBuffer(key, buf);
-                  if (!ok) allBinsRestored = false;
+                  const status = await restoreBinIfMissing(
+                    key,
+                    snap.data,
+                    snap.credentialVersion ?? getCredentialVersion(key),
+                    snap.binVersion ?? getBinVersion(key),
+                  );
+                  if (status === "error") allBinsRestored = false;
                 } catch {
                   allBinsRestored = false;
                 }
@@ -4181,15 +4917,17 @@ export const useTokenStore = defineStore("tokens", () => {
   ): Promise<{
     ok: boolean;
     restoredIds: string[];
+    pausedIds: string[];
     failures: ExpiredCleanupFailure[];
   }> => {
     if (pendingBinRestoreBackups.size === 0) {
-      return { ok: true, restoredIds: [], failures: [] };
+      return { ok: true, restoredIds: [], pausedIds: [], failures: [] };
     }
     try {
       return await withStoreWriteLease(async () => {
         syncGameTokensFromStorage();
         const restoredIds: string[] = [];
+        const pausedIds: string[] = [];
         const failures: ExpiredCleanupFailure[] = [];
         const entries = Array.from(pendingBinRestoreBackups.entries());
         await Promise.all(
@@ -4205,6 +4943,37 @@ export const useTokenStore = defineStore("tokens", () => {
               getBinVersion(tokenId) !== backup.binVersion
             ) {
               pendingBinRestoreBackups.delete(tokenId);
+              return;
+            }
+            // Cross-tab token edit without replacing BIN: verify the latest token
+            // belongs to the same role before allowing automatic BIN restoration.
+            if (latest.token !== backup.expectedToken) {
+              const parsedLatestRoleId = extractRoleIdFromSessionToken(
+                latest.token,
+              );
+              if (
+                backup.roleId &&
+                parsedLatestRoleId &&
+                parsedLatestRoleId !== backup.roleId
+              ) {
+                pendingBinRestoreBackups.delete(tokenId);
+                return;
+              }
+              if (
+                backup.roleId &&
+                parsedLatestRoleId &&
+                parsedLatestRoleId === backup.roleId
+              ) {
+                backup.expectedToken = latest.token;
+                backup.pausedForRoleVerification = false;
+              } else {
+                backup.pausedForRoleVerification = true;
+                pausedIds.push(tokenId);
+                return;
+              }
+            }
+            if (backup.pausedForRoleVerification) {
+              pausedIds.push(tokenId);
               return;
             }
             const restoreStatus = await restoreBinIfMissing(
@@ -4248,6 +5017,7 @@ export const useTokenStore = defineStore("tokens", () => {
         return {
           ok: failures.length === 0,
           restoredIds,
+          pausedIds,
           failures,
         };
       }, options.lockWaitTimeoutMs);
@@ -4256,6 +5026,7 @@ export const useTokenStore = defineStore("tokens", () => {
       return {
         ok: false,
         restoredIds: [],
+        pausedIds: [],
         failures: Array.from(pendingBinRestoreBackups.entries()).map(
           ([tokenId, backup]) => ({
             tokenId,
@@ -4438,6 +5209,9 @@ export const useTokenStore = defineStore("tokens", () => {
           }
         });
 
+        // 核查已关闭/崩溃标签页遗留的活跃锁租约
+        reconcileStaleCrossTabLeases().catch(() => {});
+
         // 清理过期的跨标签页状态（超过5分钟）
         pruneActiveConnections((tokenId, state) => {
           if (now - state.timestamp > 300000) {
@@ -4528,6 +5302,7 @@ export const useTokenStore = defineStore("tokens", () => {
       await Promise.all(cleanupPromises);
 
       // 清理所有锁和状态
+      releaseAllLiveConnectionLocks();
       connectionLocks.value = {};
       writeActiveConnections({});
       desiredConnections.clear();
@@ -4575,6 +5350,7 @@ export const useTokenStore = defineStore("tokens", () => {
       }
       if (event.key?.startsWith("ws_connection_")) {
         const tokenId = event.key.replace("ws_connection_", "");
+        crossTabLeaseRevision.value += 1;
         wsLogger.debug(
           `检测到跨标签页连接状态变化: ${tokenId}`,
           event.newValue,
@@ -4605,12 +5381,14 @@ export const useTokenStore = defineStore("tokens", () => {
             }
 
             if (
-              newState.action === "connected" &&
+              (newState.action === "connecting" ||
+                newState.action === "connected") &&
               newState.sessionId !== currentSessionId &&
-              localConnection?.status === "connected"
+              (localConnection?.status === "connected" ||
+                localConnection?.status === "connecting")
             ) {
               wsLogger.info(
-                `检测到其他标签页已连接同一token，关闭本地连接: ${tokenId}`,
+                `检测到其他标签页已接管同一token，关闭本地连接: ${tokenId}`,
               );
               closeWebSocketConnectionAsync(tokenId);
             }
@@ -4643,6 +5421,24 @@ export const useTokenStore = defineStore("tokens", () => {
     connectionMonitor.startMonitoring();
     setupCrossTabListener();
     registerRateLimiterCallback();
+    reconcileStaleCrossTabLeases().catch(() => {});
+  };
+
+  /**
+   * 玩家主动在当前标签页接管该账号连接（在同一跨标签页连接锁内直接覆写租约并建立连接，
+   * 避免释放锁期间被第三标签页抢占；仍在运行的原标签页收到 storage 通知后会立刻断开旧连接）。
+   */
+  const takeOverCrossTabConnection = async (tokenId: string) => {
+    syncGameTokensFromStorage();
+    const token = gameTokens.value.find((entry) => entry.id === tokenId);
+    if (!token) return null;
+    return createWebSocketConnection(
+      tokenId,
+      token.token,
+      token.wsUrl,
+      false,
+      true,
+    );
   };
 
   // 初始化
@@ -4904,6 +5700,8 @@ export const useTokenStore = defineStore("tokens", () => {
     closeWebSocketConnectionIfCurrent,
     getWebSocketStatus,
     isConnectionActiveInAnotherTab,
+    reconcileStaleCrossTabLeases,
+    takeOverCrossTabConnection,
     getWebSocketClient,
     sendMessage,
     sendMessageWithPromise,
@@ -4927,6 +5725,10 @@ export const useTokenStore = defineStore("tokens", () => {
     retryPendingBinRestores,
     lastExpiredCleanupResult,
     getPendingBinRestoreIds: () => Array.from(pendingBinRestoreBackups.keys()),
+    getPausedBinRestoreIds: () =>
+      Array.from(pendingBinRestoreBackups.entries())
+        .filter(([, backup]) => Boolean(backup.pausedForRoleVerification))
+        .map(([id]) => id),
     upgradeTokenToPermanent,
     initConnectionCoordination,
     initTokenStore,

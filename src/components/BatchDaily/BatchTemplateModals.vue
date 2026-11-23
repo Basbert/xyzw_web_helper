@@ -173,6 +173,15 @@ const handleSelectGroupForApply = (groupId) => {
             />
           </div>
           <div class="switch-row">
+            <span class="switch-label">逐鹿盐山自动竞猜</span>
+            <n-select
+              v-model:value="templateDraft.apexGuessEnabled"
+              :options="optionalSwitchOptions"
+              size="small"
+              style="width: 140px"
+            />
+          </div>
+          <div class="switch-row">
             <span class="switch-label">黑市购买物品</span>
             <n-switch v-model:value="templateDraft.blackMarketPurchase" />
           </div>

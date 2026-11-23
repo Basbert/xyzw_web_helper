@@ -150,6 +150,13 @@ watch(
             />
           </div>
           <div class="switch-row">
+            <span class="switch-label">逐鹿盐山自动竞猜</span>
+            <n-switch
+              v-model:value="settingsDraft.apexGuessEnabled"
+              aria-label="逐鹿盐山自动竞猜"
+            />
+          </div>
+          <div class="switch-row">
             <span class="switch-label">黑市购买物品</span>
             <n-switch v-model:value="settingsDraft.blackMarketPurchase" />
           </div>

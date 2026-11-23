@@ -1,3 +1,4 @@
+import { runDailyApexGuessCheck } from "../apexGuessHelper.js";
 import { runDailyDreamPurchase } from "../dailyDreamPurchase.js";
 import { DailyTaskRunner } from "../dailyTaskRunner.js";
 import { markDreamShopChecked } from "../dreamShopCheckState.js";
@@ -21,6 +22,13 @@ export function runDailyTasks({
       }),
     {
       onDreamShopChecked: markDreamShopChecked,
+      runApexDailyGuess: ({ tokenId, checkInterrupted, log }) =>
+        runDailyApexGuessCheck({
+          tokenStore,
+          tokenId,
+          checkInterrupted,
+          log,
+        }),
       runDreamShopPurchases: ({ tokenId, checkActive, sleep, log }) =>
         runDailyDreamPurchase({
           accountId: tokenId,

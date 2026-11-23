@@ -31,9 +31,19 @@
     </div>
 
     <!-- 恢复提示区域 -->
-    <p v-if="recoveryNote" class="container recovery-note" role="status">
-      {{ recoveryNote }}
-    </p>
+    <div v-if="recoveryNote" class="container recovery-note" role="status">
+      <span>{{ recoveryNote }}</span>
+      <n-button
+        v-if="isBlockedByOtherTab"
+        text
+        type="primary"
+        size="small"
+        style="margin-left: 10px"
+        @click="takeOverConnection"
+      >
+        在此页接管连接
+      </n-button>
+    </div>
 
     <!-- 功能模块网格 -->
     <div class="features-grid-section">
@@ -117,6 +127,16 @@ const isConnected = computed(() => {
   return connectionStatus.value === "connected";
 });
 
+const isBlockedByOtherTab = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  return Boolean(
+    tokenId &&
+    connectionStatus.value !== "connected" &&
+    connectionStatus.value !== "connecting" &&
+    tokenStore.isConnectionActiveInAnotherTab?.(tokenId),
+  );
+});
+
 const recoveryNote = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
   const state = tokenId && tokenStore.connectionRecoveryStatus?.[tokenId];
@@ -124,9 +144,11 @@ const recoveryNote = computed(() => {
     if (connectionStatus.value === "connecting")
       return "正在重新连接助手，请稍候。";
     if (tokenStore.isConnectionActiveInAnotherTab(tokenId))
-      return "该账号可能仍在另一个助手标签页连接；关闭那个页面后会自动重试。";
+      return "该账号正在另一个助手标签页连接；关闭那个页面后会自动重试，或直接在此页接管。";
     return "暂未连接，正在自动重试。切到后台时浏览器可能暂停页面或延迟重连。";
   }
+  if (isBlockedByOtherTab.value)
+    return "该账号正在另一个助手标签页连接；关闭那个页面后会自动重试，或直接在此页接管。";
   if (state === "restored")
     return "连接已恢复，请先核对中断任务的状态和游戏内结果，再决定是否继续。";
   return "";
@@ -177,6 +199,48 @@ const connectWebSocket = async () => {
     if (isCurrentAttempt()) {
       console.error("WebSocket连接失败:", error);
       message.error("助手连接未能建立，请稍后重试");
+    }
+  } finally {
+    if (connectingAccount.value?.attempt === attempt)
+      connectingAccount.value = null;
+  }
+};
+
+const takeOverConnection = async () => {
+  if (!tokenStore.selectedToken) return;
+  const selected = tokenStore.selectedToken;
+  const tokenId = selected.id;
+  if (
+    ["connected", "connecting"].includes(
+      tokenStore.getWebSocketStatus(tokenId),
+    ) ||
+    connectingAccount.value?.tokenId === tokenId
+  )
+    return;
+  const attempt = ++connectionAttempt;
+  connectingAccount.value = { tokenId, attempt };
+  const isCurrentAttempt = () =>
+    !pageUnmounted &&
+    attempt === connectionAttempt &&
+    tokenStore.selectedToken?.id === tokenId;
+  try {
+    const client =
+      typeof tokenStore.takeOverCrossTabConnection === "function"
+        ? await tokenStore.takeOverCrossTabConnection(tokenId)
+        : await tokenStore.createWebSocketConnection(
+            tokenId,
+            selected.token,
+            selected.wsUrl,
+          );
+    if (!isCurrentAttempt()) return;
+    const currentStatus = tokenStore.getWebSocketStatus(tokenId);
+    if (!client && !["connected", "connecting"].includes(currentStatus)) {
+      message.warning("暂时无法接管助手连接，请检查网络或账号状态");
+    }
+  } catch (error) {
+    if (isCurrentAttempt()) {
+      console.error("接管WebSocket连接失败:", error);
+      message.error("接管助手连接失败，请稍后重试");
     }
   } finally {
     if (connectingAccount.value?.attempt === attempt)

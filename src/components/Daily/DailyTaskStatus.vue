@@ -215,6 +215,14 @@
                 aria-label="咸鱼大冲关（每周答题）"
               />
             </div>
+
+            <div class="switch-row">
+              <span class="switch-label">逐鹿盐山自动竞猜</span>
+              <n-switch
+                v-model:value="settings.apexGuessEnabled"
+                aria-label="逐鹿盐山自动竞猜"
+              />
+            </div>
           </div>
         </section>
 
@@ -691,10 +699,14 @@ const runDailyFix = async () => {
     });
 
     const incomplete = result.incomplete;
+    const reminders = Array.isArray(result.reminders)
+      ? result.reminders.filter(Boolean)
+      : [];
     const details = [];
     if (incomplete) details.push(`${incomplete} 项待处理或核对`);
     if (result.failed) details.push(`${result.failed} 个步骤执行失败`);
     if (result.skipped) details.push(`${result.skipped} 个步骤已跳过`);
+    if (reminders.length) details.push(...reminders);
     runSummary.value = {
       title:
         incomplete || result.failed ? "本轮结束，请核对结果" : "本轮执行完成",
@@ -708,6 +720,9 @@ const runDailyFix = async () => {
     } else {
       log("=== 任务执行完成 ===", "success");
       message.success(`${accountName}的每日任务执行完成`);
+    }
+    for (const reminderText of reminders) {
+      message.info(reminderText);
     }
   } catch (error) {
     runSummary.value = {

@@ -39,6 +39,7 @@ export class DailyTaskRunner {
     this.loadConfig = options.loadConfig || loadDailyTaskConfig;
     this.runDreamShopPurchases = options.runDreamShopPurchases || null;
     this.onDreamShopChecked = options.onDreamShopChecked || null;
+    this.runApexDailyGuess = options.runApexDailyGuess || null;
     this.hasCustomSleep = typeof options.sleep === "function";
     this.sleep =
       options.sleep ||
@@ -1113,7 +1114,32 @@ export class DailyTaskRunner {
       });
     }
 
-    const summary = { completed: 0, skipped: 0, failed: 0, deferred: 0 };
+    const summary = {
+      completed: 0,
+      skipped: 0,
+      failed: 0,
+      deferred: 0,
+      reminders: [],
+    };
+    if (
+      settings.apexGuessEnabled !== false &&
+      typeof this.runApexDailyGuess === "function"
+    ) {
+      taskList.push({
+        name: "逐鹿盐山竞猜",
+        execute: async () => {
+          const outcome = await this.runApexDailyGuess({
+            tokenId,
+            checkInterrupted: () => this.throwIfInterrupted(),
+            log: (msg, type = "info") => this.log(msg, type),
+          });
+          if (outcome?.reminder) {
+            summary.reminders.push(outcome.reminder);
+          }
+          return outcome?.ok !== false;
+        },
+      });
+    }
     let supplementalIncomplete = 0;
     let arenaSequenceIncomplete = false;
     const attemptedConditions = new Set();

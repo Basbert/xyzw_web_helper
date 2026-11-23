@@ -48,7 +48,29 @@ export { apexConstantConf };
 
 const DAY_MS = 86400000;
 const WEEK_MS = 7 * DAY_MS;
+const CHINA_OFFSET_MS = 8 * 3600000;
 const DATE_RE = /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/;
+
+/**
+ * 将真实 UTC 纪元毫秒映射为本地时钟表示的北京时间（UTC+8）毫秒，
+ * 与 getDateZeroTime 的本地墙钟坐标系保持一致，确保非 UTC+8 设备（如 UTC、美西）
+ * 也能准确命中逐鹿盐山北京时间赛程窗口。
+ * @param {number} utcNowMs Real UTC epoch milliseconds.
+ * @returns {number} Equivalent local wall-clock ms representing China (UTC+8) time.
+ */
+export function toChinaWallClockMs(utcNowMs = Date.now()) {
+  if (!Number.isFinite(utcNowMs)) return Number.NaN;
+  const china = new Date(utcNowMs + CHINA_OFFSET_MS);
+  return new Date(
+    china.getUTCFullYear(),
+    china.getUTCMonth(),
+    china.getUTCDate(),
+    china.getUTCHours(),
+    china.getUTCMinutes(),
+    china.getUTCSeconds(),
+    china.getUTCMilliseconds(),
+  ).getTime();
+}
 
 /** 单场赛程状态。数值与客户端 EApexScheduleStatus 完全一致。 */
 export const ApexScheduleStatus = {
@@ -824,6 +846,115 @@ export function getNextApexGuessWindow(nowMs) {
         ),
     ) || null
   );
+}
+
+/** Format a local-clock HH:MM string consistent with getDateZeroTime. */
+const formatClockTime = (ms) => {
+  const d = new Date(ms);
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+
+/** Format a same-day open window range like "00:00–19:00" or "19:45–21:30". */
+export function formatApexTimeRange(startMs, endMs) {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return "";
+  return `${formatClockTime(startMs)}–${formatClockTime(endMs)}`;
+}
+
+/**
+ * Inspect today's elimination guess schedule (all guessable knockout stages
+ * whose serverDate falls on the same day as nowMs).
+ * Used for auto-expanding the Apex guess card on guess days and reminding
+ * players when daily tasks run outside an active guess window.
+ * @param {number} [nowMs] Calibrated server/local time in milliseconds.
+ */
+export function getTodayApexGuessSchedule(nowMs = Date.now()) {
+  const empty = {
+    isGuessDay: false,
+    season: -1,
+    stages: [],
+    openStages: [],
+    upcomingStages: [],
+    endedStages: [],
+  };
+  if (!Number.isFinite(nowMs)) return empty;
+  const season = getCurrentSeason(nowMs);
+  if (season <= 0) return empty;
+  const nowDate = new Date(nowMs);
+  const todayZero = new Date(
+    nowDate.getFullYear(),
+    nowDate.getMonth(),
+    nowDate.getDate(),
+    0,
+    0,
+    0,
+    0,
+  ).getTime();
+
+  const stages = [];
+  const seenStages = new Set();
+  for (const round of getAvailableRounds(season, nowMs)) {
+    const matches = getRoundSchedules(round, season);
+    for (let index = 0; index < matches.length; index++) {
+      const conf = matches[index];
+      if (!APEX_TAOTAI_STAGES.includes(conf.stage)) continue;
+      const key = `${conf.season}:${conf.round}:${conf.stage}`;
+      if (seenStages.has(key)) continue;
+      if (getAdvanceNum(conf.round, conf.season, conf.stage) <= 0) continue;
+      const dayZero = getDateZeroTime(conf.date);
+      if (!Number.isFinite(dayZero) || dayZero !== todayZero) continue;
+      if (!Number.isFinite(conf.fightTime)) continue;
+      seenStages.add(key);
+
+      const previous = index > 0 ? matches[index - 1] : null;
+      const startsAt =
+        previous?.date === conf.date
+          ? dayZero + Math.max(0, Number(previous.endTime) || 0) * 1000
+          : dayZero;
+      const locksAt = Number.isFinite(conf.lockTime)
+        ? dayZero + conf.lockTime * 1000
+        : dayZero + conf.fightTime * 1000;
+      const closesAt = dayZero + conf.fightTime * 1000;
+      const endsAt = Number.isFinite(conf.endTime)
+        ? dayZero + conf.endTime * 1000
+        : closesAt;
+      if (startsAt >= closesAt) continue;
+
+      const state = getScheduleStatus(conf.id, nowMs);
+      const isOpen = canGuessNow(state);
+      const isUpcoming = state === ApexScheduleStatus.None && nowMs < closesAt;
+      const isClosed =
+        state === ApexScheduleStatus.Fighting ||
+        state === ApexScheduleStatus.Completed;
+
+      stages.push({
+        season: conf.season,
+        round: conf.round,
+        stage: conf.stage,
+        scheduleId: conf.id,
+        title: getStageName(conf.stage),
+        startsAt,
+        locksAt,
+        closesAt,
+        endsAt,
+        timeRange: formatApexTimeRange(startsAt, closesAt),
+        state,
+        isOpen,
+        isUpcoming,
+        isClosed,
+      });
+    }
+  }
+
+  stages.sort((a, b) => a.startsAt - b.startsAt || a.scheduleId - b.scheduleId);
+  return {
+    isGuessDay: stages.length > 0,
+    season,
+    stages,
+    openStages: stages.filter((item) => item.isOpen),
+    upcomingStages: stages.filter((item) => item.isUpcoming),
+    endedStages: stages.filter((item) => item.isClosed),
+  };
 }
 
 /**

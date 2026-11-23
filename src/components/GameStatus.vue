@@ -136,9 +136,15 @@
       id="daily-apex-target"
       v-show="activeSection === 'daily'"
       class="apex-guess-details"
+      :open="apexDetailsOpen"
       tabindex="-1"
+      @toggle="onApexDetailsToggle"
     >
-      <summary>
+      <summary
+        @click="apexDetailsUserToggled = true"
+        @keydown.enter="apexDetailsUserToggled = true"
+        @keydown.space="apexDetailsUserToggled = true"
+      >
         逐鹿盐山 · 竞猜
         <span class="apex-summary-status">{{ apexGuessSummary }}</span>
       </summary>
@@ -147,6 +153,7 @@
           :active="activeSection === 'daily'"
           @nav-to-apex="activeSection = 'apexChallengeGroup'"
           @status-change="apexGuessSummary = $event"
+          @state-change="apexGuessDetailState = $event"
         />
       </div>
     </details>
@@ -423,6 +430,10 @@ import {
 import { useRoute } from "vue-router";
 import { useShanghaiClock } from "@/hooks/useShanghaiClock";
 import { useTokenStore } from "@/stores/tokenStore";
+import {
+  getTodayApexGuessSchedule,
+  toChinaWallClockMs,
+} from "@/utils/apexRules";
 import { getCurrentActivityWeek } from "@/utils/batch/viewHelpers";
 import { runBottleAndHangUp } from "@/utils/bottleAndHangUp";
 
@@ -537,6 +548,8 @@ const message = useMessage();
 const bottleHelperCard = ref(null);
 const hangUpStatusCard = ref(null);
 const apexGuessSummary = ref("检查中");
+const apexGuessDetailState = ref(null);
+const apexDetailsUserToggled = ref(false);
 const combinedBusy = ref(false);
 const combinedProgress = ref("");
 const combinedRunningName = ref("");
@@ -569,6 +582,33 @@ const shanghaiNow = useShanghaiClock();
 const isWeirdTowerWeek = computed(
   () => getCurrentActivityWeek(shanghaiNow.value) === "黑市周",
 );
+const shouldAutoExpandApex = computed(() => {
+  const today = getTodayApexGuessSchedule(
+    toChinaWallClockMs(shanghaiNow.value),
+  );
+  const state = apexGuessDetailState.value;
+  return Boolean(
+    today.isGuessDay ||
+    state?.hasOpenGuesses ||
+    (state?.claimState === "ready" && state?.claimableRewards?.length > 0),
+  );
+});
+const apexDetailsOpen = ref(shouldAutoExpandApex.value);
+watch(
+  shouldAutoExpandApex,
+  (shouldOpen) => {
+    if (!apexDetailsUserToggled.value) {
+      apexDetailsOpen.value = shouldOpen;
+    }
+  },
+  { immediate: true },
+);
+const onApexDetailsToggle = (event) => {
+  const nextOpen = Boolean(event?.target?.open);
+  if (nextOpen !== apexDetailsOpen.value) {
+    apexDetailsOpen.value = nextOpen;
+  }
+};
 
 const stopCombinedDailyAction = () => {
   if (!combinedBusy.value) return;
@@ -706,6 +746,15 @@ let dreamObserver;
 const openReminder = async (kind) => {
   if (kind === "camp") activeSection.value = "campChallengeGroup";
   if (kind === "legionWar") activeSection.value = "saltFieldGroup";
+  if (kind === "apex") {
+    activeSection.value = "daily";
+    apexDetailsOpen.value = true;
+    await nextTick();
+    const target = document.getElementById("daily-apex-target");
+    if (target) target.open = true;
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ behavior: "auto", block: "start" });
+  }
   if (kind === "daily") {
     activeSection.value = "daily";
     await nextTick();

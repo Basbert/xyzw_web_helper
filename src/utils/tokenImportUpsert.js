@@ -103,8 +103,12 @@ async function upsertSingleRole({
   role,
   tokenStore,
   getArrayBuffer,
+  getArrayBufferRecord,
   storeArrayBuffer,
+  storeArrayBufferIfMissing,
+  storeArrayBufferIfUnchanged,
   deleteArrayBuffer,
+  deleteArrayBufferIfUnchanged,
 }) {
   const needsBin = requiresBinRefreshSource(role);
 
@@ -117,8 +121,12 @@ async function upsertSingleRole({
         findExistingTokenForRole(tokens, role, selectedId),
       binStorage: {
         getArrayBuffer,
+        getArrayBufferRecord,
         storeArrayBuffer,
+        storeArrayBufferIfMissing,
+        storeArrayBufferIfUnchanged,
         deleteArrayBuffer,
+        deleteArrayBufferIfUnchanged,
       },
     });
     if (!commit?.committed) {
@@ -174,16 +182,24 @@ async function upsertSingleRole({
   if (existing) {
     let freshBin = null;
     let tempBinKey = null;
+    let tempBinWriteToken;
 
     if (needsBin) {
       if (
         !role.id ||
-        typeof getArrayBuffer !== "function" ||
+        (typeof getArrayBuffer !== "function" &&
+          typeof getArrayBufferRecord !== "function") ||
         typeof storeArrayBuffer !== "function"
       ) {
         throw new Error("导入失败：本地 BIN 凭据存储不可用，已保留原有账号");
       }
-      freshBin = await getArrayBuffer(role.id);
+      if (typeof getArrayBufferRecord === "function") {
+        const tempRecord = await getArrayBufferRecord(role.id);
+        freshBin = tempRecord?.data ?? null;
+        tempBinWriteToken = tempRecord?.binWriteToken ?? null;
+      } else {
+        freshBin = await getArrayBuffer(role.id);
+      }
       if (
         !freshBin ||
         (freshBin instanceof ArrayBuffer && freshBin.byteLength === 0)
@@ -215,10 +231,15 @@ async function upsertSingleRole({
         binData: existing.id !== role.id ? freshBin : null,
         binStorage: {
           getArrayBuffer,
+          getArrayBufferRecord,
           storeArrayBuffer,
+          storeArrayBufferIfMissing,
+          storeArrayBufferIfUnchanged,
           deleteArrayBuffer,
+          deleteArrayBufferIfUnchanged,
         },
         deleteOldBinKey: tempBinKey,
+        deleteOldBinWriteToken: tempBinWriteToken,
         closeActiveConnection: true,
       });
       if (!commit?.committed) {
@@ -249,9 +270,13 @@ async function upsertSingleRole({
 
     let binMigrated = false;
     let previousBin = null;
+    let fallbackWriteToken = null;
     if (needsBin && existing.id !== role.id && freshBin) {
       previousBin = await getArrayBuffer(existing.id);
-      const moved = await storeArrayBuffer(existing.id, freshBin);
+      fallbackWriteToken = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      const moved = await storeArrayBuffer(existing.id, freshBin, {
+        binWriteToken: fallbackWriteToken,
+      });
       if (!moved) {
         throw new Error(
           "导入失败：写入账号 BIN 凭据失败，已保留原有账号与连接",
@@ -266,9 +291,29 @@ async function upsertSingleRole({
       if (binMigrated) {
         try {
           if (previousBin) {
-            binRolledBack = Boolean(
-              await storeArrayBuffer(existing.id, previousBin),
-            );
+            if (typeof storeArrayBufferIfUnchanged === "function") {
+              const status = await storeArrayBufferIfUnchanged(
+                existing.id,
+                previousBin,
+                { expectedBinWriteToken: fallbackWriteToken },
+              );
+              binRolledBack =
+                status === "stored" ||
+                status === "changed" ||
+                status === "missing";
+            } else {
+              binRolledBack = Boolean(
+                await storeArrayBuffer(existing.id, previousBin),
+              );
+            }
+          } else if (typeof deleteArrayBufferIfUnchanged === "function") {
+            const status = await deleteArrayBufferIfUnchanged(existing.id, {
+              expectedBinWriteToken: fallbackWriteToken,
+            });
+            binRolledBack =
+              status === "deleted" ||
+              status === "changed" ||
+              status === "missing";
           } else if (typeof deleteArrayBuffer === "function") {
             binRolledBack = (await deleteArrayBuffer(existing.id)) !== false;
           } else {
@@ -327,8 +372,12 @@ export async function upsertImportedRoleTokens({
   roles = [],
   tokenStore,
   getArrayBuffer,
+  getArrayBufferRecord,
   storeArrayBuffer,
+  storeArrayBufferIfMissing,
+  storeArrayBufferIfUnchanged,
   deleteArrayBuffer,
+  deleteArrayBufferIfUnchanged,
   allowPartial = false,
 }) {
   // Snapshot the list before async awaits so mutating the caller's array
@@ -348,8 +397,12 @@ export async function upsertImportedRoleTokens({
         role,
         tokenStore,
         getArrayBuffer,
+        getArrayBufferRecord,
         storeArrayBuffer,
+        storeArrayBufferIfMissing,
+        storeArrayBufferIfUnchanged,
         deleteArrayBuffer,
+        deleteArrayBufferIfUnchanged,
       });
       if (outcome.status === "updated") updatedCount++;
       else addedCount++;

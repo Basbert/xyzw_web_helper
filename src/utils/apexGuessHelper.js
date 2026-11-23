@@ -13,6 +13,8 @@ import {
   getCurrentSeason,
   getGuessTabs,
   getNextApexGuessWindow,
+  getTodayApexGuessSchedule,
+  toChinaWallClockMs,
 } from "./apexRules.js";
 
 const TIMEOUT_READ = 10000;
@@ -213,11 +215,17 @@ export async function getApexGuessStatus(tokenStore, tokenId, options = {}) {
     tokenId,
     options.checkInterrupted,
   );
-  return buildApexGuessStatus(info);
+  const nowValue =
+    typeof options.getNowMs === "function"
+      ? options.getNowMs()
+      : Number.isFinite(options.nowMs)
+        ? options.nowMs
+        : Date.now();
+  return buildApexGuessStatus(info, nowValue);
 }
 
-function openTabNow(info, open, tab) {
-  const now = calibrateServerTime(Date.now(), info.resetTime?.day);
+function openTabNow(info, open, tab, nowMs = Date.now()) {
+  const now = calibrateServerTime(nowMs, info.resetTime?.day);
   return resolveOpenGuesses(now).some(
     (entry) =>
       entry.season === open.season &&
@@ -257,7 +265,13 @@ export async function runApexAutoGuess({
   tokenId,
   onProgress = () => {},
   checkInterrupted = () => {},
+  nowMs = null,
+  getNowMs: customGetNowMs = null,
 }) {
+  const getNowMs =
+    typeof customGetNowMs === "function"
+      ? customGetNowMs
+      : () => (Number.isFinite(nowMs) ? nowMs : Date.now());
   return withApexGuessLock(tokenId, async () => {
     const result = {
       outcome: "partial",
@@ -276,9 +290,9 @@ export async function runApexAutoGuess({
     try {
       onProgress("正在检查逐鹿盐山状态…");
       info = await fetchApexInfo(tokenStore, tokenId, checkInterrupted);
-      const initial = buildApexGuessStatus(info);
+      const initial = buildApexGuessStatus(info, getNowMs());
       const openRounds = resolveOpenGuesses(
-        calibrateServerTime(Date.now(), info.resetTime?.day),
+        calibrateServerTime(getNowMs(), info.resetTime?.day),
       );
       if (!openRounds.length) {
         result.outcome = "no-open";
@@ -415,7 +429,7 @@ export async function runApexAutoGuess({
                 ApexAction.GUESS,
                 (queuedMs) => {
                   checkInterrupted();
-                  if (!openTabNow(info, open, tab)) {
+                  if (!openTabNow(info, open, tab, getNowMs())) {
                     const error = new Error("该阶段已结束，停止竞猜");
                     error.notSent = true;
                     throw error;
@@ -461,7 +475,7 @@ export async function runApexAutoGuess({
             tokenId,
             checkInterrupted,
           );
-          result.verifiedStatus = buildApexGuessStatus(after);
+          result.verifiedStatus = buildApexGuessStatus(after, getNowMs());
         } catch (error) {
           if (error?.interrupted) throw error;
           issue ||= "最终竞猜状态未能核实，请刷新后查看";
@@ -488,4 +502,224 @@ export async function runApexAutoGuess({
     result.message = resultMessage(result);
     return result;
   });
+}
+
+const emptyTodaySchedule = () => ({
+  isGuessDay: false,
+  season: -1,
+  stages: [],
+  openStages: [],
+  upcomingStages: [],
+  endedStages: [],
+});
+
+const safeToChinaWallClockMs = (utcNowMs) => {
+  if (typeof toChinaWallClockMs === "function") {
+    return toChinaWallClockMs(utcNowMs);
+  }
+  if (!Number.isFinite(utcNowMs)) return Number.NaN;
+  const china = new Date(utcNowMs + 8 * 3600000);
+  return new Date(
+    china.getUTCFullYear(),
+    china.getUTCMonth(),
+    china.getUTCDate(),
+    china.getUTCHours(),
+    china.getUTCMinutes(),
+    china.getUTCSeconds(),
+    china.getUTCMilliseconds(),
+  ).getTime();
+};
+
+const safeTodaySchedule = (nowMs) =>
+  typeof getTodayApexGuessSchedule === "function"
+    ? getTodayApexGuessSchedule(nowMs)
+    : emptyTodaySchedule();
+
+function formatLaterStageReminder(todaySchedule) {
+  const nextStage = todaySchedule?.upcomingStages?.[0];
+  if (!nextStage) return "";
+  return `逐鹿盐山竞猜提醒：今日后续 ${nextStage.title} 将于 ${nextStage.timeRange} 开放竞猜`;
+}
+
+function formatOutsideWindowReminder(todaySchedule, nextGuess, nowMs) {
+  const nextStage = todaySchedule?.upcomingStages?.[0];
+  if (nextStage) {
+    return `逐鹿盐山竞猜提醒：今日有竞猜，当前不在开放时段；下场 ${nextStage.title} 将于 ${nextStage.timeRange} 开放竞猜`;
+  }
+  const ranges = (todaySchedule?.stages || [])
+    .map((stage) => `${stage.title} ${stage.timeRange}`)
+    .join("、");
+  const nextText = formatNextApexGuess(nextGuess, nowMs);
+  return `逐鹿盐山竞猜提醒：今日竞猜时段已结束${ranges ? `（${ranges}）` : ""}${nextText ? `，下次预计 ${nextText}` : ""}`;
+}
+
+/**
+ * 每日任务中的逐鹿盐山竞猜核查：
+ * - 非竞猜日：直接跳过，避免无谓消耗 apex_* 频控配额；
+ * - 竞猜日且处于开放时段内：自动完成待竞猜场次，若同日后续还有场次一并给出提醒；
+ * - 竞猜日但当前不在开放时段内：给出明确时段提醒，不将每日任务判为失败；
+ * - 非中断类请求异常（限流、超时、未解锁逐鹿等）：降级为告警并标记待核对，不中断整轮每日任务。
+ */
+export async function runDailyApexGuessCheck({
+  tokenStore,
+  tokenId,
+  checkInterrupted = () => {},
+  log = () => {},
+  nowMs = null,
+}) {
+  checkInterrupted();
+  const hasFixedNow = Number.isFinite(nowMs);
+  const wsServerTime = Number(
+    tokenStore?.wsConnections?.[tokenId]?.client?.serverTime,
+  );
+  const liveClockOffsetMs =
+    !hasFixedNow && Number.isFinite(wsServerTime) && wsServerTime > 0
+      ? wsServerTime - Date.now()
+      : 0;
+  // Always evaluate in China (UTC+8) wall-clock coordinates while keeping the
+  // production clock live across multi-step rate-limited guesses.
+  const getChinaNowMs = hasFixedNow
+    ? () => safeToChinaWallClockMs(nowMs)
+    : () => safeToChinaWallClockMs(Date.now() + liveClockOffsetMs);
+
+  const initialChinaNowMs = getChinaNowMs();
+  const localToday = safeTodaySchedule(initialChinaNowMs);
+  const localOpen = resolveOpenGuesses(initialChinaNowMs);
+
+  if (!localToday.isGuessDay && localOpen.length === 0) {
+    log("逐鹿盐山：今日无竞猜赛程，跳过", "info");
+    return { status: "not-guess-day", ok: true, reminder: "" };
+  }
+
+  try {
+    log("正在检查今日逐鹿盐山竞猜状态…", "info");
+    const status = await getApexGuessStatus(tokenStore, tokenId, {
+      checkInterrupted,
+      getNowMs: getChinaNowMs,
+    });
+    const serverNowMs = status.serverNowMs ?? getChinaNowMs();
+    const serverToday = safeTodaySchedule(serverNowMs);
+
+    if (status.hasOpenGuesses) {
+      if (status.pendingStagesCount > 0) {
+        const result = await runApexAutoGuess({
+          tokenStore,
+          tokenId,
+          checkInterrupted,
+          getNowMs: getChinaNowMs,
+          onProgress: (text) => log(`逐鹿盐山：${text}`, "info"),
+        });
+        if (result.outcome === "completed") {
+          log(`逐鹿盐山竞猜：${result.message}`, "success");
+          const laterReminder = formatLaterStageReminder(
+            safeTodaySchedule(
+              result.verifiedStatus?.serverNowMs ?? getChinaNowMs(),
+            ),
+          );
+          if (laterReminder) log(laterReminder, "info");
+          return {
+            status: "completed",
+            ok: true,
+            reminder: laterReminder,
+            result,
+          };
+        }
+        if (result.outcome !== "no-open") {
+          log(`逐鹿盐山竞猜：${result.message}`, "warning");
+          return {
+            status: result.outcome,
+            ok: false,
+            reminder: "",
+            result,
+          };
+        }
+        // Fall through to outside-window reminder when window closed mid-check.
+        const latestNow = result.verifiedStatus?.serverNowMs ?? getChinaNowMs();
+        const latestToday = safeTodaySchedule(latestNow);
+        if (latestToday.isGuessDay) {
+          const reminder = formatOutsideWindowReminder(
+            latestToday,
+            result.verifiedStatus?.scheduleMismatch
+              ? null
+              : result.verifiedStatus?.nextGuess,
+            latestNow,
+          );
+          log(reminder, "warning");
+          return { status: "outside-window", ok: true, reminder, result };
+        }
+        log("逐鹿盐山：当前已无开放竞猜，跳过", "info");
+        return { status: "not-guess-day", ok: true, reminder: "", result };
+      }
+
+      if (status.uncertainStagesCount > 0) {
+        log(
+          "逐鹿盐山竞猜：部分竞猜状态无法确认，请前往逐鹿盐山卡片核对",
+          "warning",
+        );
+        return { status: "partial", ok: false, reminder: "" };
+      }
+
+      log("逐鹿盐山竞猜：当前开放阶段已全部竞猜，跳过", "success");
+      const laterReminder = formatLaterStageReminder(serverToday);
+      if (laterReminder) log(laterReminder, "info");
+      return { status: "already-done", ok: true, reminder: laterReminder };
+    }
+
+    if (serverToday.isGuessDay) {
+      const reminder = formatOutsideWindowReminder(
+        serverToday,
+        status.scheduleMismatch ? null : status.nextGuess,
+        serverNowMs,
+      );
+      log(reminder, "warning");
+      return { status: "outside-window", ok: true, reminder };
+    }
+
+    log("逐鹿盐山：服务器日期暂无开放竞猜，跳过", "info");
+    return { status: "not-guess-day", ok: true, reminder: "" };
+  } catch (error) {
+    if (error?.interrupted) throw error;
+    log(
+      `逐鹿盐山竞猜检查未完成：${error?.message || "请求失败"}（不影响其他每日任务）`,
+      "warning",
+    );
+    return { status: "partial", ok: false, reminder: "" };
+  }
+}
+
+/**
+ * Describe today's Apex (逐鹿盐山) guessing reminder when today is a knockout
+ * guessing day — noting active open windows, upcoming same-day windows when
+ * currently outside the betting period, or ended windows with the next date.
+ */
+export function describeApexGuessReminder({
+  nowMs = Date.now(),
+  apexGuessEnabled = true,
+} = {}) {
+  const chinaNowMs = safeToChinaWallClockMs(nowMs);
+  const today = safeTodaySchedule(chinaNowMs);
+  if (!today.isGuessDay) return "";
+  const autoEnabled = apexGuessEnabled !== false;
+
+  if (today.openStages.length > 0) {
+    const openText = today.openStages
+      .map((stage) => `${stage.title}（${stage.timeRange}）`)
+      .join("、");
+    const laterStage = today.upcomingStages[0];
+    const laterSuffix = laterStage
+      ? `；同日 ${laterStage.title} 将于 ${laterStage.timeRange} 开放`
+      : "";
+    return autoEnabled
+      ? `今日为逐鹿盐山竞猜日，${openText} 正在开放，执行每日任务时可自动竞猜${laterSuffix}。`
+      : `今日为逐鹿盐山竞猜日，${openText} 正在开放（当前已关闭日常自动竞猜，可前往竞猜卡片手动一键完成${laterSuffix}）。`;
+  }
+
+  if (today.upcomingStages.length > 0) {
+    const nextStage = today.upcomingStages[0];
+    return `今日为逐鹿盐山竞猜日，当前不在竞猜时段；下场 ${nextStage.title} 将于 ${nextStage.timeRange} 开放竞猜。`;
+  }
+
+  const nextWindow = getNextApexGuessWindow(chinaNowMs);
+  const nextText = formatNextApexGuess(nextWindow, chinaNowMs);
+  return `今日逐鹿盐山竞猜时段已结束${nextText ? `，下次预计 ${nextText}` : ""}，可前往查看对阵或领取竞猜奖励。`;
 }

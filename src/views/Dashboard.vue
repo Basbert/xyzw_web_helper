@@ -64,6 +64,15 @@
         >
           <span>{{ accountNotice.text }}</span>
           <n-button
+            v-if="accountNotice.showTakeover"
+            size="tiny"
+            type="primary"
+            secondary
+            @click="takeOverSelectedAccount"
+          >
+            在此页接管连接
+          </n-button>
+          <n-button
             v-if="accountNotice.showRelogin"
             size="tiny"
             type="warning"
@@ -263,6 +272,12 @@ const openReminder = (kind) => {
   if (kind === "legionWar") {
     return router.push("/admin/legion-war");
   }
+  if (kind === "apex") {
+    return router.push({
+      path: "/admin/game-features",
+      query: { daily: "apex" },
+    });
+  }
   if (kind === "daily") {
     return router.push({
       path: "/admin/game-features",
@@ -418,7 +433,7 @@ watch(
   { immediate: true },
 );
 
-const connectSelectedAccount = async () => {
+const connectSelectedAccount = async ({ silent = false } = {}) => {
   const token = tokenStore.selectedToken;
   if (!token || isConnected.value || isConnecting.value) return;
 
@@ -430,14 +445,20 @@ const connectSelectedAccount = async () => {
       token.wsUrl,
     );
     if (tokenStore.selectedToken?.id !== token.id) return;
-    if (!client && tokenStore.getWebSocketStatus(token.id) !== "connected") {
+    if (
+      !client &&
+      !["connected", "connecting"].includes(
+        tokenStore.getWebSocketStatus(token.id),
+      ) &&
+      !silent
+    ) {
       message.warning("暂时无法建立连接，请检查账号状态或稍后重试");
     }
   } catch {
-    if (tokenStore.selectedToken?.id === token.id)
+    if (tokenStore.selectedToken?.id === token.id && !silent)
       message.error("连接未能建立，请稍后重试");
   } finally {
-    connectingAccount.value = null;
+    if (connectingAccount.value === token.id) connectingAccount.value = null;
   }
 };
 
@@ -501,6 +522,37 @@ const maintenanceSummary = computed(() => {
   return parts.length ? parts.join(" · ") : "等待更新";
 });
 
+const takeOverSelectedAccount = async () => {
+  const token = tokenStore.selectedToken;
+  if (!token || isConnected.value || isConnecting.value) return;
+  const tokenId = token.id;
+  connectingAccount.value = tokenId;
+  try {
+    const client =
+      typeof tokenStore.takeOverCrossTabConnection === "function"
+        ? await tokenStore.takeOverCrossTabConnection(tokenId)
+        : await tokenStore.createWebSocketConnection(
+            tokenId,
+            token.token,
+            token.wsUrl,
+          );
+    if (tokenStore.selectedToken?.id !== tokenId) return;
+    if (
+      !client &&
+      !["connected", "connecting"].includes(
+        tokenStore.getWebSocketStatus(tokenId),
+      )
+    ) {
+      message.warning("暂时无法接管连接，请检查账号状态或稍后重试");
+    }
+  } catch {
+    if (tokenStore.selectedToken?.id === tokenId)
+      message.error("接管连接失败，请稍后重试");
+  } finally {
+    if (connectingAccount.value === tokenId) connectingAccount.value = null;
+  }
+};
+
 const accountNotice = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
   if (!tokenId || isConnected.value) return null;
@@ -511,6 +563,13 @@ const accountNotice = computed(() => {
       type: "warning",
       text: "当前账号登录凭据已失效，请前往账号管理扫码或验证码原地刷新（无需清除账号）。",
       showRelogin: true,
+    };
+  }
+  if (tokenStore.isConnectionActiveInAnotherTab?.(tokenId)) {
+    return {
+      type: "info",
+      text: "该账号正在另一个助手标签页连接；关闭那个页面后会自动重试，或直接在此页接管。",
+      showTakeover: true,
     };
   }
   const recovery = tokenStore.connectionRecoveryStatus?.[tokenId];
@@ -578,6 +637,8 @@ const handleVisibilityTick = () => {
   }
 };
 
+let dashboardUnmounted = false;
+
 // 生命周期
 onMounted(async () => {
   // 确保有Token
@@ -589,26 +650,35 @@ onMounted(async () => {
   // 初始化Token数据
   tokenStore.initTokenStore();
 
-  // 进入首页时自动为当前选中账号建立连接，减少每次手动点“连接”
-  const selected = tokenStore.selectedToken;
-  if (
-    selected &&
-    tokenStore.getWebSocketStatus(selected.id) === "disconnected" &&
-    tokenStore.connectionRecoveryStatus?.[selected.id] !== "waiting" &&
-    !tokenStore.isConnectionActiveInAnotherTab?.(selected.id)
-  ) {
-    connectSelectedAccount();
-  }
-
   document.addEventListener("visibilitychange", handleVisibilityTick);
   secondTimer = window.setInterval(() => {
     if (isConnected.value && document.visibilityState === "visible") {
       secondTickMs.value = Date.now();
     }
   }, 1000);
+
+  // 先核查已关闭或崩溃标签页遗留的僵尸连接租约，避免刷新或重开后误判为其他网页占用
+  let selected = tokenStore.selectedToken;
+  if (selected) {
+    await tokenStore.reconcileStaleCrossTabLeases?.(selected.id);
+  }
+  if (dashboardUnmounted) return;
+
+  // 进入首页时自动为当前选中账号建立连接（若另一页正在占用，也会登记恢复队列，关闭那页后自动重试）
+  selected = tokenStore.selectedToken;
+  if (
+    selected &&
+    tokenStore.getWebSocketStatus(selected.id) === "disconnected" &&
+    tokenStore.connectionRecoveryStatus?.[selected.id] !== "waiting"
+  ) {
+    connectSelectedAccount({
+      silent: Boolean(tokenStore.isConnectionActiveInAnotherTab?.(selected.id)),
+    });
+  }
 });
 
 onUnmounted(() => {
+  dashboardUnmounted = true;
   document.removeEventListener("visibilitychange", handleVisibilityTick);
   if (secondTimer) {
     window.clearInterval(secondTimer);

@@ -13,6 +13,7 @@ export const DAILY_TASK_DEFAULTS = Object.freeze({
   claimLegacy: true,
   claimEmail: true,
   weeklyQuizEnabled: true,
+  apexGuessEnabled: true,
   blackMarketPurchase: true,
   dreamShopPurchase: true,
   commandDelay: 500,
@@ -44,6 +45,7 @@ export const SAFE_DAILY_TASK_DEFAULTS = Object.freeze({
   blackMarketPurchase: false,
   dreamShopPurchase: false,
   weeklyQuizEnabled: false,
+  apexGuessEnabled: false,
 });
 
 const executionDefaults = {

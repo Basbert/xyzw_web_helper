@@ -116,7 +116,15 @@ import {
 
 const $emit = defineEmits(["cancel", "ok"]);
 
-const { storeArrayBuffer, getArrayBuffer, deleteArrayBuffer } = useIndexedDB();
+const {
+  storeArrayBuffer,
+  storeArrayBufferIfMissing,
+  storeArrayBufferIfUnchanged,
+  getArrayBuffer,
+  getArrayBufferRecord,
+  deleteArrayBuffer,
+  deleteArrayBufferIfUnchanged,
+} = useIndexedDB();
 
 const cancel = () => {
   roleList.value = [];
@@ -317,8 +325,12 @@ const handleImport = async () => {
       roles: rolesToImport,
       tokenStore,
       getArrayBuffer,
+      getArrayBufferRecord,
       storeArrayBuffer,
+      storeArrayBufferIfMissing,
+      storeArrayBufferIfUnchanged,
       deleteArrayBuffer,
+      deleteArrayBufferIfUnchanged,
       allowPartial: true,
     });
     roleList.value = pruneSucceededImportRoles(

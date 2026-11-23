@@ -1239,6 +1239,7 @@ const currentSettings = reactive({
   blackMarketPurchase: true,
   dreamShopPurchase: true,
   weeklyQuizEnabled: true,
+  apexGuessEnabled: true,
 });
 
 // Task Template State
@@ -1255,6 +1256,7 @@ const TEMPLATE_INHERIT = "inherit";
 const OPTIONAL_TEMPLATE_KEYS = [
   "claimLegacy",
   "weeklyQuizEnabled",
+  "apexGuessEnabled",
   "dreamShopPurchase",
 ];
 const BASE_TEMPLATE_DEFAULTS = {
@@ -1272,6 +1274,7 @@ const BASE_TEMPLATE_DEFAULTS = {
   claimLegacy: TEMPLATE_INHERIT,
   dreamShopPurchase: TEMPLATE_INHERIT,
   weeklyQuizEnabled: TEMPLATE_INHERIT,
+  apexGuessEnabled: TEMPLATE_INHERIT,
 };
 const buildTemplateDraft = (settings = {}) => {
   const draft = { ...BASE_TEMPLATE_DEFAULTS, ...(settings || {}) };

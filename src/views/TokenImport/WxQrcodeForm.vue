@@ -177,7 +177,15 @@ import { encodeCombUserBin } from "@/utils/xyzwRuntime";
 // 定义事件
 const emit = defineEmits(["cancel", "ok"]);
 const tokenStore = useTokenStore();
-const { storeArrayBuffer, getArrayBuffer, deleteArrayBuffer } = useIndexedDB();
+const {
+  storeArrayBuffer,
+  storeArrayBufferIfMissing,
+  storeArrayBufferIfUnchanged,
+  getArrayBuffer,
+  getArrayBufferRecord,
+  deleteArrayBuffer,
+  deleteArrayBufferIfUnchanged,
+} = useIndexedDB();
 
 const message = useMessage();
 const isImporting = ref(false);
@@ -644,8 +652,12 @@ const handleImport = async () => {
       roles: rolesToImport,
       tokenStore,
       getArrayBuffer,
+      getArrayBufferRecord,
       storeArrayBuffer,
+      storeArrayBufferIfMissing,
+      storeArrayBufferIfUnchanged,
       deleteArrayBuffer,
+      deleteArrayBufferIfUnchanged,
       allowPartial: true,
     });
     roleList.value = pruneSucceededImportRoles(

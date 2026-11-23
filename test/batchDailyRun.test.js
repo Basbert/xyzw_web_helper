@@ -44,6 +44,11 @@ async function runDailyTasksWithFixture(context, options) {
   const { runDailyTasks } = await loadModule(
     new URL("../src/utils/daily/runDailyTasks.js", import.meta.url),
     {
+      "../apexGuessHelper.js": {
+        runDailyApexGuessCheck:
+          context.runDailyApexGuessCheck ||
+          (async () => ({ status: "not-guess-day", ok: true, reminder: "" })),
+      },
       "../dailyTaskRunner.js": { DailyTaskRunner: context.DailyTaskRunner },
       "../dailyDreamPurchase.js": {
         runDailyDreamPurchase: (request) =>

@@ -1380,12 +1380,20 @@ const saveEdit = async () => {
               expectedVersion: payload.expectedVersion,
               expectedToken: payload.expectedToken,
               expectedCreatedAt: payload.expectedCreatedAt,
+              closeActiveConnection: true,
             }
           : {}),
       });
       if (commit?.stale) {
         message.warning(
           "该账号在编辑期间已更新过登录凭据，已保留最新凭据，请重新打开编辑框确认",
+        );
+        return;
+      }
+      if (commit?.reason === "role_mismatch") {
+        message.warning(
+          commit.message ||
+            "新 Token 对应的角色与当前账号不一致，请单独导入为新账号",
         );
         return;
       }
@@ -1397,6 +1405,15 @@ const saveEdit = async () => {
       }
       if (!commit?.committed) {
         message.error("账号不存在或更新失败，请刷新后重试");
+        return;
+      }
+      if (commit?.binRestorePaused) {
+        message.info(
+          "Token信息已更新；新Token暂无法确认角色身份，已保留待恢复旧BIN并暂停恢复，连接确认角色后再处理",
+        );
+        showEditModal.value = false;
+        editingToken.value = null;
+        editingSnapshot.value = null;
         return;
       }
     } else {
