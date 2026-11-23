@@ -10110,4 +10110,320 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       "doVote must NOT resend apex_vote after 200400 backoff crosses support cutoff",
     );
   });
+
+  test("Round15 P1: apex_guess enqueued 10ms before cutoff and dequeued 40ms after cutoff is cancelled as notSent without hitting socket.send or cancelling sibling queued commands", async () => {
+    const actualMap = await import("../src/utils/apexStageMap.js");
+    const rules = await loadModule(
+      new URL("../src/utils/apexRules.js", import.meta.url),
+      { "./apexStageMap": actualMap },
+    );
+    const rewardState = await import("../src/utils/apexRewardState.js");
+
+    // Start 10ms BEFORE 64强赛 cutoff (2026-11-23 19:00:00.000+08:00)
+    let mockWallMs = Date.parse("2026-11-23T18:59:59.990+08:00");
+    let mockPerfMs = 700_000;
+    const RealDate = Date;
+    class MockDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(mockWallMs);
+        else super(...args);
+      }
+      static now() {
+        return mockWallMs;
+      }
+    }
+
+    const wireCommands = [];
+    class QueueSpyWebSocket {
+      static OPEN = 1;
+      static CLOSED = 3;
+      constructor(url) {
+        this.url = url;
+        this.readyState = QueueSpyWebSocket.OPEN;
+        QueueSpyWebSocket.last = this;
+      }
+      send(bin) {
+        wireCommands.push(bin);
+      }
+      close() {
+        this.readyState = QueueSpyWebSocket.CLOSED;
+      }
+    }
+
+    const timers = [];
+    const { XyzwWebSocketClient } = await loadModule(
+      new URL("../src/utils/xyzwWebSocket.js", import.meta.url),
+      {
+        "./bonProtocol.js": {
+          g_utils: {
+            getEnc: () => ({}),
+            encode: (raw) => raw.cmd,
+            parse: (b) => b,
+          },
+        },
+        "./helperTaskRunner.js": { sleep: async () => {} },
+        "./logger.js": {
+          gameLogger: {
+            debug() {},
+            info() {},
+            warn() {},
+            error() {},
+            verbose() {},
+          },
+          wsLogger: {
+            debug() {},
+            info() {},
+            warn() {},
+            error() {},
+            verbose() {},
+            wsMessage() {},
+          },
+        },
+        "@/stores/cache": {
+          $CacheManager: {
+            getCache: () => ({ get: async (_k, fn) => fn(_k) }),
+            delCache() {},
+          },
+        },
+      },
+      {
+        Date: MockDate,
+        performance: { now: () => mockPerfMs },
+        WebSocket: QueueSpyWebSocket,
+        setTimeout: (fn, delay) => {
+          const id = timers.length + 1;
+          timers.push({ id, fn, delay, cleared: false });
+          return id;
+        },
+        clearTimeout: (id) => {
+          const item = timers.find((t) => t.id === id);
+          if (item) item.cleared = true;
+        },
+        setInterval: () => 1,
+        clearInterval() {},
+      },
+    );
+
+    const serverClockMod = await loadModule(
+      new URL("../src/utils/serverClock.js", import.meta.url),
+      {},
+      { Date: MockDate, performance: { now: () => mockPerfMs } },
+    );
+    const apexHelper = await loadModule(
+      new URL("../src/utils/apexGuessHelper.js", import.meta.url),
+      {
+        "./apexRules.js": rules,
+        "./apexRateLimit.js": {
+          ApexAction: { READ: "read", GUESS: "guess" },
+          isApexRateLimited: () => false,
+          runApexAction: async (_a, task) => task(0),
+        },
+        "./apexRewardState.js": rewardState,
+      },
+      { Date: MockDate, performance: { now: () => mockPerfMs } },
+    );
+
+    const wsClient = new XyzwWebSocketClient({
+      url: "wss://example.test/agent",
+    });
+    wsClient.init();
+    QueueSpyWebSocket.last.onopen();
+    wsClient.serverTime = mockWallMs;
+    wsClient.serverTimeSampledAt = mockPerfMs;
+
+    // 1. Default daily / runApexAutoGuess path through real XyzwWebSocketClient sendQueue
+    const tokenStore = {
+      selectedToken: { id: "acc-q" },
+      wsConnections: { "acc-q": { status: "connected", client: wsClient } },
+      getWebSocketStatus: () => "connected",
+      sendMessageWithPromise: (id, cmd, params, timeout, options) => {
+        if (cmd === "apex_getroleinfo") {
+          return Promise.resolve({
+            apexRoleInfo: { guessMap: {}, resetTime: { season: 1 } },
+          });
+        }
+        if (cmd === "apex_getguesslist") {
+          return Promise.resolve({
+            apexGuessList: [
+              [
+                { teamId: "team-hot", name: "热门队", cheerCnt: 900 },
+                { teamId: "team-cold", name: "冷门队", cheerCnt: 100 },
+              ],
+            ],
+            last: true,
+          });
+        }
+        return wsClient.sendWithPromise(cmd, params, timeout, options);
+      },
+    };
+
+    const autoGuessPromise = apexHelper.runApexAutoGuess({
+      tokenStore,
+      tokenId: "acc-q",
+    });
+    // Allow microtasks to enqueue apex_guess at 18:59:59.990 (10ms before cutoff)
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(wsClient.sendQueue.length, 1);
+    assert.equal(wsClient.sendQueue[0].cmd, "apex_guess");
+
+    // Queue an unrelated sibling command right behind apex_guess
+    const siblingPromise = wsClient.sendWithPromise(
+      "role_getroleinfo",
+      {},
+      5000,
+    );
+    assert.equal(wsClient.sendQueue.length, 2);
+
+    // Advance clock +50ms -> now 19:00:00.040 (40ms AFTER cutoff!), then fire the 50ms queue loop
+    mockWallMs += 50;
+    mockPerfMs += 50;
+    const firstTick = timers.findLast((t) => !t.cleared && t.delay === 50);
+    assert.ok(firstTick);
+    await firstTick.fn();
+
+    const autoResult = await autoGuessPromise;
+    assert.equal(autoResult.outcome, "partial");
+    assert.equal(autoResult.entries[0]?.status, "not-sent");
+    assert.match(autoResult.message, /已结束/);
+    assert.equal(
+      wireCommands.includes("apex_guess"),
+      false,
+      "apex_guess dequeued 40ms after cutoff must NOT call socket.send()",
+    );
+    assert.equal(
+      wsClient.wireSeq,
+      0,
+      "cancelled apex_guess must NOT consume wireSeq",
+    );
+
+    // Next queue tick MUST still transmit the sibling role_getroleinfo cleanly!
+    const secondTick = timers.findLast((t) => !t.cleared && t.delay === 50);
+    assert.ok(secondTick);
+    await secondTick.fn();
+    assert.deepEqual(wireCommands, ["role_getroleinfo"]);
+    assert.equal(wsClient.wireSeq, 1);
+    wsClient._handlePromiseResponse({
+      resp: 1,
+      code: 0,
+      rawData: { role: { roleId: "1" } },
+    });
+    assert.deepEqual(await siblingPromise, { role: { roleId: "1" } });
+
+    // 2. Manual ApexChallenge.vue doGuess path through real XyzwWebSocketClient sendQueue
+    const apexVueSource = await readFile(
+      new URL("../src/components/Apex/ApexChallenge.vue", import.meta.url),
+      "utf8",
+    );
+    const scriptContent = apexVueSource.match(
+      /<script setup[^>]*>([\s\S]*?)<\/script>/,
+    )?.[1];
+    const apexAst = ts.createSourceFile(
+      "ApexChallenge.js",
+      scriptContent,
+      ts.ScriptTarget.ES2022,
+      true,
+    );
+    const extractNames = [
+      "apexServerTimeSample",
+      "apexServerTimeTokenId",
+      "readLiveApexServerNowMs",
+      "assertGuessOpenNow",
+      "doGuess",
+    ];
+    const extractedCode = apexAst.statements
+      .filter(
+        (node) =>
+          ts.isVariableStatement(node) &&
+          node.declarationList.declarations.some((d) =>
+            extractNames.includes(d.name.getText(apexAst)),
+          ),
+      )
+      .map((node) => node.getText(apexAst))
+      .join("\n");
+
+    // Reset clock to 10ms BEFORE cutoff
+    mockWallMs = Date.parse("2026-11-23T18:59:59.990+08:00");
+    mockPerfMs = 800_000;
+    wsClient.serverTime = mockWallMs;
+    wsClient.serverTimeSampledAt = mockPerfMs;
+    const manualNotices = [];
+    const scheduleId64 = rules
+      .getTodayApexGuessSchedule(rules.toChinaWallClockMs(mockWallMs))
+      .stages.find((s) => s.title === "64强赛")?.scheduleId;
+
+    const manualCtx = vm.createContext({
+      Date: MockDate,
+      tokenStore,
+      roleResetTime: { value: { season: 1 } },
+      pendingGuessTeamId: { value: "" },
+      actionCooldown: { guess: 0, vote: 0 },
+      canBetRow: () => true,
+      refreshCurrentBets() {},
+      fetchRoleInfo: async () => {},
+      fetchGuessHistory: async () => {},
+      startActionCooldown() {},
+      withApexGuessLock: async (_id, fn) => fn(),
+      runApexAction: async (_a, task) => task(0),
+      ApexAction: { GUESS: "guess" },
+      isApexRateLimited: () => false,
+      apexCooldownLeft: () => 0,
+      sampleFromWebSocketClient: serverClockMod.sampleFromWebSocketClient,
+      getEstimatedServerNowSec: serverClockMod.getEstimatedServerNowSec,
+      calibrateServerTime: rules.calibrateServerTime,
+      toChinaWallClockMs: rules.toChinaWallClockMs,
+      getCurrentSeason: rules.getCurrentSeason,
+      getScheduleStatus: rules.getScheduleStatus,
+      canGuessNow: rules.canGuessNow,
+      canGuessRow: rules.canGuessRow,
+      TIMEOUT_ACTION: 8000,
+      message: {
+        warning(msg) {
+          manualNotices.push({ type: "warning", msg });
+        },
+        error(msg) {
+          manualNotices.push({ type: "error", msg });
+        },
+        success() {},
+      },
+    });
+    vm.runInContext(
+      `${extractedCode}\nglobalThis.doGuess = doGuess;`,
+      manualCtx,
+    );
+
+    const manualGuessPromise = manualCtx.doGuess(
+      "team-hot",
+      {
+        team1Id: "team-hot",
+        team1Name: "热门队",
+        team2Id: "team-cold",
+        team2Name: "冷门队",
+      },
+      { scheduleId: scheduleId64, stage: 4, canBet: true, state: 2 },
+    );
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(wsClient.sendQueue.length, 1);
+    assert.equal(wsClient.sendQueue[0].cmd, "apex_guess");
+
+    // Advance clock +50ms past cutoff before dequeue runs!
+    mockWallMs += 50;
+    mockPerfMs += 50;
+    const manualTick = timers.findLast((t) => !t.cleared && t.delay === 50);
+    assert.ok(manualTick);
+    await manualTick.fn();
+    await manualGuessPromise;
+
+    assert.equal(
+      wireCommands.includes("apex_guess"),
+      false,
+      "manual doGuess dequeued 40ms after cutoff must NOT call socket.send()",
+    );
+    assert.ok(
+      manualNotices.some(
+        (n) => n.type === "warning" && /未发送.*已截止/.test(n.msg),
+      ),
+      "manual doGuess must report not-sent cutoff warning cleanly",
+    );
+    wsClient.disconnect();
+  });
 });

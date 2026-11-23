@@ -1883,14 +1883,21 @@ const assertGuessOpenNow = (grp, row, targetTokenId) => {
   const liveSeason = getCurrentSeason(liveNowMs);
   const reportedSeason = Number(roleResetTime.value?.season) || 0;
   if (reportedSeason > 0 && reportedSeason !== liveSeason) {
-    throw new Error("服务器赛季与本地赛程不一致，赛程待核对，已停止竞猜");
+    throw Object.assign(
+      new Error("服务器赛季与本地赛程不一致，赛程待核对，已停止竞猜"),
+      { notSent: true },
+    );
   }
   const liveState = getScheduleStatus(grp.scheduleId, liveNowMs);
   if (!canGuessNow(liveState)) {
-    throw new Error("该场竞猜已截止，停止发送");
+    throw Object.assign(new Error("该场竞猜已截止，停止发送"), {
+      notSent: true,
+    });
   }
   if (!canGuessRow(liveState, grp.stage, row)) {
-    throw new Error("该场对阵已结束，停止发送");
+    throw Object.assign(new Error("该场对阵已结束，停止发送"), {
+      notSent: true,
+    });
   }
 };
 
@@ -1899,14 +1906,19 @@ const assertVoteOpenNow = (targetRound, targetTokenId) => {
   const liveSeason = getCurrentSeason(liveNowMs);
   const reportedSeason = Number(roleResetTime.value?.season) || 0;
   if (reportedSeason > 0 && reportedSeason !== liveSeason) {
-    throw new Error("服务器赛季与本地赛程不一致，赛程待核对，已停止助威");
+    throw Object.assign(
+      new Error("服务器赛季与本地赛程不一致，赛程待核对，已停止助威"),
+      { notSent: true },
+    );
   }
   if (
     !targetRound ||
     liveSeason <= 0 ||
     !checkSupportInTime(targetRound, liveSeason, liveNowMs)
   ) {
-    throw new Error("当前不在助威时间内，停止发送");
+    throw Object.assign(new Error("当前不在助威时间内，停止发送"), {
+      notSent: true,
+    });
   }
 };
 
@@ -1943,23 +1955,29 @@ const doGuess = async (teamId, row, grp) => {
   const name = row.team1Id === teamId ? row.team1Name : row.team2Name;
   pendingGuessTeamId.value = teamId;
   try {
-    // 手动竞猜走 immediate：不排队、不等冷却，直接发；被 200400 打回才退避重试，每次尝试前均按最新服务器时间复核窗口
+    // 手动竞猜走 immediate：不排队、不等冷却，直接发；被 200400 打回才退避重试，且每次入队和出队实际发包前均按最新服务器时间复核窗口
+    const verifyGuessReady = () => {
+      if (
+        tokenStore.selectedToken?.id !== token.id ||
+        tokenStore.getWebSocketStatus(token.id) !== "connected"
+      ) {
+        throw Object.assign(new Error("账号已切换或连接已断开，停止竞猜"), {
+          notSent: true,
+        });
+      }
+      assertGuessOpenNow(grp, row, token.id);
+    };
     await withApexGuessLock(token.id, () =>
       runApexAction(
         ApexAction.GUESS,
         (queuedMs) => {
-          if (
-            tokenStore.selectedToken?.id !== token.id ||
-            tokenStore.getWebSocketStatus(token.id) !== "connected"
-          ) {
-            throw new Error("账号已切换或连接已断开，停止竞猜");
-          }
-          assertGuessOpenNow(grp, row, token.id);
+          verifyGuessReady();
           return tokenStore.sendMessageWithPromise(
             token.id,
             "apex_guess",
             { teamId },
             TIMEOUT_ACTION + queuedMs,
+            { beforeSend: verifyGuessReady },
           );
         },
         {
@@ -1982,6 +2000,11 @@ const doGuess = async (teamId, row, grp) => {
       message.warning(
         `服务器限流（200400），请 ${actionCooldown.guess} 秒后再试`,
       );
+    } else if (e?.notSent) {
+      if (tokenStore.selectedToken?.id === token.id) {
+        refreshCurrentBets();
+      }
+      message.warning(`竞猜未发送：${e.message}`);
     } else {
       if (tokenStore.selectedToken?.id === token.id) {
         refreshCurrentBets();
@@ -2045,17 +2068,22 @@ const doVote = async () => {
   }
   voteLoading.value = true;
   try {
-    // 手动助威同样走 immediate：立即发出，由服务器的冷却窗口裁决，每次尝试前均按最新服务器时间复核窗口
+    // 手动助威同样走 immediate：立即发出，由服务器的冷却窗口裁决，且每次入队和出队实际发包前均按最新服务器时间复核窗口
+    const verifyVoteReady = () => {
+      if (
+        tokenStore.selectedToken?.id !== tokenId ||
+        tokenStore.getWebSocketStatus(tokenId) !== "connected"
+      ) {
+        throw Object.assign(new Error("账号已切换或连接已断开，停止助威"), {
+          notSent: true,
+        });
+      }
+      assertVoteOpenNow(voteRound.value, tokenId);
+    };
     await runApexAction(
       ApexAction.VOTE,
       (queuedMs) => {
-        if (
-          tokenStore.selectedToken?.id !== tokenId ||
-          tokenStore.getWebSocketStatus(tokenId) !== "connected"
-        ) {
-          throw new Error("账号已切换或连接已断开，停止助威");
-        }
-        assertVoteOpenNow(voteRound.value, tokenId);
+        verifyVoteReady();
         return tokenStore.sendMessageWithPromise(
           tokenId,
           "apex_vote",
@@ -2065,6 +2093,7 @@ const doVote = async () => {
             voteCnt: voteCnt.value,
           },
           TIMEOUT_ACTION + queuedMs,
+          { beforeSend: verifyVoteReady },
         );
       },
       {
@@ -2085,6 +2114,8 @@ const doVote = async () => {
       message.warning(
         `服务器限流（200400），请 ${actionCooldown.vote} 秒后再试`,
       );
+    } else if (e?.notSent) {
+      message.warning(`助威未发送：${e.message}`);
     } else {
       message.error(`助威请求失败: ${e.message}`);
     }

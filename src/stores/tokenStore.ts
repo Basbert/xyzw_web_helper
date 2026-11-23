@@ -4281,6 +4281,8 @@ export const useTokenStore = defineStore("tokens", () => {
    * @param {string} cmd Registered protocol command.
    * @param {object} params Command body supplied by the caller.
    * @param {number} timeout Request timeout in milliseconds.
+   * @param {object} [options] Optional send controls forwarded to client.sendWithPromise.
+   * @param {Function} [options.beforeSend] Optional per-request dequeue validator run right before wire send.
    * @returns {Promise<unknown>} Server response; rejects for connection or command errors.
    */
   const sendMessageWithPromise = async (
@@ -4288,6 +4290,7 @@ export const useTokenStore = defineStore("tokens", () => {
     cmd: string,
     params = {},
     timeout = 5000,
+    options?: { beforeSend?: (task?: unknown) => boolean | void },
   ) => {
     const connection = wsConnections.value[tokenId];
     if (!connection || connection.status !== "connected") {
@@ -4298,7 +4301,10 @@ export const useTokenStore = defineStore("tokens", () => {
       !ensureActiveSendLease(tokenId)
     ) {
       return Promise.reject(
-        new Error(`该账号已被其他标签页接管，已停止发送命令 [${tokenId}]`),
+        Object.assign(
+          new Error(`该账号已被其他标签页接管，已停止发送命令 [${tokenId}]`),
+          { notSent: true },
+        ),
       );
     }
 
@@ -4326,8 +4332,22 @@ export const useTokenStore = defineStore("tokens", () => {
       );
     }
 
+    const hasOptions = Boolean(
+      options && typeof options === "object" && Object.keys(options).length > 0,
+    );
     try {
-      const result = await client.sendWithPromise(cmd, params, timeout);
+      const result = await (hasOptions
+        ? (
+            client as XyzwWebSocketClient & {
+              sendWithPromise: (
+                c: string,
+                p: unknown,
+                t: number,
+                o?: unknown,
+              ) => Promise<unknown>;
+            }
+          ).sendWithPromise(cmd, params, timeout, options)
+        : client.sendWithPromise(cmd, params, timeout));
 
       // 特殊日志：fight_starttower 响应
       if (cmd === "fight_starttower") {

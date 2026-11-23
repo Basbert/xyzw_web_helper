@@ -966,7 +966,11 @@ export class XyzwWebSocketClient {
 
   /** 取消队列中尚未发出的命令，并拒绝所有待决 Promise 请求 */
   cancelPendingCommands(reason = "WebSocket 连接已关闭") {
-    const error = new Error(reason);
+    const unsentSeqs = new Set(
+      this.sendQueue
+        .map((task) => task?.request?.seq)
+        .filter((seq) => seq !== undefined),
+    );
     this.sendQueue.length = 0;
     if (this.sendQueueTimer) {
       clearTimeout(this.sendQueueTimer);
@@ -975,7 +979,37 @@ export class XyzwWebSocketClient {
     for (const [id, request] of Object.entries(this.promises)) {
       clearTimeout(request.timer);
       delete this.promises[id];
+      const error = new Error(reason);
+      if (unsentSeqs.has(request.seq)) {
+        error.notSent = true;
+      }
       request.reject(error);
+    }
+  }
+
+  /**
+   * 执行单条请求的出队/发送前校验。
+   * 校验未通过时仅取消该条请求并标记 notSent=true，不影响队列中其他命令。
+   * @param {object} task 待发任务对象
+   * @returns {Error | null} 校验通过返回 null，否则返回带 notSent 标记的错误对象
+   */
+  _runTaskBeforeSend(task) {
+    if (typeof task?.beforeSend !== "function") return null;
+    try {
+      const allowed = task.beforeSend(task);
+      if (allowed === false) {
+        return Object.assign(new Error("请求在发送前已取消"), {
+          notSent: true,
+        });
+      }
+      return null;
+    } catch (error) {
+      const normalized =
+        error instanceof Error
+          ? error
+          : new Error(String(error || "发送前校验未通过"));
+      normalized.notSent = true;
+      return normalized;
     }
   }
 
@@ -985,10 +1019,24 @@ export class XyzwWebSocketClient {
       if (options.request) {
         this._rejectRequest(
           options.request.seq,
-          new Error("当前连接已失去跨标签页控制权，已取消发送"),
+          Object.assign(new Error("当前连接已失去跨标签页控制权，已取消发送"), {
+            notSent: true,
+          }),
         );
       }
       return false;
+    }
+    const taskBeforeSend =
+      typeof options.beforeSend === "function" ? options.beforeSend : null;
+    if (taskBeforeSend && !options.request) {
+      const precheckError = this._runTaskBeforeSend({
+        cmd,
+        params,
+        beforeSend: taskBeforeSend,
+      });
+      if (precheckError) {
+        return false;
+      }
     }
     if (!this.connected) {
       if (this.manualDisconnect) {
@@ -1025,6 +1073,7 @@ export class XyzwWebSocketClient {
       respKey: options.respKey || cmd,
       sleep: options.sleep || 0,
       onSent: options.onSent,
+      beforeSend: taskBeforeSend,
       request: options.request,
     };
 
@@ -1037,15 +1086,32 @@ export class XyzwWebSocketClient {
    * @param {string} cmd Registered protocol command.
    * @param {object} params Command body.
    * @param {number} timeoutMs Timeout measured from queue admission, in milliseconds.
-   * @returns {Promise<unknown>} Response body; rejects on a server error or timeout.
+   * @param {object} [options] Optional send controls, e.g. per-request dequeue `beforeSend` validator.
+   * @returns {Promise<unknown>} Response body; rejects on a server error, cancellation, or timeout.
    */
-  sendWithPromise(cmd, params = {}, timeoutMs = 5000) {
+  sendWithPromise(cmd, params = {}, timeoutMs = 5000, options = {}) {
     return new Promise((resolve, reject) => {
       if (!this.connected || this.socket?.readyState !== WebSocket.OPEN) {
         return reject(new Error("WebSocket 连接已关闭"));
       }
       if (this.beforeSend && !this.beforeSend({ cmd, params })) {
-        return reject(new Error("当前连接已失去跨标签页控制权，已取消发送"));
+        return reject(
+          Object.assign(new Error("当前连接已失去跨标签页控制权，已取消发送"), {
+            notSent: true,
+          }),
+        );
+      }
+      const taskBeforeSend =
+        typeof options?.beforeSend === "function" ? options.beforeSend : null;
+      if (taskBeforeSend) {
+        const precheckError = this._runTaskBeforeSend({
+          cmd,
+          params,
+          beforeSend: taskBeforeSend,
+        });
+        if (precheckError) {
+          return reject(precheckError);
+        }
       }
 
       // 为此请求生成唯一的seq值
@@ -1065,7 +1131,13 @@ export class XyzwWebSocketClient {
       request.timer = timer;
 
       try {
-        this.send(cmd, params, { request });
+        this.send(
+          cmd,
+          params,
+          taskBeforeSend
+            ? { request, beforeSend: taskBeforeSend }
+            : { request },
+        );
       } catch (error) {
         this._rejectRequest(requestSeq, error);
       }
@@ -1240,9 +1312,20 @@ export class XyzwWebSocketClient {
       if (this.beforeSend && !this.beforeSend(task)) {
         const leaseReason = "当前连接已失去跨标签页控制权，已取消发送";
         if (request) {
-          this._rejectRequest(request.seq, new Error(leaseReason));
+          this._rejectRequest(
+            request.seq,
+            Object.assign(new Error(leaseReason), { notSent: true }),
+          );
         }
         this.cancelPendingCommands(leaseReason);
+        return;
+      }
+      const taskPreSendError = this._runTaskBeforeSend(task);
+      if (taskPreSendError) {
+        if (request) {
+          this._rejectRequest(request.seq, taskPreSendError);
+        }
+        scheduleNext();
         return;
       }
       // Server sequences must be contiguous: cancelled or failed unsent commands use no number.
@@ -1282,9 +1365,19 @@ export class XyzwWebSocketClient {
         if (this.beforeSend && !this.beforeSend(task)) {
           const leaseReason = "当前连接已失去跨标签页控制权，已取消发送";
           if (request) {
-            this._rejectRequest(request.seq, new Error(leaseReason));
+            this._rejectRequest(
+              request.seq,
+              Object.assign(new Error(leaseReason), { notSent: true }),
+            );
           }
           this.cancelPendingCommands(leaseReason);
+          return;
+        }
+        const finalTaskError = this._runTaskBeforeSend(task);
+        if (finalTaskError) {
+          if (request) {
+            this._rejectRequest(request.seq, finalTaskError);
+          }
           return;
         }
         if (request) {

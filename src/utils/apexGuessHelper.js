@@ -539,20 +539,24 @@ export async function runApexAutoGuess({
               `已竞猜 ${result.successCount} 场，正在处理 ${tab.title}：${entry.name}…`,
             );
             try {
+              const assertTabOpenBeforeSend = () => {
+                checkInterrupted();
+                if (!openTabNow(info, open, tab, getNowMs())) {
+                  const error = new Error("该阶段已结束，停止竞猜");
+                  error.notSent = true;
+                  throw error;
+                }
+              };
               await runApexAction(
                 ApexAction.GUESS,
                 (queuedMs) => {
-                  checkInterrupted();
-                  if (!openTabNow(info, open, tab, getNowMs())) {
-                    const error = new Error("该阶段已结束，停止竞猜");
-                    error.notSent = true;
-                    throw error;
-                  }
+                  assertTabOpenBeforeSend();
                   return tokenStore.sendMessageWithPromise(
                     tokenId,
                     "apex_guess",
                     { teamId: pick.teamId },
                     TIMEOUT_GUESS + queuedMs,
+                    { beforeSend: assertTabOpenBeforeSend },
                   );
                 },
                 {
