@@ -95,8 +95,105 @@ async function fetchApexInfo(tokenStore, tokenId, checkInterrupted = () => {}) {
   return validateApexInfo(response);
 }
 
+const emptyTodaySchedule = () => ({
+  isGuessDay: false,
+  season: -1,
+  stages: [],
+  openStages: [],
+  upcomingStages: [],
+  endedStages: [],
+});
+
+const safeToChinaWallClockMs = (utcNowMs) => {
+  if (typeof toChinaWallClockMs === "function") {
+    return toChinaWallClockMs(utcNowMs);
+  }
+  if (!Number.isFinite(utcNowMs)) return Number.NaN;
+  const china = new Date(utcNowMs + 8 * 3600000);
+  return new Date(
+    china.getUTCFullYear(),
+    china.getUTCMonth(),
+    china.getUTCDate(),
+    china.getUTCHours(),
+    china.getUTCMinutes(),
+    china.getUTCSeconds(),
+    china.getUTCMilliseconds(),
+  ).getTime();
+};
+
+const safeTodaySchedule = (nowMs) =>
+  typeof getTodayApexGuessSchedule === "function"
+    ? getTodayApexGuessSchedule(nowMs)
+    : emptyTodaySchedule();
+
+function readMonotonicMs() {
+  if (
+    typeof performance !== "undefined" &&
+    typeof performance.now === "function"
+  ) {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+/**
+ * Shared live China (UTC+8) wall-clock reader backed by the WebSocket client's
+ * monotonic server-time sample (matching serverClock.js semantics).
+ * Every call re-reads the latest serverTime / serverTimeSampledAt so updates
+ * from apex_getroleinfo or heartbeats take effect immediately before sending.
+ */
+function createLiveChinaClock(tokenStore, tokenId, options = {}) {
+  if (typeof options.getNowMs === "function") {
+    return options.getNowMs;
+  }
+  if (Number.isFinite(options.nowMs)) {
+    return () => safeToChinaWallClockMs(options.nowMs);
+  }
+  let sample = null;
+  let sampledClient = null;
+  return () => {
+    const monotonicNow = readMonotonicMs();
+    const client = tokenStore?.wsConnections?.[tokenId]?.client || null;
+    if (client !== sampledClient) {
+      sampledClient = client;
+      sample = null;
+    }
+    const rawServerTime = Number(client?.serverTime);
+    if (Number.isFinite(rawServerTime) && rawServerTime > 0) {
+      const rawSampledAt = Number(client?.serverTimeSampledAt);
+      if (
+        Number.isFinite(rawSampledAt) &&
+        (!sample ||
+          sample.serverTimeMs === rawServerTime ||
+          rawSampledAt !== sample.sampledAtMs)
+      ) {
+        sample = {
+          serverTimeMs: rawServerTime,
+          sampledAtMs: rawSampledAt,
+        };
+      } else if (!sample || sample.serverTimeMs !== rawServerTime) {
+        sample = {
+          serverTimeMs: rawServerTime,
+          sampledAtMs: monotonicNow,
+        };
+      }
+    }
+    const estimatedUtcMs =
+      sample &&
+      Number.isFinite(sample.serverTimeMs) &&
+      sample.serverTimeMs > 0 &&
+      Number.isFinite(sample.sampledAtMs)
+        ? sample.serverTimeMs + Math.max(0, monotonicNow - sample.sampledAtMs)
+        : Date.now();
+    return safeToChinaWallClockMs(estimatedUtcMs);
+  };
+}
+
 /** Calculate status only from a response belonging to the requested account. */
-export function buildApexGuessStatus(apexInfo, nowMs = Date.now()) {
+export function buildApexGuessStatus(
+  apexInfo,
+  nowMs = safeToChinaWallClockMs(Date.now()),
+) {
   let claimableRewards = [];
   let claimState = "ready";
   try {
@@ -108,7 +205,7 @@ export function buildApexGuessStatus(apexInfo, nowMs = Date.now()) {
   const season = getCurrentSeason(serverNow);
   const reportedSeason = Number(apexInfo?.resetTime?.season) || 0;
   const scheduleMismatch = reportedSeason > 0 && reportedSeason !== season;
-  const openRounds = resolveOpenGuesses(serverNow);
+  const openRounds = scheduleMismatch ? [] : resolveOpenGuesses(serverNow);
   const details = [];
   let pendingStagesCount = 0;
   let remainingSlots = 0;
@@ -145,7 +242,9 @@ export function buildApexGuessStatus(apexInfo, nowMs = Date.now()) {
   }
 
   let summaryText = "当前赛程内暂无开放的逐鹿盐山竞猜";
-  if (uncertainStagesCount) {
+  if (scheduleMismatch) {
+    summaryText = "服务器逐鹿盐山赛季与本地赛程配置不一致，赛程待核对";
+  } else if (uncertainStagesCount) {
     summaryText = "部分竞猜状态无法确认，请查看对阵详情";
   } else if (pendingStagesCount) {
     summaryText = `有 ${pendingStagesCount} 个阶段待竞猜，还可选 ${remainingSlots} 支队伍`;
@@ -171,7 +270,10 @@ export function buildApexGuessStatus(apexInfo, nowMs = Date.now()) {
 }
 
 /** Format an upcoming configured window in the same timezone as the rules. */
-export function formatNextApexGuess(nextGuess, referenceMs = Date.now()) {
+export function formatNextApexGuess(
+  nextGuess,
+  referenceMs = safeToChinaWallClockMs(Date.now()),
+) {
   if (!Number.isFinite(nextGuess?.startsAt)) return "";
   const date = new Date(nextGuess.startsAt);
   const reference = new Date(referenceMs);
@@ -194,6 +296,7 @@ export function compactApexGuessStatus(status) {
       : 0;
   if (rewards > 0) {
     const claim = `待领奖 ${rewards} 项`;
+    if (status.scheduleMismatch) return `${claim} · 赛程待核对`;
     if (status.uncertainStagesCount) return `${claim} · 竞猜状态待确认`;
     return status.pendingStagesCount
       ? `待竞猜 ${status.pendingStagesCount} 阶段 · ${claim}`
@@ -210,22 +313,25 @@ export function compactApexGuessStatus(status) {
 }
 
 export async function getApexGuessStatus(tokenStore, tokenId, options = {}) {
+  const getNowMs = createLiveChinaClock(tokenStore, tokenId, options);
   const info = await fetchApexInfo(
     tokenStore,
     tokenId,
     options.checkInterrupted,
   );
-  const nowValue =
-    typeof options.getNowMs === "function"
-      ? options.getNowMs()
-      : Number.isFinite(options.nowMs)
-        ? options.nowMs
-        : Date.now();
-  return buildApexGuessStatus(info, nowValue);
+  return buildApexGuessStatus(info, getNowMs());
 }
 
-function openTabNow(info, open, tab, nowMs = Date.now()) {
+function openTabNow(
+  info,
+  open,
+  tab,
+  nowMs = safeToChinaWallClockMs(Date.now()),
+) {
   const now = calibrateServerTime(nowMs, info.resetTime?.day);
+  const season = getCurrentSeason(now);
+  const reportedSeason = Number(info?.resetTime?.season) || 0;
+  if (reportedSeason > 0 && reportedSeason !== season) return false;
   return resolveOpenGuesses(now).some(
     (entry) =>
       entry.season === open.season &&
@@ -268,10 +374,10 @@ export async function runApexAutoGuess({
   nowMs = null,
   getNowMs: customGetNowMs = null,
 }) {
-  const getNowMs =
-    typeof customGetNowMs === "function"
-      ? customGetNowMs
-      : () => (Number.isFinite(nowMs) ? nowMs : Date.now());
+  const getNowMs = createLiveChinaClock(tokenStore, tokenId, {
+    nowMs,
+    getNowMs: customGetNowMs,
+  });
   return withApexGuessLock(tokenId, async () => {
     const result = {
       outcome: "partial",
@@ -291,6 +397,14 @@ export async function runApexAutoGuess({
       onProgress("正在检查逐鹿盐山状态…");
       info = await fetchApexInfo(tokenStore, tokenId, checkInterrupted);
       const initial = buildApexGuessStatus(info, getNowMs());
+      if (initial.scheduleMismatch) {
+        result.outcome = "partial";
+        result.reason =
+          "服务器赛季与本地赛程不一致，赛程待核对，已停止自动竞猜";
+        result.verifiedStatus = initial;
+        result.message = resultMessage(result);
+        return result;
+      }
       const openRounds = resolveOpenGuesses(
         calibrateServerTime(getNowMs(), info.resetTime?.day),
       );
@@ -481,7 +595,9 @@ export async function runApexAutoGuess({
           issue ||= "最终竞猜状态未能核实，请刷新后查看";
         }
       }
-      if (result.verifiedStatus?.uncertainStagesCount) {
+      if (result.verifiedStatus?.scheduleMismatch) {
+        issue ||= "服务器赛季与本地赛程不一致，赛程待核对";
+      } else if (result.verifiedStatus?.uncertainStagesCount) {
         issue ||= "部分竞猜状态无法确认";
       } else if (result.verifiedStatus?.pendingStagesCount) {
         issue ||= `还有 ${result.verifiedStatus.remainingSlots} 个名额待处理`;
@@ -503,37 +619,6 @@ export async function runApexAutoGuess({
     return result;
   });
 }
-
-const emptyTodaySchedule = () => ({
-  isGuessDay: false,
-  season: -1,
-  stages: [],
-  openStages: [],
-  upcomingStages: [],
-  endedStages: [],
-});
-
-const safeToChinaWallClockMs = (utcNowMs) => {
-  if (typeof toChinaWallClockMs === "function") {
-    return toChinaWallClockMs(utcNowMs);
-  }
-  if (!Number.isFinite(utcNowMs)) return Number.NaN;
-  const china = new Date(utcNowMs + 8 * 3600000);
-  return new Date(
-    china.getUTCFullYear(),
-    china.getUTCMonth(),
-    china.getUTCDate(),
-    china.getUTCHours(),
-    china.getUTCMinutes(),
-    china.getUTCSeconds(),
-    china.getUTCMilliseconds(),
-  ).getTime();
-};
-
-const safeTodaySchedule = (nowMs) =>
-  typeof getTodayApexGuessSchedule === "function"
-    ? getTodayApexGuessSchedule(nowMs)
-    : emptyTodaySchedule();
 
 function formatLaterStageReminder(todaySchedule) {
   const nextStage = todaySchedule?.upcomingStages?.[0];
@@ -558,7 +643,8 @@ function formatOutsideWindowReminder(todaySchedule, nextGuess, nowMs) {
  * - 非竞猜日：直接跳过，避免无谓消耗 apex_* 频控配额；
  * - 竞猜日且处于开放时段内：自动完成待竞猜场次，若同日后续还有场次一并给出提醒；
  * - 竞猜日但当前不在开放时段内：给出明确时段提醒，不将每日任务判为失败；
- * - 非中断类请求异常（限流、超时、未解锁逐鹿等）：降级为告警并标记待核对，不中断整轮每日任务。
+ * - 服务器赛季与本地赛程不符：禁止发包并明确提示赛程待核对；
+ * - 非中断类请求异常（限流、超时、未解锁逐鹿等）：降级为告警并保留基于本地赛程的时段提醒，不中断整轮每日任务。
  */
 export async function runDailyApexGuessCheck({
   tokenStore,
@@ -568,19 +654,10 @@ export async function runDailyApexGuessCheck({
   nowMs = null,
 }) {
   checkInterrupted();
-  const hasFixedNow = Number.isFinite(nowMs);
-  const wsServerTime = Number(
-    tokenStore?.wsConnections?.[tokenId]?.client?.serverTime,
-  );
-  const liveClockOffsetMs =
-    !hasFixedNow && Number.isFinite(wsServerTime) && wsServerTime > 0
-      ? wsServerTime - Date.now()
-      : 0;
-  // Always evaluate in China (UTC+8) wall-clock coordinates while keeping the
-  // production clock live across multi-step rate-limited guesses.
-  const getChinaNowMs = hasFixedNow
-    ? () => safeToChinaWallClockMs(nowMs)
-    : () => safeToChinaWallClockMs(Date.now() + liveClockOffsetMs);
+  // Always evaluate in China (UTC+8) wall-clock coordinates backed by the
+  // monotonic WebSocket server clock, re-reading updated serverTime samples on
+  // every status check and before every guess submission.
+  const getChinaNowMs = createLiveChinaClock(tokenStore, tokenId, { nowMs });
 
   const initialChinaNowMs = getChinaNowMs();
   const localToday = safeTodaySchedule(initialChinaNowMs);
@@ -597,6 +674,12 @@ export async function runDailyApexGuessCheck({
       checkInterrupted,
       getNowMs: getChinaNowMs,
     });
+    if (status.scheduleMismatch) {
+      const reminder =
+        "逐鹿盐山赛程待核对：服务器赛季与本地配置不一致，已停止自动竞猜，请前往逐鹿盐山卡片核对";
+      log(reminder, "warning");
+      return { status: "schedule-mismatch", ok: false, reminder };
+    }
     const serverNowMs = status.serverNowMs ?? getChinaNowMs();
     const serverToday = safeTodaySchedule(serverNowMs);
 
@@ -625,11 +708,20 @@ export async function runDailyApexGuessCheck({
           };
         }
         if (result.outcome !== "no-open") {
+          const mismatch = Boolean(result.verifiedStatus?.scheduleMismatch);
+          const reminder = mismatch
+            ? "逐鹿盐山赛程待核对：服务器赛季与本地配置不一致，已停止自动竞猜，请前往逐鹿盐山卡片核对"
+            : formatLaterStageReminder(
+                safeTodaySchedule(
+                  result.verifiedStatus?.serverNowMs ?? getChinaNowMs(),
+                ),
+              );
           log(`逐鹿盐山竞猜：${result.message}`, "warning");
+          if (reminder) log(reminder, mismatch ? "warning" : "info");
           return {
-            status: result.outcome,
+            status: mismatch ? "schedule-mismatch" : result.outcome,
             ok: false,
-            reminder: "",
+            reminder,
             result,
           };
         }
@@ -668,7 +760,7 @@ export async function runDailyApexGuessCheck({
     if (serverToday.isGuessDay) {
       const reminder = formatOutsideWindowReminder(
         serverToday,
-        status.scheduleMismatch ? null : status.nextGuess,
+        status.nextGuess,
         serverNowMs,
       );
       log(reminder, "warning");
@@ -679,11 +771,35 @@ export async function runDailyApexGuessCheck({
     return { status: "not-guess-day", ok: true, reminder: "" };
   } catch (error) {
     if (error?.interrupted) throw error;
+    const fallbackNow = getChinaNowMs();
+    const fallbackToday = safeTodaySchedule(fallbackNow);
+    let fallbackReminder = "";
+    if (fallbackToday.isGuessDay) {
+      if (fallbackToday.openStages.length > 0) {
+        const openText = fallbackToday.openStages
+          .map((stage) => `${stage.title}（${stage.timeRange}）`)
+          .join("、");
+        const laterStage = fallbackToday.upcomingStages[0];
+        const laterSuffix = laterStage
+          ? `；同日 ${laterStage.title} 将于 ${laterStage.timeRange} 开放`
+          : "";
+        fallbackReminder = `逐鹿盐山竞猜提醒：当前未能核实账号状态，按赛程 ${openText} 正在开放${laterSuffix}，请前往逐鹿盐山卡片核对`;
+      } else {
+        fallbackReminder = formatOutsideWindowReminder(
+          fallbackToday,
+          getNextApexGuessWindow(fallbackNow),
+          fallbackNow,
+        );
+      }
+    }
     log(
       `逐鹿盐山竞猜检查未完成：${error?.message || "请求失败"}（不影响其他每日任务）`,
       "warning",
     );
-    return { status: "partial", ok: false, reminder: "" };
+    if (fallbackReminder) {
+      log(fallbackReminder, "info");
+    }
+    return { status: "partial", ok: false, reminder: fallbackReminder };
   }
 }
 

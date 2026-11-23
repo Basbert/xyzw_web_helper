@@ -77,6 +77,10 @@ import {
   isDreamShopChecked,
   subscribeDreamShopChecks,
 } from "@/utils/dreamShopCheckState";
+import {
+  getEstimatedServerNowSec,
+  sampleFromWebSocketClient,
+} from "@/utils/serverClock";
 
 const emit = defineEmits(["navigate"]);
 const tokenStore = useTokenStore();
@@ -186,19 +190,41 @@ watch(
   { immediate: true },
 );
 
+let reminderServerTimeSample = null;
+let reminderServerTimeTokenId = null;
+
+function resolveReminderNowMs() {
+  const tickMs = now.value;
+  const id = tokenStore.selectedToken?.id || null;
+  const client = id ? tokenStore.wsConnections?.[id]?.client : null;
+  void client?.serverTime;
+  void client?.serverTimeSampledAt;
+  if (id !== reminderServerTimeTokenId) {
+    reminderServerTimeTokenId = id;
+    reminderServerTimeSample = null;
+  }
+  if (
+    typeof sampleFromWebSocketClient === "function" &&
+    typeof getEstimatedServerNowSec === "function"
+  ) {
+    reminderServerTimeSample = sampleFromWebSocketClient(
+      client,
+      reminderServerTimeSample,
+    );
+    return getEstimatedServerNowSec(reminderServerTimeSample, tickMs) * 1000;
+  }
+  const serverTimeMs = client?.serverTime;
+  return Number.isFinite(serverTimeMs) && serverTimeMs > 0
+    ? serverTimeMs
+    : tickMs;
+}
+
 const weeklyQuizReminder = computed(() => {
   if (!connected.value || typeof describeWeeklyQuizReminder !== "function") {
     return "";
   }
-  const id = tokenStore.selectedToken?.id;
   const role = tokenStore.gameData?.roleInfo?.role;
-  const serverTimeMs = id
-    ? tokenStore.wsConnections?.[id]?.client?.serverTime
-    : null;
-  const nowMs =
-    Number.isFinite(serverTimeMs) && serverTimeMs > 0
-      ? serverTimeMs
-      : now.value;
+  const nowMs = resolveReminderNowMs();
   return describeWeeklyQuizReminder({
     role,
     config: weeklyQuizConfig.value,
@@ -210,14 +236,7 @@ const apexGuessReminder = computed(() => {
   if (typeof describeApexGuessReminder !== "function") {
     return "";
   }
-  const id = tokenStore.selectedToken?.id;
-  const serverTimeMs = id
-    ? tokenStore.wsConnections?.[id]?.client?.serverTime
-    : null;
-  const nowMs =
-    Number.isFinite(serverTimeMs) && serverTimeMs > 0
-      ? serverTimeMs
-      : now.value;
+  const nowMs = resolveReminderNowMs();
   return describeApexGuessReminder({
     nowMs,
     apexGuessEnabled: apexGuessEnabled.value,

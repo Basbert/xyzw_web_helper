@@ -3909,7 +3909,9 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       configurable: true,
     });
     const recoveryTimers = new Map();
+    const intervalCallbacks = new Map();
     let nextTimer = 0;
+    let nextInterval = 0;
     const idbApi = {
       getArrayBuffer:
         getArrayBufferImpl || (async (k) => sharedIdb.get(k) ?? null),
@@ -4026,8 +4028,14 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
           : { onLine: true, locks: sharedLocks },
         setTimeout,
         clearTimeout,
-        setInterval: () => 1,
-        clearInterval() {},
+        setInterval: (fn) => {
+          const id = ++nextInterval;
+          intervalCallbacks.set(id, fn);
+          return id;
+        },
+        clearInterval: (id) => {
+          intervalCallbacks.delete(id);
+        },
         window: mockWindow,
         document: {
           visibilityState: "visible",
@@ -4042,6 +4050,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       store: mod.useTokenStore(),
       mockWindow,
       storageAdapter,
+      intervalCallbacks,
     };
   };
 
@@ -9252,5 +9261,407 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       tabClearA.pinia._e.stop();
       tabClearB.pinia._e.stop();
     }
+  });
+
+  test("Round13 Demand1 P1+P2: live-lock lease aged >120s and >5min is never hijacked or pruned while held; late storage event from superseded tab never disconnects taken-over connection", async () => {
+    const createLiveLockBrowser = () => {
+      const held = new Map();
+      const queues = new Map();
+      const makeForTab = (ownerTag) => ({
+        query: async () => ({
+          held: Array.from(held.values()).map(({ name }) => ({
+            name,
+            mode: "exclusive",
+          })),
+          pending: [],
+        }),
+        request: (name, optsOrCb, maybeCb) => {
+          const cb = typeof optsOrCb === "function" ? optsOrCb : maybeCb;
+          const prev = queues.get(name) || Promise.resolve();
+          const run = prev.then(async () => {
+            held.set(name, { name, ownerTag });
+            try {
+              return await cb({ name });
+            } finally {
+              if (held.get(name)?.ownerTag === ownerTag) {
+                held.delete(name);
+              }
+            }
+          });
+          queues.set(
+            name,
+            run.then(
+              () => {},
+              () => {},
+            ),
+          );
+          return run;
+        },
+        simulateCrash: () => {
+          for (const [name, entry] of Array.from(held.entries())) {
+            if (entry.ownerTag === ownerTag) held.delete(name);
+          }
+        },
+      });
+      return { makeForTab, held };
+    };
+
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "alpha",
+            name: "后台保活号",
+            roleId: "1001",
+            token: "valid-alpha-live-lock-0001",
+            importMethod: "bin",
+          },
+          {
+            id: "legacy",
+            name: "旧租约号",
+            roleId: "1002",
+            token: "valid-legacy-lease-0002",
+            importMethod: "bin",
+          },
+        ]),
+      ],
+    ]);
+    const browserLocks = createLiveLockBrowser();
+    const locksA = browserLocks.makeForTab("tabA");
+    const locksB = browserLocks.makeForTab("tabB");
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb: new Map(),
+      sharedLocks: locksA,
+    });
+    const tabB = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb: new Map(),
+      sharedLocks: locksB,
+    });
+    try {
+      // P1: Tab A connects with liveLock=true; simulate throttled background tab whose heartbeat aged 400s (>120s and >5min)
+      const clientA = await tabA.store.createWebSocketConnection(
+        "alpha",
+        "valid-alpha-live-lock-0001",
+      );
+      assert.ok(clientA);
+      assert.equal(tabA.store.getWebSocketStatus("alpha"), "connected");
+
+      const oldTs = Date.now() - 400_000;
+      const leaseA = JSON.parse(sharedStorage.get("ws_connection_alpha"));
+      assert.equal(leaseA.liveLock, true);
+      leaseA.timestamp = oldTs;
+      sharedStorage.set("ws_connection_alpha", JSON.stringify(leaseA));
+      sharedStorage.set("activeConnections", JSON.stringify({ alpha: leaseA }));
+
+      // While Tab A still holds its browser live Web Lock, Tab B MUST consider alpha busy and MUST NOT auto-hijack!
+      assert.equal(tabB.store.isConnectionActiveInAnotherTab("alpha"), true);
+      const hijackAttempt = await tabB.store.createWebSocketConnection(
+        "alpha",
+        "valid-alpha-live-lock-0001",
+      );
+      assert.equal(
+        hijackAttempt,
+        null,
+        "Tab B must NOT auto-hijack a live-lock owner whose heartbeat exceeded 120s",
+      );
+      assert.equal(tabA.store.getWebSocketStatus("alpha"), "connected");
+
+      // Running Tab B's 5-minute monitor sweep MUST keep Tab A's live-lock lease and activeConnections intact
+      tabB.store.initConnectionCoordination();
+      for (const cb of tabB.intervalCallbacks.values()) {
+        cb();
+      }
+      await new Promise((r) => setTimeout(r, 10));
+      assert.ok(
+        sharedStorage.get("ws_connection_alpha"),
+        "5-minute monitor must NOT delete a live-lock lease whose Web Lock is still held",
+      );
+      assert.ok(
+        JSON.parse(sharedStorage.get("activeConnections") || "{}").alpha,
+        "5-minute monitor must NOT prune activeConnections for a live-lock lease",
+      );
+
+      // Legacy non-liveLock lease aged >120s MUST still expire by time threshold
+      sharedStorage.set(
+        "ws_connection_legacy",
+        JSON.stringify({
+          action: "connected",
+          sessionId: "legacy-other-session",
+          timestamp: Date.now() - 150_000,
+        }),
+      );
+      assert.equal(tabB.store.isConnectionActiveInAnotherTab("legacy"), false);
+
+      // P2: Tab B explicitly takes over alpha -> Tab B is now owner in localStorage and connected
+      const takeoverClient =
+        await tabB.store.takeOverCrossTabConnection("alpha");
+      assert.ok(takeoverClient);
+      assert.equal(tabB.store.getWebSocketStatus("alpha"), "connected");
+      assert.equal(
+        JSON.parse(sharedStorage.get("ws_connection_alpha")).sessionId,
+        tabB.store.currentSessionId(),
+      );
+
+      // A late/out-of-order storage event from superseded Tab A arrives at Tab B -> MUST NOT disconnect Tab B!
+      tabB.mockWindow.dispatchEvent({
+        type: "storage",
+        key: "ws_connection_alpha",
+        newValue: JSON.stringify({
+          action: "connected",
+          sessionId: tabA.store.currentSessionId(),
+          timestamp: Date.now(),
+          liveLock: true,
+        }),
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(
+        tabB.store.getWebSocketStatus("alpha"),
+        "connected",
+        "late storage event from superseded tab must NOT disconnect newly taken-over connection",
+      );
+
+      // Conversely, when a real third tab overwrites localStorage and broadcasts, Tab B MUST disconnect
+      const tabCLease = JSON.stringify({
+        action: "connected",
+        sessionId: "tab-c-session",
+        timestamp: Date.now(),
+        liveLock: true,
+      });
+      sharedStorage.set("ws_connection_alpha", tabCLease);
+      tabB.mockWindow.dispatchEvent({
+        type: "storage",
+        key: "ws_connection_alpha",
+        newValue: tabCLease,
+      });
+      await new Promise((r) => setTimeout(r, 10));
+      assert.equal(tabB.store.getWebSocketStatus("alpha"), "disconnected");
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+  });
+
+  test("Round13 Demand2 P1+P2: Apex season mismatch blocks guessing, live monotonic server clock stops post-close sends, card/manual/daily share China UTC+8 time, and off-window errors preserve schedule reminders", async () => {
+    const actualMap = await import("../src/utils/apexStageMap.js");
+    const rules = await loadModule(
+      new URL("../src/utils/apexRules.js", import.meta.url),
+      { "./apexStageMap": actualMap },
+    );
+    const rewardState = await import("../src/utils/apexRewardState.js");
+
+    const loadApexHelperWithClock = async ({ getDateNow, getPerfNow }) => {
+      const RealDate = Date;
+      class MockDate extends RealDate {
+        constructor(...args) {
+          if (args.length === 0) {
+            super(getDateNow());
+          } else {
+            super(...args);
+          }
+        }
+        static now() {
+          return getDateNow();
+        }
+      }
+      return loadModule(
+        new URL("../src/utils/apexGuessHelper.js", import.meta.url),
+        {
+          "./apexRules.js": rules,
+          "./apexRateLimit.js": {
+            ApexAction: { READ: "read", GUESS: "guess" },
+            isApexRateLimited: () => false,
+            runApexAction: async (_a, task) => task(0),
+          },
+          "./apexRewardState.js": rewardState,
+        },
+        {
+          Date: MockDate,
+          performance: { now: () => getPerfNow() },
+        },
+      );
+    };
+
+    // P1 #3: Server reports season 2 while local schedule at 2026-11-23 11:00+08:00 is season 1 -> ZERO apex_guess sent!
+    let mockWallMs = Date.parse("2026-11-23T11:00:00+08:00");
+    let mockPerfMs = 100_000;
+    const helper = await loadApexHelperWithClock({
+      getDateNow: () => mockWallMs,
+      getPerfNow: () => mockPerfMs,
+    });
+
+    const mismatchCmds = [];
+    const mismatchStore = {
+      wsConnections: {
+        acc: {
+          client: { serverTime: mockWallMs, serverTimeSampledAt: mockPerfMs },
+        },
+      },
+      sendMessageWithPromise: async (_id, cmd) => {
+        mismatchCmds.push(cmd);
+        if (cmd === "apex_getroleinfo") {
+          return {
+            apexRoleInfo: {
+              guessMap: {},
+              resetTime: { season: 2 },
+            },
+          };
+        }
+        throw new Error(`Should not send ${cmd} on season mismatch`);
+      },
+    };
+    const mismatchStatus = await helper.getApexGuessStatus(
+      mismatchStore,
+      "acc",
+    );
+    assert.equal(mismatchStatus.scheduleMismatch, true);
+    assert.equal(mismatchStatus.hasOpenGuesses, false);
+    assert.equal(mismatchStatus.pendingStagesCount, 0);
+    assert.equal(helper.compactApexGuessStatus(mismatchStatus), "赛程待核对");
+
+    const mismatchAuto = await helper.runApexAutoGuess({
+      tokenStore: mismatchStore,
+      tokenId: "acc",
+    });
+    assert.equal(mismatchAuto.outcome, "partial");
+    assert.match(mismatchAuto.message, /赛程待核对/);
+    assert.equal(mismatchCmds.includes("apex_getguesslist"), false);
+    assert.equal(mismatchCmds.includes("apex_guess"), false);
+
+    const mismatchDaily = await helper.runDailyApexGuessCheck({
+      tokenStore: mismatchStore,
+      tokenId: "acc",
+    });
+    assert.equal(mismatchDaily.ok, false);
+    assert.equal(mismatchDaily.status, "schedule-mismatch");
+    assert.match(mismatchDaily.reminder, /赛程待核对/);
+    assert.equal(mismatchCmds.includes("apex_guess"), false);
+
+    // P1 #4a: Real time 19:00:02+08:00, stale client sample 18:59:52+08:00 (without serverTimeSampledAt);
+    // apex_getroleinfo updates client.serverTime to 19:00:02 -> MUST NOT send apex_guess to closed 64强赛!
+    mockWallMs = Date.parse("2026-11-23T19:00:02+08:00");
+    mockPerfMs = 200_000;
+    const staleClient = {
+      serverTime: Date.parse("2026-11-23T18:59:52+08:00"),
+    };
+    const postCloseCmds = [];
+    const postCloseStore = {
+      wsConnections: { acc: { client: staleClient } },
+      sendMessageWithPromise: async (_id, cmd) => {
+        postCloseCmds.push(cmd);
+        if (cmd === "apex_getroleinfo") {
+          staleClient.serverTime = Date.parse("2026-11-23T19:00:02+08:00");
+          staleClient.serverTimeSampledAt = mockPerfMs;
+          return {
+            apexRoleInfo: {
+              guessMap: {},
+              resetTime: { season: 1 },
+            },
+          };
+        }
+        throw new Error(`Must not send ${cmd} after 19:00:00 close`);
+      },
+    };
+    const postCloseDaily = await helper.runDailyApexGuessCheck({
+      tokenStore: postCloseStore,
+      tokenId: "acc",
+    });
+    assert.equal(postCloseDaily.ok, true);
+    assert.equal(postCloseDaily.status, "outside-window");
+    assert.match(postCloseDaily.reminder, /32强赛.*19:45–21:30/);
+    assert.equal(postCloseCmds.includes("apex_guess"), false);
+
+    // P1 #4b: Window closes between apex_getroleinfo (18:59:58) and apex_guess (monotonic clock advances +4s to 19:00:02) -> not-sent!
+    mockWallMs = Date.parse("2026-11-23T18:59:58+08:00");
+    mockPerfMs = 300_000;
+    const midCloseClient = {
+      serverTime: mockWallMs,
+      serverTimeSampledAt: mockPerfMs,
+    };
+    const midCloseCmds = [];
+    const midCloseStore = {
+      wsConnections: { acc: { client: midCloseClient } },
+      sendMessageWithPromise: async (_id, cmd) => {
+        midCloseCmds.push(cmd);
+        if (cmd === "apex_getroleinfo") {
+          return {
+            apexRoleInfo: { guessMap: {}, resetTime: { season: 1 } },
+          };
+        }
+        if (cmd === "apex_getguesslist") {
+          // 4 seconds pass on monotonic clock while reading matchups -> now 19:00:02!
+          mockPerfMs += 4000;
+          return {
+            apexGuessList: [
+              [
+                { teamId: "a", name: "甲", cheerCnt: 500 },
+                { teamId: "b", name: "乙", cheerCnt: 100 },
+              ],
+            ],
+            last: true,
+          };
+        }
+        throw new Error(`Must not send ${cmd} after window closed`);
+      },
+    };
+    const midCloseResult = await helper.runApexAutoGuess({
+      tokenStore: midCloseStore,
+      tokenId: "acc",
+    });
+    assert.equal(midCloseResult.outcome, "partial");
+    assert.equal(midCloseResult.entries[0]?.status, "not-sent");
+    assert.equal(midCloseCmds.includes("apex_guess"), false);
+
+    // P2 #5: At Beijing 19:20:00+08:00 with NO explicit nowMs (exact card & manual button path),
+    // getApexGuessStatus and runApexAutoGuess MUST match daily check in UTC, Shanghai, and LA timezones!
+    mockWallMs = Date.parse("2026-11-23T19:20:00+08:00");
+    mockPerfMs = 400_000;
+    const tzCmds = [];
+    const tzStore = {
+      wsConnections: {},
+      sendMessageWithPromise: async (_id, cmd) => {
+        tzCmds.push(cmd);
+        if (cmd === "apex_getroleinfo") {
+          return {
+            apexRoleInfo: { guessMap: {}, resetTime: { season: 1 } },
+          };
+        }
+        throw new Error(`Must not send ${cmd} at Beijing 19:20`);
+      },
+    };
+    const cardStatus = await helper.getApexGuessStatus(tzStore, "acc");
+    assert.equal(
+      cardStatus.hasOpenGuesses,
+      false,
+      "Card status at Beijing 19:20 must see 64强赛 as closed regardless of device TZ",
+    );
+    assert.equal(cardStatus.nextGuess?.title, "32强赛");
+    const manualRun = await helper.runApexAutoGuess({
+      tokenStore: tzStore,
+      tokenId: "acc",
+    });
+    assert.equal(manualRun.outcome, "no-open");
+    assert.equal(tzCmds.includes("apex_guess"), false);
+
+    // P2 #6: At Beijing 19:20:00+08:00, querying an account that hasn't unlocked Apex or hit rate limit
+    // MUST still preserve the known local schedule reminder (32强赛 19:45–21:30)!
+    const unlockedDaily = await helper.runDailyApexGuessCheck({
+      tokenStore: {
+        wsConnections: {},
+        sendMessageWithPromise: async () => {
+          throw new Error("未解锁逐鹿盐山");
+        },
+      },
+      tokenId: "acc-unlocked",
+    });
+    assert.equal(unlockedDaily.ok, false);
+    assert.equal(unlockedDaily.status, "partial");
+    assert.match(
+      unlockedDaily.reminder,
+      /32强赛.*19:45–21:30/,
+      "off-window query failure must retain known local schedule reminder",
+    );
   });
 });

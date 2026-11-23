@@ -180,6 +180,7 @@ const badgeText = computed(() => {
   if (isClaiming.value) return "领取中";
   if (!isConnected.value) return "未连接";
   if (guessState.value.kind === "loading") return "检查中";
+  if (guessState.value.scheduleMismatch) return "赛程待核对";
   if (
     guessState.value.kind === "error" ||
     guessState.value.uncertainStagesCount
@@ -214,6 +215,7 @@ const buttonText = computed(() => {
   if (!isConnected.value) return "连接后一键竞猜";
   if (guessState.value.kind === "loading") return "正在检查竞猜状态…";
   if (guessState.value.kind === "error") return "请先刷新状态";
+  if (guessState.value.scheduleMismatch) return "赛程待核对";
   if (!guessState.value.hasOpenGuesses) return "暂无开放竞猜";
   if (isAllCompleted.value) return "已全部竞猜完成";
   if (!guessState.value.pendingStagesCount) return "请先查看对阵详情";

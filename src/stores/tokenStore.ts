@@ -3120,6 +3120,16 @@ export const useTokenStore = defineStore("tokens", () => {
     typeof navigator.locks?.request === "function" &&
     typeof navigator.locks?.query === "function";
 
+  const isLiveLockLease = (
+    state: Partial<CrossTabConnectionState> | null | undefined,
+  ) =>
+    Boolean(
+      hasLiveLockSupport() &&
+      state &&
+      state.liveLock === true &&
+      (state.action === "connecting" || state.action === "connected"),
+    );
+
   const liveConnectionLockName = (tokenId: string, sessionId: string) =>
     `${LIVE_CONNECTION_LOCK_PREFIX}${tokenId}:${sessionId}`;
 
@@ -3269,15 +3279,18 @@ export const useTokenStore = defineStore("tokens", () => {
       const stored = localStorage.getItem(storageKey);
       if (stored) {
         const state = JSON.parse(stored);
-        // Heartbeats renew the owner's lease; allow slack for background timer delays.
-        const isRecent = Date.now() - state.timestamp < 120000;
         const isDifferentSession = state.sessionId !== currentSessionId;
+        const isActiveAction =
+          state.action === "connecting" || state.action === "connected";
+        // For leases backed by a browser-managed live Web Lock, liveness is
+        // determined via navigator.locks.query() (in reconcileStaleCrossTabLeases)
+        // instead of the 120s heartbeat timeout so throttled background tabs are
+        // never hijacked automatically.
+        const isAlive = isLiveLockLease(state)
+          ? true
+          : Date.now() - state.timestamp < 120000;
 
-        if (
-          isRecent &&
-          isDifferentSession &&
-          (state.action === "connecting" || state.action === "connected")
-        ) {
+        if (isAlive && isDifferentSession && isActiveAction) {
           wsLogger.debug(`检测到其他标签页的活跃连接: ${tokenId}`);
           return state;
         }
@@ -3888,8 +3901,8 @@ export const useTokenStore = defineStore("tokens", () => {
           if (
             owner?.sessionId &&
             owner.sessionId !== currentSessionId &&
-            owner.action === "connected" &&
-            Date.now() - owner.timestamp < 120000
+            (owner.action === "connecting" || owner.action === "connected") &&
+            (isLiveLockLease(owner) || Date.now() - owner.timestamp < 120000)
           ) {
             // A suspended page can miss a storage event while another tab
             // takes over. Relinquish the stale client without rewriting its lease.
@@ -5212,21 +5225,39 @@ export const useTokenStore = defineStore("tokens", () => {
         // 核查已关闭/崩溃标签页遗留的活跃锁租约
         reconcileStaleCrossTabLeases().catch(() => {});
 
-        // 清理过期的跨标签页状态（超过5分钟）
+        // 清理过期的跨标签页状态（超过5分钟；持有活跃 Web Lock 的租约交由 reconcileStaleCrossTabLeases 按锁存活性清理）
         pruneActiveConnections((tokenId, state) => {
+          let liveParsed: Partial<CrossTabConnectionState> | null = null;
+          if (typeof localStorage !== "undefined") {
+            try {
+              const raw = localStorage.getItem(`ws_connection_${tokenId}`);
+              if (raw) {
+                liveParsed = JSON.parse(raw);
+              }
+            } catch {
+              // Ignore malformed ws_connection_* entries.
+            }
+          }
+          if (
+            isLiveLockLease(state) &&
+            isLiveLockLease(liveParsed) &&
+            liveParsed?.sessionId === state.sessionId
+          ) {
+            return false;
+          }
           if (now - state.timestamp > 300000) {
             wsLogger.debug(`清理过期跨标签页状态: ${tokenId}`);
             if (typeof localStorage !== "undefined") {
               try {
-                const raw = localStorage.getItem(`ws_connection_${tokenId}`);
-                if (raw) {
-                  const parsed = JSON.parse(raw);
-                  if (now - (parsed?.timestamp || 0) > 300000) {
-                    localStorage.removeItem(`ws_connection_${tokenId}`);
-                  }
+                if (
+                  liveParsed &&
+                  !isLiveLockLease(liveParsed) &&
+                  now - (Number(liveParsed.timestamp) || 0) > 300000
+                ) {
+                  localStorage.removeItem(`ws_connection_${tokenId}`);
                 }
               } catch {
-                // Ignore malformed ws_connection_* entries.
+                // Ignore storage errors during cleanup.
               }
             }
             return true;
@@ -5349,52 +5380,72 @@ export const useTokenStore = defineStore("tokens", () => {
         return;
       }
       if (event.key?.startsWith("ws_connection_")) {
+        if (
+          event?.storageArea &&
+          typeof localStorage !== "undefined" &&
+          event.storageArea !== localStorage
+        ) {
+          return;
+        }
         const tokenId = event.key.replace("ws_connection_", "");
         crossTabLeaseRevision.value += 1;
-        wsLogger.debug(
-          `检测到跨标签页连接状态变化: ${tokenId}`,
-          event.newValue,
-        );
 
-        // Wake a waiting selected account as soon as another tab releases it.
-        if (!event.newValue && shouldKeepRecovering(tokenId)) {
-          connectionRecovery.schedule(tokenId, {
-            reset: true,
-            immediate: true,
-          });
-        }
-        // 如果其他标签页建立了连接，考虑关闭本标签页的连接
-        if (event.newValue) {
+        // Re-read the live persisted lease rather than trusting event.newValue,
+        // so a late/out-of-order storage event from a superseded tab can never
+        // disconnect a connection that this tab already took over.
+        let liveRaw: string | null = event.newValue ?? null;
+        if (typeof localStorage !== "undefined" && localStorage?.getItem) {
           try {
-            const newState = JSON.parse(event.newValue);
-            const localConnection = wsConnections.value[tokenId];
-
-            if (
-              newState.action === "disconnected" &&
-              newState.sessionId !== currentSessionId &&
-              shouldKeepRecovering(tokenId)
-            ) {
-              connectionRecovery.schedule(tokenId, {
-                reset: true,
-                immediate: true,
-              });
-            }
-
-            if (
-              (newState.action === "connecting" ||
-                newState.action === "connected") &&
-              newState.sessionId !== currentSessionId &&
-              (localConnection?.status === "connected" ||
-                localConnection?.status === "connecting")
-            ) {
-              wsLogger.info(
-                `检测到其他标签页已接管同一token，关闭本地连接: ${tokenId}`,
-              );
-              closeWebSocketConnectionAsync(tokenId);
-            }
-          } catch (error) {
-            wsLogger.warn("解析跨标签页状态失败:", error);
+            liveRaw = localStorage.getItem(event.key);
+          } catch {
+            liveRaw = event.newValue ?? null;
           }
+        }
+        wsLogger.debug(`检测到跨标签页连接状态变化: ${tokenId}`, liveRaw);
+
+        // Wake a waiting selected account as soon as the live lease is cleared.
+        if (!liveRaw) {
+          if (shouldKeepRecovering(tokenId)) {
+            connectionRecovery.schedule(tokenId, {
+              reset: true,
+              immediate: true,
+            });
+          }
+          return;
+        }
+
+        // 仅依据当前持久化租约确认持有者变更后再处理断连或唤醒恢复
+        try {
+          const liveState = JSON.parse(liveRaw);
+          const localConnection = wsConnections.value[tokenId];
+
+          if (
+            liveState.action === "disconnected" &&
+            liveState.sessionId !== currentSessionId &&
+            shouldKeepRecovering(tokenId)
+          ) {
+            connectionRecovery.schedule(tokenId, {
+              reset: true,
+              immediate: true,
+            });
+          }
+
+          if (
+            (liveState.action === "connecting" ||
+              liveState.action === "connected") &&
+            liveState.sessionId !== currentSessionId &&
+            (isLiveLockLease(liveState) ||
+              Date.now() - (Number(liveState.timestamp) || 0) < 120000) &&
+            (localConnection?.status === "connected" ||
+              localConnection?.status === "connecting")
+          ) {
+            wsLogger.info(
+              `检测到其他标签页已接管同一token，关闭本地连接: ${tokenId}`,
+            );
+            closeWebSocketConnectionAsync(tokenId);
+          }
+        } catch (error) {
+          wsLogger.warn("解析跨标签页状态失败:", error);
         }
       }
     };

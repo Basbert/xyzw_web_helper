@@ -730,7 +730,12 @@ import {
   getStageName,
   getSupportGroupId,
   getSupportLevel,
+  toChinaWallClockMs,
 } from "@/utils/apexRules";
+import {
+  getEstimatedServerNowSec,
+  sampleFromWebSocketClient,
+} from "@/utils/serverClock";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
@@ -785,16 +790,35 @@ const clockTick = ref(0);
 /** apexRoleInfo.resetTime 原始值，供日偏差校准读取 */
 const roleResetTime = ref({});
 
+let apexServerTimeSample = null;
+let apexServerTimeTokenId = null;
+
 /**
- * 服务端当前时间（ms）。
+ * 服务端当前时间（ms，北京时间墙钟坐标系）。
  *
- * resetTime 只提供 day(YYMMDD)/week/month/season，无时分秒，因此用 resetTime.day
- * 按日偏差校准本地时钟（校准逻辑见 apexRules.calibrateServerTime）。校准粒度为
- * 整天，而 lockTime 与 fightTime 恒差 1 小时，日级校准足以支撑锁定/开赛判定。
+ * 与每日任务和竞猜卡片共用单调服务器时钟 + 北京时间转换，再叠加 resetTime.day
+ * 的日级校准，确保非 UTC+8 设备下各页面对竞猜窗口的判定完全一致。
  */
 const serverNowMs = computed(() => {
   void clockTick.value; // 建立依赖：本地时钟推进时重算
-  return calibrateServerTime(Date.now(), roleResetTime.value?.day);
+  const id = tokenStore.selectedToken?.id || null;
+  const client = id ? tokenStore.wsConnections?.[id]?.client : null;
+  void client?.serverTime;
+  void client?.serverTimeSampledAt;
+  if (id !== apexServerTimeTokenId) {
+    apexServerTimeTokenId = id;
+    apexServerTimeSample = null;
+  }
+  apexServerTimeSample = sampleFromWebSocketClient(
+    client,
+    apexServerTimeSample,
+  );
+  const estimatedUtcMs =
+    getEstimatedServerNowSec(apexServerTimeSample, Date.now()) * 1000;
+  return calibrateServerTime(
+    toChinaWallClockMs(estimatedUtcMs),
+    roleResetTime.value?.day,
+  );
 });
 
 // ==================== 响应式数据 ====================
