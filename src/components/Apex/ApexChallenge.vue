@@ -725,6 +725,7 @@ import {
   getRoundSchedules,
   getScheduleConf,
   getScheduleIdByStage,
+  getScheduleStatus,
   getSeasonConf,
   getStageInfoByRound,
   getStageName,
@@ -793,20 +794,16 @@ const roleResetTime = ref({});
 let apexServerTimeSample = null;
 let apexServerTimeTokenId = null;
 
-/**
- * 服务端当前时间（ms，北京时间墙钟坐标系）。
- *
- * 与每日任务和竞猜卡片共用单调服务器时钟 + 北京时间转换，再叠加 resetTime.day
- * 的日级校准，确保非 UTC+8 设备下各页面对竞猜窗口的判定完全一致。
- */
-const serverNowMs = computed(() => {
-  void clockTick.value; // 建立依赖：本地时钟推进时重算
-  const id = tokenStore.selectedToken?.id || null;
-  const client = id ? tokenStore.wsConnections?.[id]?.client : null;
+const readLiveApexServerNowMs = (
+  targetTokenId = tokenStore.selectedToken?.id || null,
+) => {
+  const client = targetTokenId
+    ? tokenStore.wsConnections?.[targetTokenId]?.client
+    : null;
   void client?.serverTime;
   void client?.serverTimeSampledAt;
-  if (id !== apexServerTimeTokenId) {
-    apexServerTimeTokenId = id;
+  if (targetTokenId !== apexServerTimeTokenId) {
+    apexServerTimeTokenId = targetTokenId;
     apexServerTimeSample = null;
   }
   apexServerTimeSample = sampleFromWebSocketClient(
@@ -819,6 +816,17 @@ const serverNowMs = computed(() => {
     toChinaWallClockMs(estimatedUtcMs),
     roleResetTime.value?.day,
   );
+};
+
+/**
+ * 服务端当前时间（ms，北京时间墙钟坐标系）。
+ *
+ * 与每日任务和竞猜卡片共用单调服务器时钟 + 北京时间转换，再叠加 resetTime.day
+ * 的日级校准，确保非 UTC+8 设备下各页面对竞猜窗口的判定完全一致。
+ */
+const serverNowMs = computed(() => {
+  void clockTick.value; // 建立依赖：本地时钟推进时重算
+  return readLiveApexServerNowMs();
 });
 
 // ==================== 响应式数据 ====================
@@ -1870,6 +1878,38 @@ const fetchVoteBoard = async () => {
 
 // ==================== 操作 ====================
 
+const assertGuessOpenNow = (grp, row, targetTokenId) => {
+  const liveNowMs = readLiveApexServerNowMs(targetTokenId);
+  const liveSeason = getCurrentSeason(liveNowMs);
+  const reportedSeason = Number(roleResetTime.value?.season) || 0;
+  if (reportedSeason > 0 && reportedSeason !== liveSeason) {
+    throw new Error("服务器赛季与本地赛程不一致，赛程待核对，已停止竞猜");
+  }
+  const liveState = getScheduleStatus(grp.scheduleId, liveNowMs);
+  if (!canGuessNow(liveState)) {
+    throw new Error("该场竞猜已截止，停止发送");
+  }
+  if (!canGuessRow(liveState, grp.stage, row)) {
+    throw new Error("该场对阵已结束，停止发送");
+  }
+};
+
+const assertVoteOpenNow = (targetRound, targetTokenId) => {
+  const liveNowMs = readLiveApexServerNowMs(targetTokenId);
+  const liveSeason = getCurrentSeason(liveNowMs);
+  const reportedSeason = Number(roleResetTime.value?.season) || 0;
+  if (reportedSeason > 0 && reportedSeason !== liveSeason) {
+    throw new Error("服务器赛季与本地赛程不一致，赛程待核对，已停止助威");
+  }
+  if (
+    !targetRound ||
+    liveSeason <= 0 ||
+    !checkSupportInTime(targetRound, liveSeason, liveNowMs)
+  ) {
+    throw new Error("当前不在助威时间内，停止发送");
+  }
+};
+
 /**
  * 竞猜押注（真实接口 apex_guess）。
  * 前置校验与客户端一致：Unlocked / Locked 状态可押（开赛前均可）、不超过该阶段
@@ -1893,10 +1933,17 @@ const doGuess = async (teamId, row, grp) => {
   }
   const token = tokenStore.selectedToken;
   if (!token) return;
+  try {
+    assertGuessOpenNow(grp, row, token.id);
+  } catch (e) {
+    refreshCurrentBets();
+    message.warning(e.message || "该场竞猜当前不可押注");
+    return;
+  }
   const name = row.team1Id === teamId ? row.team1Name : row.team2Name;
   pendingGuessTeamId.value = teamId;
   try {
-    // 手动竞猜走 immediate：不排队、不等冷却，直接发；被 200400 打回才退避重试
+    // 手动竞猜走 immediate：不排队、不等冷却，直接发；被 200400 打回才退避重试，每次尝试前均按最新服务器时间复核窗口
     await withApexGuessLock(token.id, () =>
       runApexAction(
         ApexAction.GUESS,
@@ -1907,6 +1954,7 @@ const doGuess = async (teamId, row, grp) => {
           ) {
             throw new Error("账号已切换或连接已断开，停止竞猜");
           }
+          assertGuessOpenNow(grp, row, token.id);
           return tokenStore.sendMessageWithPromise(
             token.id,
             "apex_guess",
@@ -1935,6 +1983,9 @@ const doGuess = async (teamId, row, grp) => {
         `服务器限流（200400），请 ${actionCooldown.guess} 秒后再试`,
       );
     } else {
+      if (tokenStore.selectedToken?.id === token.id) {
+        refreshCurrentBets();
+      }
       message.error(`竞猜请求失败: ${e.message}`);
     }
   } finally {
@@ -1986,9 +2037,15 @@ const doVote = async () => {
     message.warning("请选择助威数量");
     return;
   }
+  try {
+    assertVoteOpenNow(voteRound.value, tokenId);
+  } catch (e) {
+    message.warning(e.message || "当前不在助威时间内");
+    return;
+  }
   voteLoading.value = true;
   try {
-    // 手动助威同样走 immediate：立即发出，由服务器的冷却窗口裁决
+    // 手动助威同样走 immediate：立即发出，由服务器的冷却窗口裁决，每次尝试前均按最新服务器时间复核窗口
     await runApexAction(
       ApexAction.VOTE,
       (queuedMs) => {
@@ -1998,6 +2055,7 @@ const doVote = async () => {
         ) {
           throw new Error("账号已切换或连接已断开，停止助威");
         }
+        assertVoteOpenNow(voteRound.value, tokenId);
         return tokenStore.sendMessageWithPromise(
           tokenId,
           "apex_vote",

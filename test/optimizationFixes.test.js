@@ -9664,4 +9664,450 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       "off-window query failure must retain known local schedule reminder",
     );
   });
+
+  test("Round14 P1: superseded tab cannot send commands via sendMessage/sendMessageWithPromise or queued XyzwWebSocketClient tasks before receiving storage event", async () => {
+    const createLiveLockBrowser = () => {
+      const held = new Map();
+      const queues = new Map();
+      return (ownerTag) => ({
+        query: async () => ({
+          held: Array.from(held.values()).map(({ name }) => ({
+            name,
+            mode: "exclusive",
+          })),
+          pending: [],
+        }),
+        request: (name, optsOrCb, maybeCb) => {
+          const cb = typeof optsOrCb === "function" ? optsOrCb : maybeCb;
+          const prev = queues.get(name) || Promise.resolve();
+          const run = prev.then(async () => {
+            held.set(name, { name, ownerTag });
+            try {
+              return await cb({ name });
+            } finally {
+              if (held.get(name)?.ownerTag === ownerTag) {
+                held.delete(name);
+              }
+            }
+          });
+          queues.set(
+            name,
+            run.then(
+              () => {},
+              () => {},
+            ),
+          );
+          return run;
+        },
+      });
+    };
+
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "alpha",
+            name: "接管发包防竞态号",
+            roleId: "1001",
+            token: "valid-alpha-send-lease-0001",
+            importMethod: "bin",
+          },
+        ]),
+      ],
+    ]);
+    const sentOnTabA = [];
+    let cancelledOnTabA = 0;
+    class TrackingWsClient {
+      constructor() {
+        this.socket = { readyState: 1 };
+      }
+      setMessageListener() {}
+      init() {
+        this.onConnect?.();
+      }
+      disconnect() {
+        if (this.socket) this.socket.readyState = 3;
+        this.socket = null;
+      }
+      cancelPendingCommands() {
+        cancelledOnTabA += 1;
+      }
+      send(cmd, params) {
+        sentOnTabA.push({ kind: "send", cmd, params });
+      }
+      async sendWithPromise(cmd, params) {
+        sentOnTabA.push({ kind: "promise", cmd, params });
+        return { ok: true };
+      }
+      sendHeartbeat() {}
+    }
+
+    const makeLocks = createLiveLockBrowser();
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb: new Map(),
+      sharedLocks: makeLocks("tabA"),
+      wsClientClass: TrackingWsClient,
+    });
+    const tabB = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb: new Map(),
+      sharedLocks: makeLocks("tabB"),
+    });
+    try {
+      // 1a. Tab A connects cleanly and can send while it owns the lease
+      assert.ok(
+        await tabA.store.createWebSocketConnection(
+          "alpha",
+          "valid-alpha-send-lease-0001",
+        ),
+      );
+      assert.equal(tabA.store.getWebSocketStatus("alpha"), "connected");
+      const okSend = await tabA.store.sendMessageWithPromise(
+        "alpha",
+        "role_getroleinfo",
+        {},
+      );
+      assert.deepEqual(okSend, { ok: true });
+      const sentBeforeTakeover = sentOnTabA.length;
+      assert.ok(sentBeforeTakeover >= 1);
+
+      // Tab B takes over alpha (writes Tab B's lease into localStorage) — NO storage event delivered to Tab A yet!
+      assert.ok(await tabB.store.takeOverCrossTabConnection("alpha"));
+      const tabBLeaseBefore = sharedStorage.get("ws_connection_alpha");
+      assert.equal(
+        JSON.parse(tabBLeaseBefore).sessionId,
+        tabB.store.currentSessionId(),
+      );
+
+      // Tab A tries sendMessageWithPromise("apex_guess") BEFORE receiving any storage notification -> MUST reject and send ZERO packets!
+      await assert.rejects(
+        tabA.store.sendMessageWithPromise("alpha", "apex_guess", {
+          teamId: "win",
+        }),
+        /已被其他标签页接管|未连接/,
+      );
+      assert.equal(
+        tabA.store.sendMessage("alpha", "apex_guess", { teamId: "win" }),
+        false,
+      );
+      assert.equal(
+        sentOnTabA.length,
+        sentBeforeTakeover,
+        "superseded Tab A must NOT invoke client.send/sendWithPromise after Tab B took over",
+      );
+      assert.ok(
+        cancelledOnTabA >= 1,
+        "superseded Tab A must synchronously cancel queued pending commands",
+      );
+      await new Promise((r) => setTimeout(r, 15));
+      assert.equal(tabA.store.getWebSocketStatus("alpha"), "disconnected");
+      assert.equal(
+        sharedStorage.get("ws_connection_alpha"),
+        tabBLeaseBefore,
+        "Tab A relinquishing its superseded socket must NOT overwrite Tab B's lease",
+      );
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+
+    // 1b. Real XyzwWebSocketClient sendQueue: commands already queued BEFORE takeover MUST be cancelled before hitting socket.send()!
+    const wireSent = [];
+    class FakeWebSocket {
+      static OPEN = 1;
+      static CLOSED = 3;
+      constructor(url) {
+        this.url = url;
+        this.readyState = FakeWebSocket.OPEN;
+        FakeWebSocket.last = this;
+      }
+      send(bin) {
+        wireSent.push(bin);
+      }
+      close() {
+        this.readyState = FakeWebSocket.CLOSED;
+      }
+    }
+    const queueTimers = [];
+    let leaseOwned = true;
+    const { XyzwWebSocketClient } = await loadModule(
+      new URL("../src/utils/xyzwWebSocket.js", import.meta.url),
+      {
+        "./bonProtocol.js": {
+          g_utils: {
+            getEnc: () => ({}),
+            encode: () => new Uint8Array([1, 2, 3]),
+            parse: (b) => b,
+          },
+        },
+        "./helperTaskRunner.js": {
+          sleep: async () => {},
+        },
+        "./logger.js": {
+          gameLogger: {
+            debug() {},
+            info() {},
+            warn() {},
+            error() {},
+            verbose() {},
+          },
+          wsLogger: {
+            debug() {},
+            info() {},
+            warn() {},
+            error() {},
+            verbose() {},
+            wsMessage() {},
+          },
+        },
+        "@/stores/cache": {
+          $CacheManager: {
+            getCache: () => ({ get: async (_k, fn) => fn(_k) }),
+            delCache() {},
+          },
+        },
+      },
+      {
+        WebSocket: FakeWebSocket,
+        setTimeout: (fn, delay) => {
+          const id = queueTimers.length + 1;
+          queueTimers.push({ id, fn, delay, cleared: false });
+          return id;
+        },
+        clearTimeout: (id) => {
+          const item = queueTimers.find((t) => t.id === id);
+          if (item) item.cleared = true;
+        },
+        setInterval: () => 1,
+        clearInterval() {},
+      },
+    );
+    const realClient = new XyzwWebSocketClient({
+      url: "wss://example.test/agent",
+      beforeSend: () => leaseOwned,
+    });
+    realClient.init();
+    FakeWebSocket.last.onopen();
+
+    // Queue two commands while Tab A still owns the lease (queued in sendQueue waiting for the 50ms loop timer)
+    const p1 = realClient.sendWithPromise("apex_guess", { teamId: "t1" }, 5000);
+    const p2 = realClient.sendWithPromise("apex_vote", { teamId: "t1" }, 5000);
+    assert.equal(realClient.sendQueue.length, 2);
+
+    // Tab B takes over the lease BEFORE the 50ms sendQueue loop executes!
+    leaseOwned = false;
+    const loopTimer = queueTimers.find((t) => !t.cleared && t.delay === 50);
+    assert.ok(loopTimer);
+    await loopTimer.fn();
+
+    await assert.rejects(p1, /失去跨标签页控制权/);
+    await assert.rejects(p2, /失去跨标签页控制权/);
+    assert.equal(
+      wireSent.length,
+      0,
+      "queued commands must be cancelled before hitting socket.send()",
+    );
+    assert.equal(realClient.sendQueue.length, 0);
+    assert.equal(realClient.wireSeq, 0);
+    realClient.disconnect();
+  });
+
+  test("Round14 P2: manual Apex doGuess and doVote re-check live server time before 200400 retry and stop after cutoff", async () => {
+    const apexVueSource = await readFile(
+      new URL("../src/components/Apex/ApexChallenge.vue", import.meta.url),
+      "utf8",
+    );
+    const scriptContent = apexVueSource.match(
+      /<script setup[^>]*>([\s\S]*?)<\/script>/,
+    )?.[1];
+    assert.ok(scriptContent);
+    const apexAst = ts.createSourceFile(
+      "ApexChallenge.js",
+      scriptContent,
+      ts.ScriptTarget.ES2022,
+      true,
+    );
+    const extractNames = [
+      "apexServerTimeSample",
+      "apexServerTimeTokenId",
+      "readLiveApexServerNowMs",
+      "assertGuessOpenNow",
+      "assertVoteOpenNow",
+      "doGuess",
+      "doVote",
+    ];
+    const extractedCode = apexAst.statements
+      .filter(
+        (node) =>
+          ts.isVariableStatement(node) &&
+          node.declarationList.declarations.some((d) =>
+            extractNames.includes(d.name.getText(apexAst)),
+          ),
+      )
+      .map((node) => node.getText(apexAst))
+      .join("\n");
+
+    const actualMap = await import("../src/utils/apexStageMap.js");
+    const rules = await loadModule(
+      new URL("../src/utils/apexRules.js", import.meta.url),
+      { "./apexStageMap": actualMap },
+    );
+
+    // Start 1 second BEFORE 64强赛 cutoff (2026-11-23 19:00:00+08:00)
+    let mockWallMs = Date.parse("2026-11-23T18:59:59+08:00");
+    let mockPerfMs = 500_000;
+    const RealDate = Date;
+    class MockDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(mockWallMs);
+        else super(...args);
+      }
+      static now() {
+        return mockWallMs;
+      }
+    }
+
+    const serverClockMod = await loadModule(
+      new URL("../src/utils/serverClock.js", import.meta.url),
+      {},
+      {
+        Date: MockDate,
+        performance: { now: () => mockPerfMs },
+      },
+    );
+    // Load REAL apexRateLimit.js with fast sleep that advances both mock clocks by the backoff delay (e.g. 3.2s-4.7s)!
+    const rateLimitMod = await loadModule(
+      new URL("../src/utils/apexRateLimit.js", import.meta.url),
+      {},
+      {
+        Date: MockDate,
+        setTimeout: (fn, ms) => {
+          mockWallMs += Number(ms) || 0;
+          mockPerfMs += Number(ms) || 0;
+          fn();
+          return 1;
+        },
+        clearTimeout() {},
+      },
+    );
+
+    const guessCalls = [];
+    const voteCalls = [];
+    const errors = [];
+    const client = {
+      serverTime: mockWallMs,
+      serverTimeSampledAt: mockPerfMs,
+    };
+    const tokenStore = {
+      selectedToken: { id: "acc-manual" },
+      wsConnections: { "acc-manual": { client } },
+      getWebSocketStatus: () => "connected",
+      sendMessageWithPromise: async (_id, cmd, params) => {
+        if (cmd === "apex_guess") {
+          guessCalls.push({ atMs: mockWallMs, params });
+          // Server replies 200400 on first click at 18:59:59!
+          throw new Error("操作太快，请稍后再试 (200400)");
+        }
+        if (cmd === "apex_vote") {
+          voteCalls.push({ atMs: mockWallMs, params });
+          throw new Error("操作太快，请稍后再试 (200400)");
+        }
+        return {};
+      },
+    };
+
+    const scheduleId64 = rules
+      .getTodayApexGuessSchedule(rules.toChinaWallClockMs(mockWallMs))
+      .stages.find((s) => s.title === "64强赛")?.scheduleId;
+    assert.ok(scheduleId64, "must locate 64强赛 scheduleId on 2026-11-23");
+
+    const ctx = vm.createContext({
+      Date: MockDate,
+      tokenStore,
+      roleResetTime: { value: { season: 1 } },
+      pendingGuessTeamId: { value: "" },
+      actionCooldown: { guess: 0, vote: 0 },
+      voteTargetTeamId: { value: "team-1" },
+      voteTargetName: { value: "热门队" },
+      voteRound: { value: 1 },
+      voteCnt: { value: 1 },
+      voteLoading: { value: false },
+      voteDialogVisible: { value: true },
+      supportOpen: { value: true },
+      canBetRow: () => true,
+      refreshCurrentBets() {},
+      fetchRoleInfo: async () => {},
+      fetchGuessHistory: async () => {},
+      fetchVoteBoard: async () => {},
+      startActionCooldown() {},
+      withApexGuessLock: async (_id, fn) => fn(),
+      runApexAction: rateLimitMod.runApexAction,
+      ApexAction: rateLimitMod.ApexAction,
+      isApexRateLimited: rateLimitMod.isApexRateLimited,
+      apexCooldownLeft: rateLimitMod.apexCooldownLeft,
+      sampleFromWebSocketClient: serverClockMod.sampleFromWebSocketClient,
+      getEstimatedServerNowSec: serverClockMod.getEstimatedServerNowSec,
+      calibrateServerTime: rules.calibrateServerTime,
+      toChinaWallClockMs: rules.toChinaWallClockMs,
+      getCurrentSeason: rules.getCurrentSeason,
+      getScheduleStatus: rules.getScheduleStatus,
+      canGuessNow: rules.canGuessNow,
+      canGuessRow: rules.canGuessRow,
+      checkSupportInTime: () =>
+        mockWallMs < Date.parse("2026-11-23T19:00:00+08:00"),
+      TIMEOUT_ACTION: 8000,
+      message: {
+        warning(msg) {
+          errors.push({ type: "warning", msg });
+        },
+        error(msg) {
+          errors.push({ type: "error", msg });
+        },
+        success() {},
+      },
+    });
+    vm.runInContext(
+      `${extractedCode}\nglobalThis.api = { doGuess, doVote };`,
+      ctx,
+    );
+
+    // Click guess 1s before cutoff -> attempt 0 hits 200400 -> real backoff pushes clock ~4.7s past 19:00:00 -> retry MUST abort without resending!
+    await ctx.api.doGuess(
+      "team-1",
+      {
+        team1Id: "team-1",
+        team1Name: "热门队",
+        team2Id: "team-2",
+        team2Name: "冷门队",
+      },
+      { scheduleId: scheduleId64, stage: 4, canBet: true, state: 2 },
+    );
+    assert.equal(
+      guessCalls.length,
+      1,
+      "doGuess must NOT resend apex_guess after 200400 backoff crosses the 19:00:00 cutoff",
+    );
+    assert.ok(
+      mockWallMs > Date.parse("2026-11-23T19:00:00+08:00"),
+      "real apexRateLimit backoff must have advanced clock past cutoff",
+    );
+    assert.ok(
+      errors.some((e) => /已截止/.test(e.msg)),
+      "UI must notify user that guess window closed instead of resending",
+    );
+
+    // Verify doVote also refuses to resend after 200400 backoff crosses support cutoff!
+    mockWallMs = Date.parse("2026-11-23T18:59:59+08:00");
+    mockPerfMs = 600_000;
+    client.serverTime = mockWallMs;
+    client.serverTimeSampledAt = mockPerfMs;
+    await ctx.api.doVote();
+    assert.equal(
+      voteCalls.length,
+      1,
+      "doVote must NOT resend apex_vote after 200400 backoff crosses support cutoff",
+    );
+  });
 });

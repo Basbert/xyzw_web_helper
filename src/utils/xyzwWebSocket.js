@@ -493,10 +493,11 @@ export function registerDefaultCommands(reg) {
  * XYZW WebSocket 客户端
  */
 export class XyzwWebSocketClient {
-  constructor({ url, utils, heartbeatMs = 5000 }) {
+  constructor({ url, utils, heartbeatMs = 5000, beforeSend = null }) {
     this.url = url;
     this.utils = utils || g_utils;
     this.enc = this.utils?.getEnc ? this.utils.getEnc("auto") : undefined;
+    this.beforeSend = typeof beforeSend === "function" ? beforeSend : null;
 
     this.socket = null;
     this.ack = 0;
@@ -963,8 +964,32 @@ export class XyzwWebSocketClient {
     }
   }
 
+  /** 取消队列中尚未发出的命令，并拒绝所有待决 Promise 请求 */
+  cancelPendingCommands(reason = "WebSocket 连接已关闭") {
+    const error = new Error(reason);
+    this.sendQueue.length = 0;
+    if (this.sendQueueTimer) {
+      clearTimeout(this.sendQueueTimer);
+      this.sendQueueTimer = null;
+    }
+    for (const [id, request] of Object.entries(this.promises)) {
+      clearTimeout(request.timer);
+      delete this.promises[id];
+      request.reject(error);
+    }
+  }
+
   /** 发送消息 */
   send(cmd, params = {}, options = {}) {
+    if (this.beforeSend && !this.beforeSend({ cmd, params })) {
+      if (options.request) {
+        this._rejectRequest(
+          options.request.seq,
+          new Error("当前连接已失去跨标签页控制权，已取消发送"),
+        );
+      }
+      return false;
+    }
     if (!this.connected) {
       if (this.manualDisconnect) {
         return false;
@@ -1019,6 +1044,9 @@ export class XyzwWebSocketClient {
       if (!this.connected || this.socket?.readyState !== WebSocket.OPEN) {
         return reject(new Error("WebSocket 连接已关闭"));
       }
+      if (this.beforeSend && !this.beforeSend({ cmd, params })) {
+        return reject(new Error("当前连接已失去跨标签页控制权，已取消发送"));
+      }
 
       // 为此请求生成唯一的seq值
       const requestSeq = ++this.seq;
@@ -1048,6 +1076,7 @@ export class XyzwWebSocketClient {
   sendHeartbeat() {
     const socket = this.socket;
     if (!this.connected || socket?.readyState !== WebSocket.OPEN) return;
+    if (this.beforeSend && !this.beforeSend({ cmd: "heart_beat" })) return;
     try {
       // Heartbeats have sequence zero and need not wait behind game commands.
       const packet = this.registry.build("heart_beat", this.ack, 0, {});
@@ -1208,6 +1237,14 @@ export class XyzwWebSocketClient {
         scheduleNext();
         return;
       }
+      if (this.beforeSend && !this.beforeSend(task)) {
+        const leaseReason = "当前连接已失去跨标签页控制权，已取消发送";
+        if (request) {
+          this._rejectRequest(request.seq, new Error(leaseReason));
+        }
+        this.cancelPendingCommands(leaseReason);
+        return;
+      }
       // Server sequences must be contiguous: cancelled or failed unsent commands use no number.
       const wireSeq =
         task.cmd === "heart_beat" && !request ? 0 : this.wireSeq + 1;
@@ -1241,6 +1278,14 @@ export class XyzwWebSocketClient {
           socket.readyState !== WebSocket.OPEN
         ) {
           throw new Error("WebSocket 连接已关闭");
+        }
+        if (this.beforeSend && !this.beforeSend(task)) {
+          const leaseReason = "当前连接已失去跨标签页控制权，已取消发送";
+          if (request) {
+            this._rejectRequest(request.seq, new Error(leaseReason));
+          }
+          this.cancelPendingCommands(leaseReason);
+          return;
         }
         if (request) {
           delete this.promises[request.seq];

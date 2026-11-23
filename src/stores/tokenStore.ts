@@ -3113,6 +3113,7 @@ export const useTokenStore = defineStore("tokens", () => {
   const currentSessionId = generateSessionId();
   const crossTabLeaseRevision = ref(0);
   const liveConnectionLocks = new Map<string, () => void>();
+  const persistedLeaseTokenIds = new Set<string>();
   const LIVE_CONNECTION_LOCK_PREFIX = "xyzw-ws-live:";
 
   const hasLiveLockSupport = () =>
@@ -3238,6 +3239,7 @@ export const useTokenStore = defineStore("tokens", () => {
     const key = `ws_connection_${tokenId}`;
     if (action === "disconnected" && sessionId === currentSessionId) {
       releaseLiveConnectionLock(tokenId);
+      persistedLeaseTokenIds.delete(tokenId);
     }
     try {
       const previous = JSON.parse(localStorage.getItem(key) || "null");
@@ -3258,6 +3260,12 @@ export const useTokenStore = defineStore("tokens", () => {
           : {}),
       };
       localStorage.setItem(key, JSON.stringify(state));
+      if (
+        sessionId === currentSessionId &&
+        (action === "connecting" || action === "connected")
+      ) {
+        persistedLeaseTokenIds.add(tokenId);
+      }
       if (activeConnections.value) {
         writeActiveConnections({
           ...readLiveActiveConnections(),
@@ -3811,6 +3819,12 @@ export const useTokenStore = defineStore("tokens", () => {
       const connection = wsConnections.value[tokenId];
       const isCurrentConnection = () =>
         Boolean(connection && wsConnections.value[tokenId] === connection);
+      (
+        wsClient as XyzwWebSocketClient & {
+          beforeSend?: (() => boolean) | null;
+        }
+      ).beforeSend = () =>
+        isCurrentConnection() && ensureActiveSendLease(tokenId);
       let established = false;
       let discardingStale = false;
       const isStaleAttempt = () =>
@@ -3906,7 +3920,7 @@ export const useTokenStore = defineStore("tokens", () => {
           ) {
             // A suspended page can miss a storage event while another tab
             // takes over. Relinquish the stale client without rewriting its lease.
-            closeWebSocketConnection(tokenId);
+            relinquishSupersededConnection(tokenId, connection);
             return;
           }
           if (
@@ -4166,6 +4180,67 @@ export const useTokenStore = defineStore("tokens", () => {
     }
   };
 
+  // 同步取消已失权连接中尚未发出的命令并优雅关闭旧连接，防止旧页在收到 storage 通知前继续发包
+  const relinquishSupersededConnection = (
+    tokenId: string,
+    connection: Partial<WebSocketConnection> | undefined,
+    reason = `该账号已被其他标签页接管，已停止发送命令 [${tokenId}]`,
+  ) => {
+    if (!connection) return;
+    releaseLiveConnectionLock(tokenId);
+    persistedLeaseTokenIds.delete(tokenId);
+    const client = connection.client as
+      | (XyzwWebSocketClient & {
+          cancelPendingCommands?: (message?: string) => void;
+        })
+      | null
+      | undefined;
+    if (typeof client?.cancelPendingCommands === "function") {
+      client.cancelPendingCommands(reason);
+    }
+    if (connection.status !== "disconnecting") {
+      connection.status = "disconnecting";
+      closeWebSocketConnectionAsync(tokenId, false, connection).catch(
+        (error) => {
+          wsLogger.error(`关闭失效连接失败 [${tokenId}]:`, error);
+        },
+      );
+    }
+  };
+
+  // 发送前实时核对 localStorage 中的当前跨标签页租约，若已被接管或失效则立即停发并释放旧连接
+  const ensureActiveSendLease = (tokenId: string): boolean => {
+    if (typeof localStorage === "undefined" || !localStorage?.getItem) {
+      return true;
+    }
+    const connection = wsConnections.value[tokenId];
+    if (!connection || connection.sessionId !== currentSessionId) {
+      return true;
+    }
+    let leaseLost = false;
+    try {
+      const raw = localStorage.getItem(`ws_connection_${tokenId}`);
+      if (!raw) {
+        leaseLost = persistedLeaseTokenIds.has(tokenId);
+      } else {
+        const state = JSON.parse(raw) as Partial<CrossTabConnectionState>;
+        leaseLost =
+          state?.sessionId !== currentSessionId ||
+          (state.action !== "connecting" && state.action !== "connected");
+      }
+    } catch {
+      leaseLost = false;
+    }
+    if (!leaseLost) {
+      return true;
+    }
+    wsLogger.info(
+      `发送前检测到连接已失去跨标签页租约，取消待发命令并断开旧连接: ${tokenId}`,
+    );
+    relinquishSupersededConnection(tokenId, connection);
+    return false;
+  };
+
   // 发送消息到WebSocket
   const sendMessage = (
     tokenId: string,
@@ -4176,6 +4251,9 @@ export const useTokenStore = defineStore("tokens", () => {
     const connection = wsConnections.value[tokenId];
     if (!connection || connection.status !== "connected") {
       wsLogger.error(`WebSocket未连接，无法发送消息 [${tokenId}]`);
+      return false;
+    }
+    if (!ensureActiveSendLease(tokenId)) {
       return false;
     }
 
@@ -4214,6 +4292,14 @@ export const useTokenStore = defineStore("tokens", () => {
     const connection = wsConnections.value[tokenId];
     if (!connection || connection.status !== "connected") {
       return Promise.reject(new Error(`WebSocket未连接 [${tokenId}]`));
+    }
+    if (
+      typeof ensureActiveSendLease === "function" &&
+      !ensureActiveSendLease(tokenId)
+    ) {
+      return Promise.reject(
+        new Error(`该账号已被其他标签页接管，已停止发送命令 [${tokenId}]`),
+      );
     }
 
     const client = connection.client;
@@ -5334,6 +5420,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
       // 清理所有锁和状态
       releaseAllLiveConnectionLocks();
+      persistedLeaseTokenIds.clear();
       connectionLocks.value = {};
       writeActiveConnections({});
       desiredConnections.clear();
@@ -5442,7 +5529,7 @@ export const useTokenStore = defineStore("tokens", () => {
             wsLogger.info(
               `检测到其他标签页已接管同一token，关闭本地连接: ${tokenId}`,
             );
-            closeWebSocketConnectionAsync(tokenId);
+            relinquishSupersededConnection(tokenId, localConnection);
           }
         } catch (error) {
           wsLogger.warn("解析跨标签页状态失败:", error);

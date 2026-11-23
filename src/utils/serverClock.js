@@ -56,7 +56,12 @@ export function sampleFromWebSocketClient(
   const serverTimeMs = Number(client.serverTime);
   if (!Number.isFinite(serverTimeMs) || serverTimeMs <= 0) return null;
   const clientSampledAt = Number(client.serverTimeSampledAt);
-  if (Number.isFinite(clientSampledAt)) {
+  if (
+    Number.isFinite(clientSampledAt) &&
+    (!previousSample ||
+      previousSample.serverTimeMs === serverTimeMs ||
+      clientSampledAt !== previousSample.sampledAtMs)
+  ) {
     return {
       serverTimeMs,
       sampledAtMs: clientSampledAt,
