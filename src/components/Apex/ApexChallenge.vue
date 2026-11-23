@@ -105,6 +105,14 @@
       <code>/tmp/xyzw_config.json</code>， 然后重跑随附的生成脚本刷新快照。
     </NAlert>
 
+    <!-- 跨日角色日期冲突提示 -->
+    <NAlert v-if="resetDayMismatch" type="warning" style="margin-bottom: 12px">
+      <template #header>角色日期与服务端实时日期不一致</template>
+      角色信息返回日期为
+      {{ roleResetTime?.day || "-" }}，与当前服务端北京时间日期不一致。
+      为避免误操作旧赛程，已暂停竞猜与助威发送，请点击右上角「刷新数据」重新同步。
+    </NAlert>
+
     <!-- 空状态 -->
     <NEmpty
       v-if="!loading && !roleInfo.apexRoleInfo"
@@ -617,6 +625,9 @@
       :title="`助威 ${voteTargetName || ''}`"
       style="width: 380px"
       :bordered="false"
+      :closable="!voteLoading"
+      :mask-closable="!voteLoading"
+      :close-on-esc="!voteLoading"
     >
       <div class="vote-dialog-body">
         <NSpace vertical size="large">
@@ -626,23 +637,49 @@
             个助威道具
           </div>
           <div class="vote-quantity">
-            <NButton size="small" @click="voteChangeNum(-10)">-10</NButton>
-            <NButton size="small" @click="voteChangeNum(-1)">-1</NButton>
+            <NButton
+              size="small"
+              :disabled="voteLoading"
+              @click="voteChangeNum(-10)"
+              >-10</NButton
+            >
+            <NButton
+              size="small"
+              :disabled="voteLoading"
+              @click="voteChangeNum(-1)"
+              >-1</NButton
+            >
             <span class="vote-num">{{ voteCnt }}</span>
-            <NButton size="small" @click="voteChangeNum(1)">+1</NButton>
-            <NButton size="small" @click="voteChangeNum(10)">+10</NButton>
-            <NButton size="small" @click="voteChangeNum(voteMaxCnt)"
+            <NButton
+              size="small"
+              :disabled="voteLoading"
+              @click="voteChangeNum(1)"
+              >+1</NButton
+            >
+            <NButton
+              size="small"
+              :disabled="voteLoading"
+              @click="voteChangeNum(10)"
+              >+10</NButton
+            >
+            <NButton
+              size="small"
+              :disabled="voteLoading"
+              @click="voteChangeNum(voteMaxCnt)"
               >MAX</NButton
             >
           </div>
           <NSpace justify="end">
-            <NButton size="small" @click="voteDialogVisible = false"
+            <NButton
+              size="small"
+              :disabled="voteLoading"
+              @click="voteDialogVisible = false"
               >取消</NButton
             >
             <NButton
               size="small"
               type="primary"
-              :disabled="actionCooldown.vote > 0"
+              :disabled="voteLoading || actionCooldown.vote > 0"
               :loading="voteLoading"
               @click="doVote"
             >
@@ -707,7 +744,6 @@ import {
   ApexRoundPhase,
   ApexScheduleStatus,
   ApexStageType,
-  calibrateServerTime,
   canGuessNow,
   canGuessRow,
   checkNowInSeason,
@@ -788,7 +824,7 @@ const VOTE_BOARD_MAX = apexConstantConf.rankShowNum || 200;
 /** 本地时钟推进计数：让开放判定在 lockTime / fightTime 准时切换，不必等下一次轮询 */
 const clockTick = ref(0);
 
-/** apexRoleInfo.resetTime 原始值，供日偏差校准读取 */
+/** apexRoleInfo.resetTime 原始值，用于校验赛季与跨日角色日期是否一致 */
 const roleResetTime = ref({});
 
 let apexServerTimeSample = null;
@@ -812,21 +848,29 @@ const readLiveApexServerNowMs = (
   );
   const estimatedUtcMs =
     getEstimatedServerNowSec(apexServerTimeSample, Date.now()) * 1000;
-  return calibrateServerTime(
-    toChinaWallClockMs(estimatedUtcMs),
-    roleResetTime.value?.day,
-  );
+  // 始终以实时服务端北京时间校验赛程，绝不用滞后的 resetTime.day 把时钟拨回前一天。
+  return toChinaWallClockMs(estimatedUtcMs);
 };
 
 /**
  * 服务端当前时间（ms，北京时间墙钟坐标系）。
  *
- * 与每日任务和竞猜卡片共用单调服务器时钟 + 北京时间转换，再叠加 resetTime.day
- * 的日级校准，确保非 UTC+8 设备下各页面对竞猜窗口的判定完全一致。
+ * 与每日任务和竞猜卡片共用单调服务器时钟 + 北京时间转换，确保非 UTC+8 设备下
+ * 各页面对竞猜窗口的判定完全一致，且跨日时不会被旧的 resetTime.day 拨回前一天。
  */
 const serverNowMs = computed(() => {
   void clockTick.value; // 建立依赖：本地时钟推进时重算
   return readLiveApexServerNowMs();
+});
+
+/** 角色返回的 resetTime.day 是否与实时服务端北京时间日期冲突 */
+const resetDayMismatch = computed(() => {
+  const roleDay = String(roleResetTime.value?.day ?? "").trim();
+  if (!/^\d{6}$/.test(roleDay)) return false;
+  const liveDate = new Date(serverNowMs.value);
+  if (!Number.isFinite(liveDate.getTime())) return false;
+  const liveDay = `${String(liveDate.getFullYear() % 100).padStart(2, "0")}${String(liveDate.getMonth() + 1).padStart(2, "0")}${String(liveDate.getDate()).padStart(2, "0")}`;
+  return roleDay !== liveDay;
 });
 
 // ==================== 响应式数据 ====================
@@ -1384,8 +1428,8 @@ const fetchRoleInfo = async () => {
   const token = tokenStore.selectedToken;
   if (!token) return null;
   const tokenId = token.id;
-  try {
-    const res = await runApexAction(
+  const readOnce = () =>
+    runApexAction(
       ApexAction.READ,
       (queuedMs) =>
         tokenStore.sendMessageWithPromise(
@@ -1396,7 +1440,21 @@ const fetchRoleInfo = async () => {
         ),
       { maxRetry: 1 },
     );
+  try {
+    let res = await readOnce();
     if (tokenStore.selectedToken?.id !== tokenId) return null;
+    const firstDay = String(res?.apexRoleInfo?.resetTime?.day ?? "").trim();
+    if (/^\d{6}$/.test(firstDay)) {
+      const liveDate = new Date(readLiveApexServerNowMs(tokenId));
+      if (Number.isFinite(liveDate.getTime())) {
+        const liveDay = `${String(liveDate.getFullYear() % 100).padStart(2, "0")}${String(liveDate.getMonth() + 1).padStart(2, "0")}${String(liveDate.getDate()).padStart(2, "0")}`;
+        if (firstDay !== liveDay) {
+          // 跨日瞬间角色日期可能短暂滞后，重拉一次给服务端刷新机会
+          res = await readOnce();
+          if (tokenStore.selectedToken?.id !== tokenId) return null;
+        }
+      }
+    }
     const ri = res?.apexRoleInfo;
     if (ri) {
       roleInfo.value.apexRoleInfo = ri;
@@ -1880,6 +1938,19 @@ const fetchVoteBoard = async () => {
 
 const assertGuessOpenNow = (grp, row, targetTokenId) => {
   const liveNowMs = readLiveApexServerNowMs(targetTokenId);
+  const roleDay = String(roleResetTime.value?.day ?? "").trim();
+  if (/^\d{6}$/.test(roleDay)) {
+    const liveDate = new Date(liveNowMs);
+    if (Number.isFinite(liveDate.getTime())) {
+      const liveDay = `${String(liveDate.getFullYear() % 100).padStart(2, "0")}${String(liveDate.getMonth() + 1).padStart(2, "0")}${String(liveDate.getDate()).padStart(2, "0")}`;
+      if (roleDay !== liveDay) {
+        throw Object.assign(
+          new Error("角色日期与服务端实时日期不一致，请刷新页面后再试"),
+          { notSent: true },
+        );
+      }
+    }
+  }
   const liveSeason = getCurrentSeason(liveNowMs);
   const reportedSeason = Number(roleResetTime.value?.season) || 0;
   if (reportedSeason > 0 && reportedSeason !== liveSeason) {
@@ -1903,6 +1974,19 @@ const assertGuessOpenNow = (grp, row, targetTokenId) => {
 
 const assertVoteOpenNow = (targetRound, targetTokenId) => {
   const liveNowMs = readLiveApexServerNowMs(targetTokenId);
+  const roleDay = String(roleResetTime.value?.day ?? "").trim();
+  if (/^\d{6}$/.test(roleDay)) {
+    const liveDate = new Date(liveNowMs);
+    if (Number.isFinite(liveDate.getTime())) {
+      const liveDay = `${String(liveDate.getFullYear() % 100).padStart(2, "0")}${String(liveDate.getMonth() + 1).padStart(2, "0")}${String(liveDate.getDate()).padStart(2, "0")}`;
+      if (roleDay !== liveDay) {
+        throw Object.assign(
+          new Error("角色日期与服务端实时日期不一致，请刷新页面后再试"),
+          { notSent: true },
+        );
+      }
+    }
+  }
   const liveSeason = getCurrentSeason(liveNowMs);
   const reportedSeason = Number(roleResetTime.value?.season) || 0;
   if (reportedSeason > 0 && reportedSeason !== liveSeason) {
@@ -1945,37 +2029,46 @@ const doGuess = async (teamId, row, grp) => {
   }
   const token = tokenStore.selectedToken;
   if (!token) return;
+  const confirmedTokenId = token.id;
+  const confirmedTeamId = teamId;
+  const confirmedTeamName =
+    row.team1Id === confirmedTeamId ? row.team1Name : row.team2Name;
+  const confirmedGrp = { scheduleId: grp.scheduleId, stage: grp.stage };
+  const confirmedRow = {
+    team1Win: Boolean(row.team1Win),
+    team2Win: Boolean(row.team2Win),
+  };
   try {
-    assertGuessOpenNow(grp, row, token.id);
+    assertGuessOpenNow(confirmedGrp, confirmedRow, confirmedTokenId);
   } catch (e) {
     refreshCurrentBets();
     message.warning(e.message || "该场竞猜当前不可押注");
     return;
   }
-  const name = row.team1Id === teamId ? row.team1Name : row.team2Name;
-  pendingGuessTeamId.value = teamId;
+  pendingGuessTeamId.value = confirmedTeamId;
   try {
     // 手动竞猜走 immediate：不排队、不等冷却，直接发；被 200400 打回才退避重试，且每次入队和出队实际发包前均按最新服务器时间复核窗口
     const verifyGuessReady = () => {
       if (
-        tokenStore.selectedToken?.id !== token.id ||
-        tokenStore.getWebSocketStatus(token.id) !== "connected"
+        pendingGuessTeamId.value !== confirmedTeamId ||
+        tokenStore.selectedToken?.id !== confirmedTokenId ||
+        tokenStore.getWebSocketStatus(confirmedTokenId) !== "connected"
       ) {
         throw Object.assign(new Error("账号已切换或连接已断开，停止竞猜"), {
           notSent: true,
         });
       }
-      assertGuessOpenNow(grp, row, token.id);
+      assertGuessOpenNow(confirmedGrp, confirmedRow, confirmedTokenId);
     };
-    await withApexGuessLock(token.id, () =>
+    await withApexGuessLock(confirmedTokenId, () =>
       runApexAction(
         ApexAction.GUESS,
         (queuedMs) => {
           verifyGuessReady();
           return tokenStore.sendMessageWithPromise(
-            token.id,
+            confirmedTokenId,
             "apex_guess",
-            { teamId },
+            { teamId: confirmedTeamId },
             TIMEOUT_ACTION + queuedMs,
             { beforeSend: verifyGuessReady },
           );
@@ -1987,9 +2080,9 @@ const doGuess = async (teamId, row, grp) => {
       ),
     );
     // 业务错误码由 xyzwWebSocket.js 直接 reject，成功分支即 resolve
-    message.success(`已竞猜 ${name}，等待开赛结果`);
+    message.success(`已竞猜 ${confirmedTeamName}，等待开赛结果`);
     actionCooldown.guess = 0;
-    if (tokenStore.selectedToken?.id === token.id) {
+    if (tokenStore.selectedToken?.id === confirmedTokenId) {
       await fetchRoleInfo();
       refreshCurrentBets();
       fetchGuessHistory();
@@ -2001,23 +2094,26 @@ const doGuess = async (teamId, row, grp) => {
         `服务器限流（200400），请 ${actionCooldown.guess} 秒后再试`,
       );
     } else if (e?.notSent) {
-      if (tokenStore.selectedToken?.id === token.id) {
+      if (tokenStore.selectedToken?.id === confirmedTokenId) {
         refreshCurrentBets();
       }
       message.warning(`竞猜未发送：${e.message}`);
     } else {
-      if (tokenStore.selectedToken?.id === token.id) {
+      if (tokenStore.selectedToken?.id === confirmedTokenId) {
         refreshCurrentBets();
       }
       message.error(`竞猜请求失败: ${e.message}`);
     }
   } finally {
-    pendingGuessTeamId.value = "";
+    if (pendingGuessTeamId.value === confirmedTeamId) {
+      pendingGuessTeamId.value = "";
+    }
   }
 };
 
 /** 打开助威数量选择对话框 */
 const openVoteDialog = (teamId, name, round) => {
+  if (voteLoading.value) return;
   voteTargetTeamId.value = teamId;
   voteTargetName.value = name || "该队伍";
   voteRound.value = round;
@@ -2028,6 +2124,7 @@ const openVoteDialog = (teamId, name, round) => {
 
 /** 调整助威数量（-10 / -1 / +1 / +10 / MAX） */
 const voteChangeNum = (delta) => {
+  if (voteLoading.value) return;
   const max = voteMaxCnt.value;
   const min = max > 0 ? VOTE_BASE_CNT : 0;
   voteCnt.value = Math.max(min, Math.min(max, voteCnt.value + delta));
@@ -2041,10 +2138,15 @@ const voteChangeNum = (delta) => {
  * 由服务器自己的冷却窗口裁决，客户端不额外制造等待。
  */
 const doVote = async () => {
+  if (voteLoading.value) return;
   const token = tokenStore.selectedToken;
-  if (!token || !voteTargetTeamId.value) return;
-  const tokenId = token.id;
-  if (!voteRound.value) {
+  const confirmedTokenId = token?.id;
+  const confirmedTeamId = voteTargetTeamId.value;
+  const confirmedTeamName = voteTargetName.value || "该队伍";
+  const confirmedRound = voteRound.value;
+  const confirmedVoteCnt = Number(voteCnt.value);
+  if (!confirmedTokenId || !confirmedTeamId) return;
+  if (!confirmedRound) {
     message.warning("助威期数无效，请重新选择队伍");
     return;
   }
@@ -2056,41 +2158,42 @@ const doVote = async () => {
     message.warning("当前不在助威时间内");
     return;
   }
-  if (voteCnt.value <= 0) {
+  if (!Number.isInteger(confirmedVoteCnt) || confirmedVoteCnt <= 0) {
     message.warning("请选择助威数量");
     return;
   }
   try {
-    assertVoteOpenNow(voteRound.value, tokenId);
+    assertVoteOpenNow(confirmedRound, confirmedTokenId);
   } catch (e) {
     message.warning(e.message || "当前不在助威时间内");
     return;
   }
   voteLoading.value = true;
   try {
-    // 手动助威同样走 immediate：立即发出，由服务器的冷却窗口裁决，且每次入队和出队实际发包前均按最新服务器时间复核窗口
+    // 手动助威同样走 immediate：确认时固定账号/队伍/轮次/票数快照，首次发送、200400 重试、出队校验和结果提示均使用同一份数据
     const verifyVoteReady = () => {
       if (
-        tokenStore.selectedToken?.id !== tokenId ||
-        tokenStore.getWebSocketStatus(tokenId) !== "connected"
+        !voteDialogVisible.value ||
+        tokenStore.selectedToken?.id !== confirmedTokenId ||
+        tokenStore.getWebSocketStatus(confirmedTokenId) !== "connected"
       ) {
         throw Object.assign(new Error("账号已切换或连接已断开，停止助威"), {
           notSent: true,
         });
       }
-      assertVoteOpenNow(voteRound.value, tokenId);
+      assertVoteOpenNow(confirmedRound, confirmedTokenId);
     };
     await runApexAction(
       ApexAction.VOTE,
       (queuedMs) => {
         verifyVoteReady();
         return tokenStore.sendMessageWithPromise(
-          tokenId,
+          confirmedTokenId,
           "apex_vote",
           {
-            teamId: voteTargetTeamId.value,
-            round: voteRound.value,
-            voteCnt: voteCnt.value,
+            teamId: confirmedTeamId,
+            round: confirmedRound,
+            voteCnt: confirmedVoteCnt,
           },
           TIMEOUT_ACTION + queuedMs,
           { beforeSend: verifyVoteReady },
@@ -2101,12 +2204,12 @@ const doVote = async () => {
         onWait: (ms) => startActionCooldown("vote", ms),
       },
     );
-    if (tokenStore.selectedToken?.id !== tokenId) return;
-    message.success(`已为 ${voteTargetName.value} 助威 ${voteCnt.value} 次`);
+    message.success(`已为 ${confirmedTeamName} 助威 ${confirmedVoteCnt} 次`);
+    if (tokenStore.selectedToken?.id !== confirmedTokenId) return;
     voteDialogVisible.value = false;
     actionCooldown.vote = 0;
     await fetchRoleInfo();
-    if (tokenStore.selectedToken?.id !== tokenId) return;
+    if (tokenStore.selectedToken?.id !== confirmedTokenId) return;
     fetchVoteBoard();
   } catch (e) {
     if (isApexRateLimited(e)) {
@@ -2320,6 +2423,7 @@ watch(
     currentBets.value = [];
     selectedRound.value = null;
     pendingGuessTeamId.value = "";
+    voteDialogVisible.value = false;
     fetchingStages.clear();
     hasAutoLoaded.value = false;
     stopPolling();

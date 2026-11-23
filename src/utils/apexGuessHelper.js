@@ -6,7 +6,6 @@ import {
 import { parseApexClaimableRewards } from "./apexRewardState.js";
 import {
   ApexScheduleStatus,
-  calibrateServerTime,
   canGuessRow,
   getAdvanceNum,
   getCurrentRounds,
@@ -189,6 +188,42 @@ function createLiveChinaClock(tokenStore, tokenId, options = {}) {
   };
 }
 
+function normalizeResetDay(dayStr) {
+  const day = String(dayStr ?? "").trim();
+  return /^\d{6}$/.test(day) ? day : "";
+}
+
+function formatChinaResetDay(chinaWallClockMs) {
+  if (!Number.isFinite(chinaWallClockMs)) return "";
+  const d = new Date(chinaWallClockMs);
+  if (!Number.isFinite(d.getTime())) return "";
+  const yy = String(d.getFullYear() % 100).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yy}${mm}${dd}`;
+}
+
+function hasResetDayConflict(apexInfo, chinaWallClockMs) {
+  const roleDay = normalizeResetDay(apexInfo?.resetTime?.day);
+  if (!roleDay) return false;
+  const liveDay = formatChinaResetDay(chinaWallClockMs);
+  return Boolean(liveDay && roleDay !== liveDay);
+}
+
+async function fetchFreshApexInfo(
+  tokenStore,
+  tokenId,
+  getNowMs,
+  checkInterrupted = () => {},
+) {
+  let info = await fetchApexInfo(tokenStore, tokenId, checkInterrupted);
+  if (hasResetDayConflict(info, getNowMs())) {
+    // 跨日瞬间角色 resetTime.day 可能仍停留在前一天，重拉一次给服务端刷新机会
+    info = await fetchApexInfo(tokenStore, tokenId, checkInterrupted);
+  }
+  return info;
+}
+
 /** Calculate status only from a response belonging to the requested account. */
 export function buildApexGuessStatus(
   apexInfo,
@@ -201,11 +236,14 @@ export function buildApexGuessStatus(
   } catch {
     claimState = "unknown";
   }
-  const serverNow = calibrateServerTime(nowMs, apexInfo?.resetTime?.day);
+  // 始终以实时北京时间校验当前赛程，绝不用滞后的 resetTime.day 把时钟拨回前一天。
+  const serverNow = nowMs;
+  const resetDayMismatch = hasResetDayConflict(apexInfo, serverNow);
   const season = getCurrentSeason(serverNow);
   const reportedSeason = Number(apexInfo?.resetTime?.season) || 0;
   const scheduleMismatch = reportedSeason > 0 && reportedSeason !== season;
-  const openRounds = scheduleMismatch ? [] : resolveOpenGuesses(serverNow);
+  const openRounds =
+    scheduleMismatch || resetDayMismatch ? [] : resolveOpenGuesses(serverNow);
   const details = [];
   let pendingStagesCount = 0;
   let remainingSlots = 0;
@@ -244,6 +282,8 @@ export function buildApexGuessStatus(
   let summaryText = "当前赛程内暂无开放的逐鹿盐山竞猜";
   if (scheduleMismatch) {
     summaryText = "服务器逐鹿盐山赛季与本地赛程配置不一致，赛程待核对";
+  } else if (resetDayMismatch) {
+    summaryText = "角色日期与服务端实时日期不一致，赛程待核对";
   } else if (uncertainStagesCount) {
     summaryText = "部分竞猜状态无法确认，请查看对阵详情";
   } else if (pendingStagesCount) {
@@ -258,7 +298,11 @@ export function buildApexGuessStatus(
     season: openRounds[0]?.season ?? season,
     serverNowMs: serverNow,
     scheduleMismatch,
-    nextGuess: scheduleMismatch ? null : getNextApexGuessWindow(serverNow),
+    resetDayMismatch,
+    nextGuess:
+      scheduleMismatch || resetDayMismatch
+        ? null
+        : getNextApexGuessWindow(serverNow),
     openRoundsCount: openRounds.length,
     openStagesCount: details.length,
     pendingStagesCount,
@@ -296,7 +340,8 @@ export function compactApexGuessStatus(status) {
       : 0;
   if (rewards > 0) {
     const claim = `待领奖 ${rewards} 项`;
-    if (status.scheduleMismatch) return `${claim} · 赛程待核对`;
+    if (status.scheduleMismatch || status.resetDayMismatch)
+      return `${claim} · 赛程待核对`;
     if (status.uncertainStagesCount) return `${claim} · 竞猜状态待确认`;
     return status.pendingStagesCount
       ? `待竞猜 ${status.pendingStagesCount} 阶段 · ${claim}`
@@ -304,7 +349,7 @@ export function compactApexGuessStatus(status) {
   }
   if (status.uncertainStagesCount) return "状态待确认";
   if (!status.hasOpenGuesses) {
-    if (status.scheduleMismatch) return "赛程待核对";
+    if (status.scheduleMismatch || status.resetDayMismatch) return "赛程待核对";
     return next ? `下次预计 ${next}` : "暂无开放，后续赛程待确认";
   }
   if (status.pendingStagesCount)
@@ -314,9 +359,10 @@ export function compactApexGuessStatus(status) {
 
 export async function getApexGuessStatus(tokenStore, tokenId, options = {}) {
   const getNowMs = createLiveChinaClock(tokenStore, tokenId, options);
-  const info = await fetchApexInfo(
+  const info = await fetchFreshApexInfo(
     tokenStore,
     tokenId,
+    getNowMs,
     options.checkInterrupted,
   );
   return buildApexGuessStatus(info, getNowMs());
@@ -328,11 +374,11 @@ function openTabNow(
   tab,
   nowMs = safeToChinaWallClockMs(Date.now()),
 ) {
-  const now = calibrateServerTime(nowMs, info.resetTime?.day);
-  const season = getCurrentSeason(now);
+  if (hasResetDayConflict(info, nowMs)) return false;
+  const season = getCurrentSeason(nowMs);
   const reportedSeason = Number(info?.resetTime?.season) || 0;
   if (reportedSeason > 0 && reportedSeason !== season) return false;
-  return resolveOpenGuesses(now).some(
+  return resolveOpenGuesses(nowMs).some(
     (entry) =>
       entry.season === open.season &&
       entry.round === open.round &&
@@ -395,8 +441,14 @@ export async function runApexAutoGuess({
 
     try {
       onProgress("正在检查逐鹿盐山状态…");
-      info = await fetchApexInfo(tokenStore, tokenId, checkInterrupted);
-      const initial = buildApexGuessStatus(info, getNowMs());
+      info = await fetchFreshApexInfo(
+        tokenStore,
+        tokenId,
+        getNowMs,
+        checkInterrupted,
+      );
+      const initialNowMs = getNowMs();
+      const initial = buildApexGuessStatus(info, initialNowMs);
       if (initial.scheduleMismatch) {
         result.outcome = "partial";
         result.reason =
@@ -405,9 +457,14 @@ export async function runApexAutoGuess({
         result.message = resultMessage(result);
         return result;
       }
-      const openRounds = resolveOpenGuesses(
-        calibrateServerTime(getNowMs(), info.resetTime?.day),
-      );
+      if (initial.resetDayMismatch) {
+        result.outcome = "partial";
+        result.reason = "角色日期与服务端实时日期不一致，已跳过自动竞猜";
+        result.verifiedStatus = initial;
+        result.message = resultMessage(result);
+        return result;
+      }
+      const openRounds = resolveOpenGuesses(initialNowMs);
       if (!openRounds.length) {
         result.outcome = "no-open";
         result.verifiedStatus = initial;
@@ -541,7 +598,15 @@ export async function runApexAutoGuess({
             try {
               const assertTabOpenBeforeSend = () => {
                 checkInterrupted();
-                if (!openTabNow(info, open, tab, getNowMs())) {
+                const liveNowMs = getNowMs();
+                if (hasResetDayConflict(info, liveNowMs)) {
+                  const error = new Error(
+                    "角色日期与服务端实时日期不一致，停止竞猜",
+                  );
+                  error.notSent = true;
+                  throw error;
+                }
+                if (!openTabNow(info, open, tab, liveNowMs)) {
                   const error = new Error("该阶段已结束，停止竞猜");
                   error.notSent = true;
                   throw error;
@@ -588,9 +653,10 @@ export async function runApexAutoGuess({
       checkInterrupted();
       if (!stopSending) {
         try {
-          const after = await fetchApexInfo(
+          const after = await fetchFreshApexInfo(
             tokenStore,
             tokenId,
+            getNowMs,
             checkInterrupted,
           );
           result.verifiedStatus = buildApexGuessStatus(after, getNowMs());
@@ -601,6 +667,8 @@ export async function runApexAutoGuess({
       }
       if (result.verifiedStatus?.scheduleMismatch) {
         issue ||= "服务器赛季与本地赛程不一致，赛程待核对";
+      } else if (result.verifiedStatus?.resetDayMismatch) {
+        issue ||= "角色日期与服务端实时日期不一致，赛程待核对";
       } else if (result.verifiedStatus?.uncertainStagesCount) {
         issue ||= "部分竞猜状态无法确认";
       } else if (result.verifiedStatus?.pendingStagesCount) {
@@ -684,6 +752,12 @@ export async function runDailyApexGuessCheck({
       log(reminder, "warning");
       return { status: "schedule-mismatch", ok: false, reminder };
     }
+    if (status.resetDayMismatch) {
+      const reminder =
+        "逐鹿盐山赛程待核对：角色日期与服务端实时日期不一致，已跳过自动竞猜，请稍后刷新核对";
+      log(reminder, "warning");
+      return { status: "reset-day-mismatch", ok: false, reminder };
+    }
     const serverNowMs = status.serverNowMs ?? getChinaNowMs();
     const serverToday = safeTodaySchedule(serverNowMs);
 
@@ -713,17 +787,26 @@ export async function runDailyApexGuessCheck({
         }
         if (result.outcome !== "no-open") {
           const mismatch = Boolean(result.verifiedStatus?.scheduleMismatch);
+          const dayMismatch = Boolean(result.verifiedStatus?.resetDayMismatch);
           const reminder = mismatch
             ? "逐鹿盐山赛程待核对：服务器赛季与本地配置不一致，已停止自动竞猜，请前往逐鹿盐山卡片核对"
-            : formatLaterStageReminder(
-                safeTodaySchedule(
-                  result.verifiedStatus?.serverNowMs ?? getChinaNowMs(),
-                ),
-              );
+            : dayMismatch
+              ? "逐鹿盐山赛程待核对：角色日期与服务端实时日期不一致，已跳过自动竞猜，请稍后刷新核对"
+              : formatLaterStageReminder(
+                  safeTodaySchedule(
+                    result.verifiedStatus?.serverNowMs ?? getChinaNowMs(),
+                  ),
+                );
           log(`逐鹿盐山竞猜：${result.message}`, "warning");
-          if (reminder) log(reminder, mismatch ? "warning" : "info");
+          if (reminder) {
+            log(reminder, mismatch || dayMismatch ? "warning" : "info");
+          }
           return {
-            status: mismatch ? "schedule-mismatch" : result.outcome,
+            status: mismatch
+              ? "schedule-mismatch"
+              : dayMismatch
+                ? "reset-day-mismatch"
+                : result.outcome,
             ok: false,
             reminder,
             result,
@@ -735,7 +818,8 @@ export async function runDailyApexGuessCheck({
         if (latestToday.isGuessDay) {
           const reminder = formatOutsideWindowReminder(
             latestToday,
-            result.verifiedStatus?.scheduleMismatch
+            result.verifiedStatus?.scheduleMismatch ||
+              result.verifiedStatus?.resetDayMismatch
               ? null
               : result.verifiedStatus?.nextGuess,
             latestNow,

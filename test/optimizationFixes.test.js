@@ -10426,4 +10426,535 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     );
     wsClient.disconnect();
   });
+
+  test("Round16 P1: Beijing midnight rollover with stale role resetTime.day never rewinds to yesterday stage 176, re-reads once, skips on persistent conflict, and re-checks before socket.send", async () => {
+    const actualMap = await import("../src/utils/apexStageMap.js");
+    const rules = await loadModule(
+      new URL("../src/utils/apexRules.js", import.meta.url),
+      { "./apexStageMap": actualMap },
+    );
+    const rewardState = await import("../src/utils/apexRewardState.js");
+
+    // Live server time is Beijing 2026-11-24 00:05:00+08:00 (after midnight!)
+    let mockWallMs = Date.parse("2026-11-24T00:05:00+08:00");
+    let mockPerfMs = 900_000;
+    const RealDate = Date;
+    class MockDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(mockWallMs);
+        else super(...args);
+      }
+      static now() {
+        return mockWallMs;
+      }
+    }
+
+    const wireCommands = [];
+    class MidnightSpyWebSocket {
+      static OPEN = 1;
+      static CLOSED = 3;
+      constructor(url) {
+        this.url = url;
+        this.readyState = MidnightSpyWebSocket.OPEN;
+        MidnightSpyWebSocket.last = this;
+      }
+      send(bin) {
+        wireCommands.push(bin);
+      }
+      close() {
+        this.readyState = MidnightSpyWebSocket.CLOSED;
+      }
+    }
+
+    const timers = [];
+    const { XyzwWebSocketClient } = await loadModule(
+      new URL("../src/utils/xyzwWebSocket.js", import.meta.url),
+      {
+        "./bonProtocol.js": {
+          g_utils: {
+            getEnc: () => ({}),
+            encode: (raw) => `${raw.cmd}:${JSON.stringify(raw.params || {})}`,
+            parse: (b) => b,
+          },
+        },
+        "./helperTaskRunner.js": { sleep: async () => {} },
+        "./logger.js": {
+          gameLogger: {
+            debug() {},
+            info() {},
+            warn() {},
+            error() {},
+            verbose() {},
+          },
+          wsLogger: {
+            debug() {},
+            info() {},
+            warn() {},
+            error() {},
+            verbose() {},
+            wsMessage() {},
+          },
+        },
+        "@/stores/cache": {
+          $CacheManager: {
+            getCache: () => ({ get: async (_k, fn) => fn(_k) }),
+            delCache() {},
+          },
+        },
+      },
+      {
+        Date: MockDate,
+        performance: { now: () => mockPerfMs },
+        WebSocket: MidnightSpyWebSocket,
+        setTimeout: (fn, delay) => {
+          const id = timers.length + 1;
+          timers.push({ id, fn, delay, cleared: false });
+          return id;
+        },
+        clearTimeout: (id) => {
+          const item = timers.find((t) => t.id === id);
+          if (item) item.cleared = true;
+        },
+        setInterval: () => 1,
+        clearInterval() {},
+      },
+    );
+
+    const apexHelper = await loadModule(
+      new URL("../src/utils/apexGuessHelper.js", import.meta.url),
+      {
+        "./apexRules.js": rules,
+        "./apexRateLimit.js": {
+          ApexAction: { READ: "read", GUESS: "guess" },
+          isApexRateLimited: () => false,
+          runApexAction: async (_a, task) => task(0),
+        },
+        "./apexRewardState.js": rewardState,
+      },
+      { Date: MockDate, performance: { now: () => mockPerfMs } },
+    );
+
+    const wsClient = new XyzwWebSocketClient({
+      url: "wss://example.test/midnight",
+    });
+    wsClient.init();
+    MidnightSpyWebSocket.last.onopen();
+    wsClient.serverTime = mockWallMs;
+    wsClient.serverTimeSampledAt = mockPerfMs;
+
+    // 1. Persistent stale role resetTime.day ("261123") at Beijing 2026-11-24 00:05:00:
+    //    MUST re-read apex_getroleinfo once, refuse to rewind clock to 2026-11-23,
+    //    and send ZERO apex_getguesslist (never stage 176!) and ZERO apex_guess.
+    const persistentCmds = [];
+    const persistentStore = {
+      wsConnections: { acc: { status: "connected", client: wsClient } },
+      getWebSocketStatus: () => "connected",
+      sendMessageWithPromise: (id, cmd, params, timeout, options) => {
+        persistentCmds.push({ cmd, params });
+        if (cmd === "apex_getroleinfo") {
+          return Promise.resolve({
+            apexRoleInfo: {
+              guessMap: {},
+              resetTime: { day: "261123", season: 1 },
+            },
+          });
+        }
+        return wsClient.sendWithPromise(cmd, params, timeout, options);
+      },
+    };
+
+    const autoSkipped = await apexHelper.runApexAutoGuess({
+      tokenStore: persistentStore,
+      tokenId: "acc",
+    });
+    assert.equal(autoSkipped.outcome, "partial");
+    assert.equal(autoSkipped.verifiedStatus?.resetDayMismatch, true);
+    assert.equal(autoSkipped.verifiedStatus?.hasOpenGuesses, false);
+    assert.equal(
+      apexHelper.compactApexGuessStatus(autoSkipped.verifiedStatus),
+      "赛程待核对",
+    );
+    assert.equal(
+      persistentCmds.filter((c) => c.cmd === "apex_getroleinfo").length,
+      2,
+      "must re-read apex_getroleinfo once when resetTime.day conflicts with live server date",
+    );
+    assert.equal(
+      persistentCmds.some((c) => c.cmd === "apex_getguesslist"),
+      false,
+      "must never query yesterday stage 176 when role date conflicts",
+    );
+    assert.equal(
+      persistentCmds.some((c) => c.cmd === "apex_guess"),
+      false,
+      "must never submit apex_guess when role date conflicts",
+    );
+    assert.equal(wireCommands.length, 0);
+
+    // Daily check path must also return reset-day-mismatch with zero guess writes.
+    const dailyLogs = [];
+    const dailySkipped = await apexHelper.runDailyApexGuessCheck({
+      tokenStore: persistentStore,
+      tokenId: "acc",
+      log: (msg, level) => dailyLogs.push({ msg, level }),
+    });
+    assert.equal(dailySkipped.ok, false);
+    assert.equal(dailySkipped.status, "reset-day-mismatch");
+    assert.match(dailySkipped.reminder, /角色日期与服务端实时日期不一致/);
+    assert.equal(wireCommands.length, 0);
+
+    // 2. Transient midnight lag: 1st apex_getroleinfo returns "261123", 2nd returns "261124".
+    //    Must recover cleanly and query ONLY today's stage 178 (16强赛), NEVER yesterday's 176!
+    let roleReadCount = 0;
+    const recoveredScheduleIds = [];
+    const recoveredGuesses = [];
+    const recoveredStore = {
+      wsConnections: { acc: { status: "connected", client: wsClient } },
+      getWebSocketStatus: () => "connected",
+      sendMessageWithPromise: async (_id, cmd, params, _timeout, options) => {
+        if (cmd === "apex_getroleinfo") {
+          roleReadCount++;
+          return {
+            apexRoleInfo: {
+              guessMap:
+                roleReadCount >= 3
+                  ? {
+                      178: ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"],
+                    }
+                  : {},
+              resetTime: {
+                day: roleReadCount === 1 ? "261123" : "261124",
+                season: 1,
+              },
+            },
+          };
+        }
+        if (cmd === "apex_getguesslist") {
+          recoveredScheduleIds.push(params.scheduleId);
+          return {
+            apexGuessList: Array.from({ length: 8 }, (_, idx) => [
+              { teamId: `t${idx + 1}`, name: `强队${idx + 1}`, cheerCnt: 500 },
+              { teamId: `o${idx + 1}`, name: `弱队${idx + 1}`, cheerCnt: 100 },
+            ]),
+            last: true,
+          };
+        }
+        if (cmd === "apex_guess") {
+          options?.beforeSend?.();
+          recoveredGuesses.push(params.teamId);
+          return { ok: true };
+        }
+        return {};
+      },
+    };
+    const recoveredResult = await apexHelper.runApexAutoGuess({
+      tokenStore: recoveredStore,
+      tokenId: "acc",
+    });
+    assert.equal(recoveredResult.outcome, "completed");
+    assert.deepEqual(recoveredScheduleIds, [178]);
+    assert.equal(recoveredGuesses.length, 8);
+
+    // 3. Server clock rolls across midnight into 2026-11-24 00:05:00 WHILE an apex_guess
+    //    for stage 176 (role day "261123") is sitting in real XyzwWebSocketClient sendQueue:
+    //    beforeSend MUST cancel it as notSent before socket.send().
+    mockWallMs = Date.parse("2026-11-23T18:59:59.990+08:00");
+    mockPerfMs = 950_000;
+    wsClient.serverTime = mockWallMs;
+    wsClient.serverTimeSampledAt = mockPerfMs;
+    const rolloverStore = {
+      wsConnections: { acc: { status: "connected", client: wsClient } },
+      getWebSocketStatus: () => "connected",
+      sendMessageWithPromise: (id, cmd, params, timeout, options) => {
+        if (cmd === "apex_getroleinfo") {
+          return Promise.resolve({
+            apexRoleInfo: {
+              guessMap: {},
+              resetTime: { day: "261123", season: 1 },
+            },
+          });
+        }
+        if (cmd === "apex_getguesslist") {
+          return Promise.resolve({
+            apexGuessList: [
+              [
+                { teamId: "old-176-a", name: "昨日热门", cheerCnt: 900 },
+                { teamId: "old-176-b", name: "昨日冷门", cheerCnt: 100 },
+              ],
+            ],
+            last: true,
+          });
+        }
+        return wsClient.sendWithPromise(cmd, params, timeout, options);
+      },
+    };
+    const queuedGuessPromise = apexHelper.runApexAutoGuess({
+      tokenStore: rolloverStore,
+      tokenId: "acc",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(wsClient.sendQueue.length, 1);
+    assert.equal(wsClient.sendQueue[0].cmd, "apex_guess");
+
+    // Live server time updates to Beijing 2026-11-24 00:05:00 before dequeue!
+    mockWallMs = Date.parse("2026-11-24T00:05:00+08:00");
+    mockPerfMs = 960_000;
+    wsClient.serverTime = mockWallMs;
+    wsClient.serverTimeSampledAt = mockPerfMs;
+
+    const dequeueTick = timers.findLast((t) => !t.cleared && t.delay === 50);
+    assert.ok(dequeueTick);
+    await dequeueTick.fn();
+    const rolloverResult = await queuedGuessPromise;
+    assert.equal(rolloverResult.outcome, "partial");
+    assert.equal(rolloverResult.entries[0]?.status, "not-sent");
+    assert.match(rolloverResult.message, /角色日期与服务端实时日期不一致/);
+    assert.equal(
+      wireCommands.length,
+      0,
+      "queued stage 176 apex_guess must NEVER hit socket.send after server clock crosses midnight",
+    );
+    wsClient.disconnect();
+  });
+
+  test("Round16 P2: doVote freezes confirmed account, team, round, and ticket count across 200400 retries and ignores MAX clicks during wait", async () => {
+    const apexVueSource = await readFile(
+      new URL("../src/components/Apex/ApexChallenge.vue", import.meta.url),
+      "utf8",
+    );
+    const scriptContent = apexVueSource.match(
+      /<script setup[^>]*>([\s\S]*?)<\/script>/,
+    )?.[1];
+    assert.ok(scriptContent, "ApexChallenge.vue must contain <script setup>");
+
+    // Also verify template disables vote quantity controls and modal close while voteLoading is true
+    assert.match(
+      apexVueSource,
+      /:disabled="voteLoading"\s+@click="voteChangeNum\(voteMaxCnt\)"/,
+      "MAX button must be disabled while voteLoading is active",
+    );
+    assert.match(
+      apexVueSource,
+      /:disabled="voteLoading \|\| actionCooldown\.vote > 0"/,
+      "Confirm vote button must be disabled while voteLoading is active",
+    );
+
+    const apexAst = ts.createSourceFile(
+      "ApexChallenge.js",
+      scriptContent,
+      ts.ScriptTarget.ES2022,
+      true,
+    );
+    const extractNames = [
+      "VOTE_BASE_CNT",
+      "apexServerTimeSample",
+      "apexServerTimeTokenId",
+      "readLiveApexServerNowMs",
+      "assertVoteOpenNow",
+      "openVoteDialog",
+      "voteChangeNum",
+      "doVote",
+    ];
+    const extractedCode = apexAst.statements
+      .filter(
+        (node) =>
+          ts.isVariableStatement(node) &&
+          node.declarationList.declarations.some((d) =>
+            extractNames.includes(d.name.getText(apexAst)),
+          ),
+      )
+      .map((node) => node.getText(apexAst))
+      .join("\n");
+
+    const actualMap = await import("../src/utils/apexStageMap.js");
+    const rules = await loadModule(
+      new URL("../src/utils/apexRules.js", import.meta.url),
+      { "./apexStageMap": actualMap },
+    );
+
+    let mockWallMs = Date.parse("2026-11-23T15:00:00+08:00");
+    let mockPerfMs = 1_000_000;
+    const RealDate = Date;
+    class MockDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(mockWallMs);
+        else super(...args);
+      }
+      static now() {
+        return mockWallMs;
+      }
+    }
+
+    const serverClockMod = await loadModule(
+      new URL("../src/utils/serverClock.js", import.meta.url),
+      {},
+      { Date: MockDate, performance: { now: () => mockPerfMs } },
+    );
+
+    const sentVotes = [];
+    const notices = [];
+    let attempt = 0;
+    let onRetryWaitHook = () => {};
+
+    const rateLimitMod = await loadModule(
+      new URL("../src/utils/apexRateLimit.js", import.meta.url),
+      {},
+      {
+        Date: MockDate,
+        setTimeout: (fn, ms) => {
+          mockWallMs += Number(ms) || 0;
+          mockPerfMs += Number(ms) || 0;
+          onRetryWaitHook();
+          fn();
+          return 1;
+        },
+        clearTimeout() {},
+      },
+    );
+
+    const client = {
+      serverTime: mockWallMs,
+      serverTimeSampledAt: mockPerfMs,
+    };
+    const tokenStore = {
+      selectedToken: { id: "acc-vote" },
+      wsConnections: { "acc-vote": { client } },
+      getWebSocketStatus: () => "connected",
+      sendMessageWithPromise: async (tokenId, cmd, params, _timeout, opts) => {
+        if (cmd === "apex_vote") {
+          opts?.beforeSend?.();
+          attempt++;
+          sentVotes.push({ attempt, tokenId, params: { ...params } });
+          if (attempt === 1) {
+            throw new Error("操作太快，请稍后再试 (200400)");
+          }
+          return { ok: true };
+        }
+        return {};
+      },
+    };
+
+    const voteTargetTeamId = { value: "team-1" };
+    const voteTargetName = { value: "热门队" };
+    const voteRound = { value: 7 };
+    const voteMaxCnt = { value: 99 };
+    const voteCnt = { value: 1 };
+    const voteLoading = { value: false };
+    const voteDialogVisible = { value: true };
+    const supportItemCnt = { value: 99 };
+
+    const ctx = vm.createContext({
+      Date: MockDate,
+      tokenStore,
+      roleResetTime: { value: { day: "261123", season: 1 } },
+      actionCooldown: { guess: 0, vote: 0 },
+      voteTargetTeamId,
+      voteTargetName,
+      voteRound,
+      voteMaxCnt,
+      voteCnt,
+      voteLoading,
+      voteDialogVisible,
+      supportItemCnt,
+      supportOpen: { value: true },
+      fetchRoleInfo: async () => {},
+      fetchVoteBoard: async () => {},
+      startActionCooldown() {},
+      runApexAction: rateLimitMod.runApexAction,
+      ApexAction: rateLimitMod.ApexAction,
+      isApexRateLimited: rateLimitMod.isApexRateLimited,
+      apexCooldownLeft: rateLimitMod.apexCooldownLeft,
+      sampleFromWebSocketClient: serverClockMod.sampleFromWebSocketClient,
+      getEstimatedServerNowSec: serverClockMod.getEstimatedServerNowSec,
+      toChinaWallClockMs: rules.toChinaWallClockMs,
+      getCurrentSeason: rules.getCurrentSeason,
+      checkSupportInTime: () => true,
+      TIMEOUT_ACTION: 8000,
+      message: {
+        warning(msg) {
+          notices.push({ type: "warning", msg });
+        },
+        error(msg) {
+          notices.push({ type: "error", msg });
+        },
+        success(msg) {
+          notices.push({ type: "success", msg });
+        },
+      },
+    });
+    vm.runInContext(
+      `${extractedCode}\nglobalThis.api = { openVoteDialog, voteChangeNum, doVote };`,
+      ctx,
+    );
+
+    // During the 200400 backoff wait:
+    // 1) User clicks MAX (voteChangeNum(99)) -> must be ignored while voteLoading is true
+    // 2) User tries opening dialog for another team -> must be ignored while voteLoading is true
+    // 3) Even if reactive refs are directly mutated (99 tickets, another team, another round),
+    //    the retry and success toast MUST still use the confirmed snapshot (1 ticket, team-1, round 7)!
+    onRetryWaitHook = () => {
+      ctx.api.voteChangeNum(99);
+      assert.equal(
+        voteCnt.value,
+        1,
+        "voteChangeNum(MAX) must be ignored while voteLoading is active",
+      );
+      ctx.api.openVoteDialog("team-other", "其他队", 8);
+      assert.equal(
+        voteTargetTeamId.value,
+        "team-1",
+        "openVoteDialog must be ignored while voteLoading is active",
+      );
+      // Force-mutate reactive refs to verify snapshot isolation even without UI guards:
+      voteCnt.value = 99;
+      voteTargetTeamId.value = "team-other";
+      voteTargetName.value = "其他队";
+      voteRound.value = 8;
+    };
+
+    await ctx.api.doVote();
+
+    assert.equal(sentVotes.length, 2, "must perform initial send + 1 retry");
+    assert.deepEqual(sentVotes[0], {
+      attempt: 1,
+      tokenId: "acc-vote",
+      params: { teamId: "team-1", round: 7, voteCnt: 1 },
+    });
+    assert.deepEqual(sentVotes[1], {
+      attempt: 2,
+      tokenId: "acc-vote",
+      params: { teamId: "team-1", round: 7, voteCnt: 1 },
+    });
+    assert.ok(
+      notices.some(
+        (n) => n.type === "success" && n.msg === "已为 热门队 助威 1 次",
+      ),
+      "success toast must report the confirmed team name and 1 ticket",
+    );
+    assert.equal(voteLoading.value, false);
+
+    // Also verify manual assertVoteOpenNow refuses to send when role resetTime.day conflicts with live server date!
+    mockWallMs = Date.parse("2026-11-24T00:05:00+08:00");
+    mockPerfMs = 1_100_000;
+    client.serverTime = mockWallMs;
+    client.serverTimeSampledAt = mockPerfMs;
+    voteTargetTeamId.value = "team-1";
+    voteTargetName.value = "热门队";
+    voteRound.value = 7;
+    voteCnt.value = 1;
+    sentVotes.length = 0;
+    notices.length = 0;
+    await ctx.api.doVote();
+    assert.equal(
+      sentVotes.length,
+      0,
+      "manual doVote must not send when role resetTime.day conflicts with live server date",
+    );
+    assert.ok(
+      notices.some(
+        (n) =>
+          n.type === "warning" && /角色日期与服务端实时日期不一致/.test(n.msg),
+      ),
+    );
+  });
 });
