@@ -457,16 +457,16 @@ export async function runApexAutoGuess({
         result.message = resultMessage(result);
         return result;
       }
-      if (initial.resetDayMismatch) {
-        result.outcome = "partial";
-        result.reason = "角色日期与服务端实时日期不一致，已跳过自动竞猜";
+      const openRounds = resolveOpenGuesses(initialNowMs);
+      if (!openRounds.length) {
+        result.outcome = "no-open";
         result.verifiedStatus = initial;
         result.message = resultMessage(result);
         return result;
       }
-      const openRounds = resolveOpenGuesses(initialNowMs);
-      if (!openRounds.length) {
-        result.outcome = "no-open";
+      if (initial.resetDayMismatch) {
+        result.outcome = "partial";
+        result.reason = "角色日期与服务端实时日期不一致，已跳过自动竞猜";
         result.verifiedStatus = initial;
         result.message = resultMessage(result);
         return result;
@@ -752,14 +752,30 @@ export async function runDailyApexGuessCheck({
       log(reminder, "warning");
       return { status: "schedule-mismatch", ok: false, reminder };
     }
-    if (status.resetDayMismatch) {
-      const reminder =
-        "逐鹿盐山赛程待核对：角色日期与服务端实时日期不一致，已跳过自动竞猜，请稍后刷新核对";
-      log(reminder, "warning");
-      return { status: "reset-day-mismatch", ok: false, reminder };
-    }
     const serverNowMs = status.serverNowMs ?? getChinaNowMs();
     const serverToday = safeTodaySchedule(serverNowMs);
+    const serverOpenRounds = resolveOpenGuesses(serverNowMs);
+
+    if (status.resetDayMismatch) {
+      // 先按实时赛程判定是否处于开放时段：时段外保留下一场提醒，开放时段内继续阻止竞猜写入。
+      if (serverOpenRounds.length > 0) {
+        const reminder =
+          "逐鹿盐山赛程待核对：角色日期与服务端实时日期不一致，已跳过自动竞猜，请稍后刷新核对";
+        log(reminder, "warning");
+        return { status: "reset-day-mismatch", ok: false, reminder };
+      }
+      if (serverToday.isGuessDay) {
+        const reminder = formatOutsideWindowReminder(
+          serverToday,
+          status.nextGuess ?? getNextApexGuessWindow(serverNowMs),
+          serverNowMs,
+        );
+        log(reminder, "warning");
+        return { status: "outside-window", ok: true, reminder };
+      }
+      log("逐鹿盐山：服务器日期暂无开放竞猜，跳过", "info");
+      return { status: "not-guess-day", ok: true, reminder: "" };
+    }
 
     if (status.hasOpenGuesses) {
       if (status.pendingStagesCount > 0) {
@@ -818,10 +834,10 @@ export async function runDailyApexGuessCheck({
         if (latestToday.isGuessDay) {
           const reminder = formatOutsideWindowReminder(
             latestToday,
-            result.verifiedStatus?.scheduleMismatch ||
-              result.verifiedStatus?.resetDayMismatch
+            result.verifiedStatus?.scheduleMismatch
               ? null
-              : result.verifiedStatus?.nextGuess,
+              : (result.verifiedStatus?.nextGuess ??
+                  getNextApexGuessWindow(latestNow)),
             latestNow,
           );
           log(reminder, "warning");

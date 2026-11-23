@@ -9932,6 +9932,8 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     const extractNames = [
       "apexServerTimeSample",
       "apexServerTimeTokenId",
+      "activeGuessOpToken",
+      "activeVoteOpToken",
       "readLiveApexServerNowMs",
       "assertGuessOpenNow",
       "assertVoteOpenNow",
@@ -10326,6 +10328,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
     const extractNames = [
       "apexServerTimeSample",
       "apexServerTimeTokenId",
+      "activeGuessOpToken",
       "readLiveApexServerNowMs",
       "assertGuessOpenNow",
       "doGuess",
@@ -10749,6 +10752,7 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       "VOTE_BASE_CNT",
       "apexServerTimeSample",
       "apexServerTimeTokenId",
+      "activeVoteOpToken",
       "readLiveApexServerNowMs",
       "assertVoteOpenNow",
       "openVoteDialog",
@@ -10956,5 +10960,479 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
           n.type === "warning" && /角色日期与服务端实时日期不一致/.test(n.msg),
       ),
     );
+  });
+
+  test("Round17 P2 #1: account switch during 200400 backoff never lets old guess/vote finally clear the new account's same-team queued operation", async () => {
+    const apexVueSource = await readFile(
+      new URL("../src/components/Apex/ApexChallenge.vue", import.meta.url),
+      "utf8",
+    );
+    const scriptContent = apexVueSource.match(
+      /<script setup[^>]*>([\s\S]*?)<\/script>/,
+    )?.[1];
+    assert.ok(scriptContent);
+
+    const apexAst = ts.createSourceFile(
+      "ApexChallenge.js",
+      scriptContent,
+      ts.ScriptTarget.ES2022,
+      true,
+    );
+    const extractNames = [
+      "VOTE_BASE_CNT",
+      "apexServerTimeSample",
+      "apexServerTimeTokenId",
+      "activeGuessOpToken",
+      "activeVoteOpToken",
+      "readLiveApexServerNowMs",
+      "assertGuessOpenNow",
+      "assertVoteOpenNow",
+      "doGuess",
+      "doVote",
+    ];
+    const extractedCode = apexAst.statements
+      .filter(
+        (node) =>
+          ts.isVariableStatement(node) &&
+          node.declarationList.declarations.some((d) =>
+            extractNames.includes(d.name.getText(apexAst)),
+          ),
+      )
+      .map((node) => node.getText(apexAst))
+      .join("\n");
+
+    const actualMap = await import("../src/utils/apexStageMap.js");
+    const rules = await loadModule(
+      new URL("../src/utils/apexRules.js", import.meta.url),
+      { "./apexStageMap": actualMap },
+    );
+
+    const mockWallMs = Date.parse("2026-11-23T18:30:00+08:00");
+    const mockPerfMs = 1_200_000;
+    const RealDate = Date;
+    class MockDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(mockWallMs);
+        else super(...args);
+      }
+      static now() {
+        return mockWallMs;
+      }
+    }
+
+    const serverClockMod = await loadModule(
+      new URL("../src/utils/serverClock.js", import.meta.url),
+      {},
+      { Date: MockDate, performance: { now: () => mockPerfMs } },
+    );
+
+    const backoffTimers = [];
+    const rateLimitMod = await loadModule(
+      new URL("../src/utils/apexRateLimit.js", import.meta.url),
+      {},
+      {
+        Date: MockDate,
+        setTimeout: (fn, ms) => {
+          const id = backoffTimers.length + 1;
+          backoffTimers.push({ id, fn, ms, cleared: false });
+          return id;
+        },
+        clearTimeout: (id) => {
+          const item = backoffTimers.find((t) => t.id === id);
+          if (item) item.cleared = true;
+        },
+      },
+    );
+
+    const wireCommandsB = [];
+    class AccountBSpyWebSocket {
+      static OPEN = 1;
+      static CLOSED = 3;
+      constructor(url) {
+        this.url = url;
+        this.readyState = AccountBSpyWebSocket.OPEN;
+        AccountBSpyWebSocket.last = this;
+      }
+      send(bin) {
+        wireCommandsB.push(bin);
+      }
+      close() {
+        this.readyState = AccountBSpyWebSocket.CLOSED;
+      }
+    }
+
+    const queueTimers = [];
+    const { XyzwWebSocketClient } = await loadModule(
+      new URL("../src/utils/xyzwWebSocket.js", import.meta.url),
+      {
+        "./bonProtocol.js": {
+          g_utils: {
+            getEnc: () => ({}),
+            encode: (raw) => `${raw.cmd}:${JSON.stringify(raw.params || {})}`,
+            parse: (b) => b,
+          },
+        },
+        "./helperTaskRunner.js": { sleep: async () => {} },
+        "./logger.js": {
+          gameLogger: {
+            debug() {},
+            info() {},
+            warn() {},
+            error() {},
+            verbose() {},
+          },
+          wsLogger: {
+            debug() {},
+            info() {},
+            warn() {},
+            error() {},
+            verbose() {},
+            wsMessage() {},
+          },
+        },
+        "@/stores/cache": {
+          $CacheManager: {
+            getCache: () => ({ get: async (_k, fn) => fn(_k) }),
+            delCache() {},
+          },
+        },
+      },
+      {
+        Date: MockDate,
+        performance: { now: () => mockPerfMs },
+        WebSocket: AccountBSpyWebSocket,
+        setTimeout: (fn, delay) => {
+          const id = queueTimers.length + 1;
+          queueTimers.push({ id, fn, delay, cleared: false });
+          return id;
+        },
+        clearTimeout: (id) => {
+          const item = queueTimers.find((t) => t.id === id);
+          if (item) item.cleared = true;
+        },
+        setInterval: () => 1,
+        clearInterval() {},
+      },
+    );
+
+    const wsClientB = new XyzwWebSocketClient({
+      url: "wss://example.test/acc-b",
+    });
+    wsClientB.init();
+    AccountBSpyWebSocket.last.onopen();
+    wsClientB.serverTime = mockWallMs;
+    wsClientB.serverTimeSampledAt = mockPerfMs;
+
+    const clientA = {
+      serverTime: mockWallMs,
+      serverTimeSampledAt: mockPerfMs,
+    };
+
+    const callsA = [];
+    const tokenStore = {
+      selectedToken: { id: "acc-a" },
+      wsConnections: {
+        "acc-a": { status: "connected", client: clientA },
+        "acc-b": { status: "connected", client: wsClientB },
+      },
+      getWebSocketStatus: () => "connected",
+      sendMessageWithPromise: (id, cmd, params, timeout, options) => {
+        if (id === "acc-a") {
+          callsA.push({ cmd, params });
+          return Promise.reject(new Error("操作太快，请稍后再试 (200400)"));
+        }
+        return wsClientB.sendWithPromise(cmd, params, timeout, options);
+      },
+    };
+
+    const notices = [];
+    const pendingGuessTeamId = { value: "" };
+    const voteLoading = { value: false };
+    const voteDialogVisible = { value: true };
+    const voteTargetTeamId = { value: "team-same" };
+    const voteTargetName = { value: "同队热门" };
+    const voteRound = { value: 7 };
+    const voteCnt = { value: 1 };
+
+    const scheduleId64 = rules
+      .getTodayApexGuessSchedule(rules.toChinaWallClockMs(mockWallMs))
+      .stages.find((s) => s.title === "64强赛")?.scheduleId;
+
+    const ctx = vm.createContext({
+      Date: MockDate,
+      tokenStore,
+      roleResetTime: { value: { day: "261123", season: 1 } },
+      pendingGuessTeamId,
+      actionCooldown: { guess: 0, vote: 0 },
+      voteTargetTeamId,
+      voteTargetName,
+      voteRound,
+      voteCnt,
+      voteLoading,
+      voteDialogVisible,
+      supportOpen: { value: true },
+      canBetRow: () => true,
+      refreshCurrentBets() {},
+      fetchRoleInfo: async () => {},
+      fetchGuessHistory: async () => {},
+      fetchVoteBoard: async () => {},
+      startActionCooldown() {},
+      withApexGuessLock: async (_id, fn) => fn(),
+      runApexAction: rateLimitMod.runApexAction,
+      ApexAction: rateLimitMod.ApexAction,
+      isApexRateLimited: rateLimitMod.isApexRateLimited,
+      apexCooldownLeft: rateLimitMod.apexCooldownLeft,
+      sampleFromWebSocketClient: serverClockMod.sampleFromWebSocketClient,
+      getEstimatedServerNowSec: serverClockMod.getEstimatedServerNowSec,
+      toChinaWallClockMs: rules.toChinaWallClockMs,
+      getCurrentSeason: rules.getCurrentSeason,
+      getScheduleStatus: rules.getScheduleStatus,
+      canGuessNow: rules.canGuessNow,
+      canGuessRow: rules.canGuessRow,
+      checkSupportInTime: () => true,
+      TIMEOUT_ACTION: 8000,
+      message: {
+        warning(msg) {
+          notices.push({ type: "warning", msg });
+        },
+        error(msg) {
+          notices.push({ type: "error", msg });
+        },
+        success(msg) {
+          notices.push({ type: "success", msg });
+        },
+      },
+    });
+    vm.runInContext(
+      `${extractedCode}
+globalThis.api = {
+  doGuess,
+  doVote,
+  simulateAccountSwitch(newId) {
+    tokenStore.selectedToken = { id: newId };
+    activeGuessOpToken = null;
+    pendingGuessTeamId.value = "";
+    activeVoteOpToken = null;
+    voteLoading.value = false;
+    voteDialogVisible.value = false;
+  },
+};`,
+      ctx,
+    );
+
+    const row = {
+      team1Id: "team-same",
+      team1Name: "同队热门",
+      team2Id: "team-other",
+      team2Name: "对手",
+    };
+    const grp = { scheduleId: scheduleId64, stage: 4, canBet: true, state: 2 };
+
+    // 1. Account A clicks guess for "team-same" -> attempt 0 hits 200400 -> waits on backoff timer
+    const guessAPromise = ctx.api.doGuess("team-same", row, grp);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(callsA.length, 1);
+    assert.equal(backoffTimers.length, 1);
+
+    // 2. Switch to Account B and immediately guess the EXACT SAME team "team-same"
+    ctx.api.simulateAccountSwitch("acc-b");
+    const guessBPromise = ctx.api.doGuess("team-same", row, grp);
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(wsClientB.sendQueue.length, 1);
+    assert.equal(wsClientB.sendQueue[0].cmd, "apex_guess");
+    assert.equal(pendingGuessTeamId.value, "team-same");
+
+    // 3. Account A's 200400 timer fires BEFORE Account B's command dequeues!
+    backoffTimers[0].fn();
+    await guessAPromise;
+
+    // Account A must NOT retry, must NOT clear Account B's pendingGuessTeamId, and must NOT warn on Account B!
+    assert.equal(callsA.length, 1);
+    assert.equal(
+      pendingGuessTeamId.value,
+      "team-same",
+      "Account A finally must NOT clear Account B's active same-team guess state",
+    );
+    assert.equal(
+      notices.filter((n) => n.type === "warning" || n.type === "error").length,
+      0,
+      "abandoned Account A must not emit warning/error toasts on Account B",
+    );
+
+    // 4. Account B's queued apex_guess dequeues and MUST transmit cleanly!
+    const bGuessTick = queueTimers.findLast(
+      (t) => !t.cleared && t.delay === 50,
+    );
+    assert.ok(bGuessTick);
+    await bGuessTick.fn();
+    assert.equal(
+      wireCommandsB.filter((cmd) => cmd.startsWith("apex_guess:")).length,
+      1,
+      "Account B's queued same-team apex_guess must reach socket.send cleanly",
+    );
+    wsClientB._handlePromiseResponse({
+      resp: 1,
+      code: 0,
+      rawData: { ok: true },
+    });
+    await guessBPromise;
+    assert.equal(pendingGuessTeamId.value, "");
+    assert.ok(
+      notices.some(
+        (n) => n.type === "success" && n.msg.includes("已竞猜 同队热门"),
+      ),
+    );
+
+    // 5. Same cross-account race for doVote: Account A 200400 -> switch to Account B -> B votes -> A finishes first
+    backoffTimers.length = 0;
+    notices.length = 0;
+    ctx.api.simulateAccountSwitch("acc-a");
+    voteDialogVisible.value = true;
+    const voteAPromise = ctx.api.doVote();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(backoffTimers.length, 1);
+
+    ctx.api.simulateAccountSwitch("acc-b");
+    voteDialogVisible.value = true;
+    const voteBPromise = ctx.api.doVote();
+    await new Promise((r) => setTimeout(r, 0));
+    assert.equal(wsClientB.sendQueue.length, 1);
+    assert.equal(wsClientB.sendQueue[0].cmd, "apex_vote");
+    assert.equal(voteLoading.value, true);
+
+    backoffTimers[0].fn();
+    await voteAPromise;
+    assert.equal(
+      voteLoading.value,
+      true,
+      "Account A vote finally must NOT clear Account B's active voteLoading",
+    );
+
+    const bVoteTick = queueTimers.findLast((t) => !t.cleared && t.delay === 50);
+    assert.ok(bVoteTick);
+    await bVoteTick.fn();
+    assert.equal(
+      wireCommandsB.filter((cmd) => cmd.startsWith("apex_vote:")).length,
+      1,
+      "Account B's queued apex_vote must reach socket.send cleanly",
+    );
+    wsClientB._handlePromiseResponse({
+      resp: 2,
+      code: 0,
+      rawData: { ok: true },
+    });
+    await voteBPromise;
+    assert.equal(voteLoading.value, false);
+    assert.ok(
+      notices.some(
+        (n) => n.type === "success" && n.msg === "已为 同队热门 助威 1 次",
+      ),
+    );
+    wsClientB.disconnect();
+  });
+
+  test("Round17 P2 #2: stale role resetTime.day outside guess window keeps next-stage reminder without false 待核对 while still blocking in-window writes", async () => {
+    const actualMap = await import("../src/utils/apexStageMap.js");
+    const rules = await loadModule(
+      new URL("../src/utils/apexRules.js", import.meta.url),
+      { "./apexStageMap": actualMap },
+    );
+    const rewardState = await import("../src/utils/apexRewardState.js");
+
+    let mockWallMs = Date.parse("2026-11-23T19:20:00+08:00");
+    const mockPerfMs = 1_300_000;
+    const RealDate = Date;
+    class MockDate extends RealDate {
+      constructor(...args) {
+        if (args.length === 0) super(mockWallMs);
+        else super(...args);
+      }
+      static now() {
+        return mockWallMs;
+      }
+    }
+
+    const apexHelper = await loadModule(
+      new URL("../src/utils/apexGuessHelper.js", import.meta.url),
+      {
+        "./apexRules.js": rules,
+        "./apexRateLimit.js": {
+          ApexAction: { READ: "read", GUESS: "guess" },
+          isApexRateLimited: () => false,
+          runApexAction: async (_a, task) => task(0),
+        },
+        "./apexRewardState.js": rewardState,
+      },
+      { Date: MockDate, performance: { now: () => mockPerfMs } },
+    );
+
+    const cmds = [];
+    const client = {
+      serverTime: mockWallMs,
+      serverTimeSampledAt: mockPerfMs,
+    };
+    const staleStore = {
+      wsConnections: { acc: { status: "connected", client } },
+      getWebSocketStatus: () => "connected",
+      sendMessageWithPromise: async (_id, cmd) => {
+        cmds.push(cmd);
+        if (cmd === "apex_getroleinfo") {
+          return {
+            apexRoleInfo: {
+              guessMap: {},
+              resetTime: { day: "261122", season: 1 },
+            },
+          };
+        }
+        throw new Error(`Unexpected command ${cmd}`);
+      },
+    };
+
+    // 1. Beijing 2026-11-23 19:20:00 (between 64强赛 and 32强赛):
+    //    Both apex_getroleinfo reads return stale yesterday "261122".
+    //    Must keep 32强赛 19:45–21:30 reminder and return ok: true (no bogus 待核对), zero writes!
+    const logs1920 = [];
+    const offWindow1920 = await apexHelper.runDailyApexGuessCheck({
+      tokenStore: staleStore,
+      tokenId: "acc",
+      log: (msg, level) => logs1920.push({ msg, level }),
+    });
+    assert.equal(offWindow1920.ok, true);
+    assert.equal(offWindow1920.status, "outside-window");
+    assert.match(offWindow1920.reminder, /32强赛.*19:45.*21:30/);
+    assert.equal(
+      cmds.filter((c) => c === "apex_getroleinfo").length,
+      2,
+      "must still re-read apex_getroleinfo once on date conflict",
+    );
+    assert.equal(cmds.includes("apex_getguesslist"), false);
+    assert.equal(cmds.includes("apex_guess"), false);
+
+    // 2. Beijing 2026-11-23 22:30:00 (after all today's stages ended) with stale "261122":
+    //    Must still include next day's 16强赛 window and return ok: true!
+    mockWallMs = Date.parse("2026-11-23T22:30:00+08:00");
+    client.serverTime = mockWallMs;
+    const offWindow2230 = await apexHelper.runDailyApexGuessCheck({
+      tokenStore: staleStore,
+      tokenId: "acc",
+    });
+    assert.equal(offWindow2230.ok, true);
+    assert.equal(offWindow2230.status, "outside-window");
+    assert.match(offWindow2230.reminder, /11月24日 00:00（16强赛）/);
+
+    // 3. Beijing 2026-11-23 18:30:00 (INSIDE open 64强赛 window!) with stale "261122":
+    //    Must STILL block writes and return reset-day-mismatch with ok: false!
+    cmds.length = 0;
+    mockWallMs = Date.parse("2026-11-23T18:30:00+08:00");
+    client.serverTime = mockWallMs;
+    const inWindow1830 = await apexHelper.runDailyApexGuessCheck({
+      tokenStore: staleStore,
+      tokenId: "acc",
+    });
+    assert.equal(inWindow1830.ok, false);
+    assert.equal(inWindow1830.status, "reset-day-mismatch");
+    assert.match(inWindow1830.reminder, /角色日期与服务端实时日期不一致/);
+    assert.equal(cmds.includes("apex_getguesslist"), false);
+    assert.equal(cmds.includes("apex_guess"), false);
   });
 });

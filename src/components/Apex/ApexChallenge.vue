@@ -1210,14 +1210,16 @@ const currentSchedule = computed(() => {
 // 助威对话框状态
 const voteDialogVisible = ref(false);
 const voteLoading = ref(false);
+let activeVoteOpToken = null;
 const voteTargetTeamId = ref("");
 const voteTargetName = ref("");
 const voteRound = ref(null);
 const voteCnt = ref(VOTE_BASE_CNT);
 const voteMaxCnt = ref(0);
 
-/** 并发防护：当前进行中的押注队伍 ID（'' = 空闲） */
+/** 并发防护：当前进行中的押注队伍 ID（'' = 空闲）与单次操作标识 */
 const pendingGuessTeamId = ref("");
+let activeGuessOpToken = null;
 /** 竞猜 / 助威的服务端冷却倒计时（秒，0 = 可操作） */
 const actionCooldown = reactive({ guess: 0, vote: 0 });
 const cooldownTimer = { guess: null, vote: null };
@@ -2045,11 +2047,14 @@ const doGuess = async (teamId, row, grp) => {
     message.warning(e.message || "该场竞猜当前不可押注");
     return;
   }
+  const guessOpToken = Symbol("apex-guess");
+  activeGuessOpToken = guessOpToken;
   pendingGuessTeamId.value = confirmedTeamId;
   try {
     // 手动竞猜走 immediate：不排队、不等冷却，直接发；被 200400 打回才退避重试，且每次入队和出队实际发包前均按最新服务器时间复核窗口
     const verifyGuessReady = () => {
       if (
+        activeGuessOpToken !== guessOpToken ||
         pendingGuessTeamId.value !== confirmedTeamId ||
         tokenStore.selectedToken?.id !== confirmedTokenId ||
         tokenStore.getWebSocketStatus(confirmedTokenId) !== "connected"
@@ -2075,37 +2080,47 @@ const doGuess = async (teamId, row, grp) => {
         },
         {
           immediate: true,
-          onWait: (ms) => startActionCooldown("guess", ms),
+          onWait: (ms) => {
+            if (activeGuessOpToken === guessOpToken) {
+              startActionCooldown("guess", ms);
+            }
+          },
         },
       ),
     );
     // 业务错误码由 xyzwWebSocket.js 直接 reject，成功分支即 resolve
     message.success(`已竞猜 ${confirmedTeamName}，等待开赛结果`);
-    actionCooldown.guess = 0;
-    if (tokenStore.selectedToken?.id === confirmedTokenId) {
+    if (
+      activeGuessOpToken === guessOpToken &&
+      tokenStore.selectedToken?.id === confirmedTokenId
+    ) {
+      actionCooldown.guess = 0;
       await fetchRoleInfo();
-      refreshCurrentBets();
-      fetchGuessHistory();
+      if (tokenStore.selectedToken?.id === confirmedTokenId) {
+        refreshCurrentBets();
+        fetchGuessHistory();
+      }
     }
   } catch (e) {
+    const isActiveOp =
+      activeGuessOpToken === guessOpToken &&
+      tokenStore.selectedToken?.id === confirmedTokenId;
+    if (!isActiveOp) return;
     if (isApexRateLimited(e)) {
       startActionCooldown("guess", apexCooldownLeft(ApexAction.GUESS));
       message.warning(
         `服务器限流（200400），请 ${actionCooldown.guess} 秒后再试`,
       );
     } else if (e?.notSent) {
-      if (tokenStore.selectedToken?.id === confirmedTokenId) {
-        refreshCurrentBets();
-      }
+      refreshCurrentBets();
       message.warning(`竞猜未发送：${e.message}`);
     } else {
-      if (tokenStore.selectedToken?.id === confirmedTokenId) {
-        refreshCurrentBets();
-      }
+      refreshCurrentBets();
       message.error(`竞猜请求失败: ${e.message}`);
     }
   } finally {
-    if (pendingGuessTeamId.value === confirmedTeamId) {
+    if (activeGuessOpToken === guessOpToken) {
+      activeGuessOpToken = null;
       pendingGuessTeamId.value = "";
     }
   }
@@ -2168,11 +2183,14 @@ const doVote = async () => {
     message.warning(e.message || "当前不在助威时间内");
     return;
   }
+  const voteOpToken = Symbol("apex-vote");
+  activeVoteOpToken = voteOpToken;
   voteLoading.value = true;
   try {
     // 手动助威同样走 immediate：确认时固定账号/队伍/轮次/票数快照，首次发送、200400 重试、出队校验和结果提示均使用同一份数据
     const verifyVoteReady = () => {
       if (
+        activeVoteOpToken !== voteOpToken ||
         !voteDialogVisible.value ||
         tokenStore.selectedToken?.id !== confirmedTokenId ||
         tokenStore.getWebSocketStatus(confirmedTokenId) !== "connected"
@@ -2201,17 +2219,29 @@ const doVote = async () => {
       },
       {
         immediate: true,
-        onWait: (ms) => startActionCooldown("vote", ms),
+        onWait: (ms) => {
+          if (activeVoteOpToken === voteOpToken) {
+            startActionCooldown("vote", ms);
+          }
+        },
       },
     );
     message.success(`已为 ${confirmedTeamName} 助威 ${confirmedVoteCnt} 次`);
-    if (tokenStore.selectedToken?.id !== confirmedTokenId) return;
+    if (
+      activeVoteOpToken !== voteOpToken ||
+      tokenStore.selectedToken?.id !== confirmedTokenId
+    )
+      return;
     voteDialogVisible.value = false;
     actionCooldown.vote = 0;
     await fetchRoleInfo();
     if (tokenStore.selectedToken?.id !== confirmedTokenId) return;
     fetchVoteBoard();
   } catch (e) {
+    const isActiveOp =
+      activeVoteOpToken === voteOpToken &&
+      tokenStore.selectedToken?.id === confirmedTokenId;
+    if (!isActiveOp) return;
     if (isApexRateLimited(e)) {
       startActionCooldown("vote", apexCooldownLeft(ApexAction.VOTE));
       message.warning(
@@ -2223,7 +2253,10 @@ const doVote = async () => {
       message.error(`助威请求失败: ${e.message}`);
     }
   } finally {
-    voteLoading.value = false;
+    if (activeVoteOpToken === voteOpToken) {
+      activeVoteOpToken = null;
+      voteLoading.value = false;
+    }
   }
 };
 
@@ -2422,7 +2455,10 @@ watch(
     currentVoteBoard.value = [];
     currentBets.value = [];
     selectedRound.value = null;
+    activeGuessOpToken = null;
     pendingGuessTeamId.value = "";
+    activeVoteOpToken = null;
+    voteLoading.value = false;
     voteDialogVisible.value = false;
     fetchingStages.clear();
     hasAutoLoaded.value = false;
