@@ -7631,4 +7631,254 @@ describe("Commit 8 review round-5 regression fixes (2 P1 + 1 P2)", () => {
       }
     }
   });
+
+  test("Round11 P1: without Web Locks, manual cleanup started AFTER another tab already wrote uncommitted NEW_BIN skips cleanup and preserves NEW_BIN", async () => {
+    const expiredIso = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
+    const createTransactionalIdb = async () => {
+      const records = new Map();
+      const fakeDb = {
+        put: async (_storeName, item) => {
+          records.set(item.id, item);
+        },
+        get: async (_storeName, key) => records.get(key),
+        getAllKeys: async () => Array.from(records.keys()),
+        delete: async (_storeName, key) => {
+          records.delete(key);
+        },
+        clear: async () => {
+          records.clear();
+        },
+        getAll: async () => Array.from(records.values()),
+        transaction: (_storeName, _mode) => ({
+          objectStore: () => ({
+            get: async (key) => records.get(key),
+            put: async (item) => {
+              records.set(item.id, item);
+            },
+            delete: async (key) => {
+              records.delete(key);
+            },
+          }),
+          done: Promise.resolve(),
+        }),
+      };
+      const { default: useIndexedDB } = await loadModule(
+        new URL("../src/hooks/useIndexedDB.ts", import.meta.url),
+        {
+          idb: { openDB: async () => fakeDb },
+          vue,
+        },
+        {
+          console: { log() {}, warn() {}, error() {} },
+          setTimeout,
+          clearTimeout,
+        },
+      );
+      return { records, createInstance: () => useIndexedDB() };
+    };
+
+    for (const hasInitialOldBin of [false, true]) {
+      const idbEnv = await createTransactionalIdb();
+      const idbA = idbEnv.createInstance();
+      const idbB = idbEnv.createInstance();
+      const accId = hasInitialOldBin ? "acc-r11-p1-old" : "acc-r11-p1-none";
+      if (hasInitialOldBin) {
+        await idbA.storeArrayBuffer(accId, new Uint8Array([1, 1]).buffer, {
+          credentialVersion: 0,
+          binVersion: 0,
+        });
+      }
+      const sharedStorage = new Map([
+        [
+          "gameTokens",
+          JSON.stringify([
+            {
+              id: accId,
+              name: "先写BIN号",
+              roleId: "9901",
+              token: "valid-old-r11-p1-0001",
+              importMethod: "manual",
+              createdAt: expiredIso,
+              lastUsed: expiredIso,
+            },
+          ]),
+        ],
+      ]);
+
+      const tabA = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: idbA,
+      });
+      const tabB = await loadVueUseTabWithWindow({
+        sharedStorage,
+        sharedIdb: new Map(),
+        sharedLocks: null,
+        disableWebLocks: true,
+        idbOverride: idbB,
+      });
+
+      try {
+        // Tab B writes NEW_BIN [9, 9] (v1) to IndexedDB and pauses BEFORE saving gameTokens
+        let releaseTabB;
+        let tabBWroteBin;
+        const tabBReady = new Promise((r) => {
+          tabBWroteBin = r;
+        });
+        const reloginP = tabB.store.commitCredentialUpdate(accId, {
+          updates: {
+            token: "valid-new-r11-p1-0002",
+            importMethod: "wxQrcode",
+            upgradedToPermanent: true,
+          },
+          binData: new Uint8Array([9, 9]).buffer,
+          binStorage: {
+            getArrayBuffer: (k) => idbB.getArrayBuffer(k),
+            storeArrayBuffer: async (k, buf, meta) => {
+              const ok = await idbB.storeArrayBuffer(k, buf, meta);
+              tabBWroteBin();
+              await new Promise((r) => {
+                releaseTabB = r;
+              });
+              return ok;
+            },
+            deleteArrayBuffer: (k) => idbB.deleteArrayBuffer(k),
+          },
+        });
+        await tabBReady;
+
+        // Tab A starts manual cleanup AFTER Tab B already wrote NEW_BIN (v1) while localStorage is still v0!
+        const cleanReport = await tabA.store.cleanExpiredTokensDetailed();
+        assert.equal(cleanReport.ok, true);
+        assert.equal(cleanReport.cleanedCount, 0);
+
+        // Resume Tab B -> commits NEW_TOKEN and reports success; NEW_BIN [9, 9] MUST still be intact!
+        releaseTabB();
+        const reloginRes = await reloginP;
+        assert.equal(reloginRes.committed, true);
+        const disk = JSON.parse(sharedStorage.get("gameTokens"));
+        assert.equal(disk.length, 1);
+        assert.equal(disk[0].token, "valid-new-r11-p1-0002");
+        const finalBin = await idbB.getArrayBuffer(accId);
+        assert.ok(
+          finalBin,
+          `NEW_BIN must NOT be deleted when cleanup starts after NEW_BIN write (hasInitialOldBin=${hasInitialOldBin})`,
+        );
+        assert.deepEqual(Array.from(new Uint8Array(finalBin)), [9, 9]);
+      } finally {
+        tabA.pinia._e.stop();
+        tabB.pinia._e.stop();
+      }
+    }
+  });
+
+  test("Round11 P2: updating only session Token for the same role preserves pendingBinRestoreBackups and allows retry recovery until a replacement BIN commits or role/account changes", async () => {
+    const expiredIso = new Date(Date.now() - 36 * 60 * 60 * 1000).toISOString();
+    const sharedStorage = new Map([
+      [
+        "gameTokens",
+        JSON.stringify([
+          {
+            id: "acc-r11-p2",
+            name: "仅换Token号",
+            roleId: "9902",
+            token: "valid-old-r11-p2-0001",
+            importMethod: "manual",
+            createdAt: expiredIso,
+            lastUsed: expiredIso,
+          },
+        ]),
+      ],
+    ]);
+    const sharedIdb = new Map([["acc-r11-p2", new Uint8Array([8, 8]).buffer]]);
+    let releaseDelete;
+    let deleteEntered;
+    const deleteStarted = new Promise((r) => {
+      deleteEntered = r;
+    });
+    let failStoreBin = true;
+
+    const sharedLocks = createLockManager();
+    const tabA = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks,
+      deleteArrayBufferImpl: async (k) => {
+        sharedIdb.delete(k);
+        deleteEntered?.();
+        deleteEntered = null;
+        if (releaseDelete !== "done") {
+          await new Promise((r) => {
+            releaseDelete = r;
+          });
+        }
+        return true;
+      },
+      storeArrayBufferImpl: async (k, buf) => {
+        if (failStoreBin) return false;
+        sharedIdb.set(k, buf);
+        return true;
+      },
+    });
+    const tabB = await loadVueUseTabWithWindow({
+      sharedStorage,
+      sharedIdb,
+      sharedLocks: createLockManager(),
+    });
+
+    try {
+      // Step 1: Queue [8, 8] into pendingBinRestoreBackups via Check #2 restore failure
+      const cleanP = tabA.store.cleanExpiredTokensDetailed();
+      await deleteStarted;
+      await tabB.store.selectToken("acc-r11-p2");
+      const resolveDel = releaseDelete;
+      releaseDelete = "done";
+      resolveDel();
+      const cleanReport = await cleanP;
+      assert.equal(cleanReport.ok, false);
+      assert.deepEqual(
+        [...tabA.store.getPendingBinRestoreIds()],
+        ["acc-r11-p2"],
+      );
+
+      // Step 2: Update ONLY the session token string (same roleId "9902", BIN importMethod, NO replacement BIN)
+      const tokenOnlyCommit = await tabA.store.commitCredentialUpdate(
+        "acc-r11-p2",
+        {
+          updates: {
+            token: "valid-session-only-r11-p2-0002",
+            importMethod: "bin",
+            upgradedToPermanent: true,
+          },
+        },
+      );
+      assert.equal(tokenOnlyCommit.committed, true);
+      assert.equal(
+        JSON.parse(sharedStorage.get("gameTokens"))[0].token,
+        "valid-session-only-r11-p2-0002",
+      );
+      // Backup MUST still be preserved because no replacement BIN was written!
+      assert.deepEqual(
+        [...tabA.store.getPendingBinRestoreIds()],
+        ["acc-r11-p2"],
+        "saving only a session token for the same role must NOT drop pendingBinRestoreBackups",
+      );
+
+      // Step 3: IndexedDB recovers -> retryPendingBinRestores restores [8, 8] even though credentialVersion bumped!
+      failStoreBin = false;
+      const retryRes = await tabA.store.retryPendingBinRestores();
+      assert.equal(retryRes.ok, true);
+      assert.deepEqual([...retryRes.restoredIds], ["acc-r11-p2"]);
+      assert.deepEqual([...tabA.store.getPendingBinRestoreIds()], []);
+      assert.deepEqual(
+        Array.from(new Uint8Array(sharedIdb.get("acc-r11-p2"))),
+        [8, 8],
+      );
+    } finally {
+      tabA.pinia._e.stop();
+      tabB.pinia._e.stop();
+    }
+  });
 });

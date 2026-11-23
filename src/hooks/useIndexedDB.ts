@@ -21,6 +21,7 @@ export interface ArrayBufferRecord {
   data: ArrayBuffer;
   updatedAtMs: number | null;
   credentialVersion: number | null;
+  binVersion: number | null;
   binWriteToken: string | null;
 }
 
@@ -28,6 +29,9 @@ export interface ConditionalDeleteExpected {
   expectedData?: ArrayBuffer | null;
   expectedUpdatedAtMs?: number | null;
   expectedCredentialVersion?: number | null;
+  maxExpectedCredentialVersion?: number | null;
+  expectedBinVersion?: number | null;
+  maxExpectedBinVersion?: number | null;
   expectedBinWriteToken?: string | null;
 }
 
@@ -355,6 +359,10 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
         Number.isFinite(meta.credentialVersion)
           ? meta.credentialVersion
           : null;
+      const binVersion =
+        typeof meta.binVersion === "number" && Number.isFinite(meta.binVersion)
+          ? meta.binVersion
+          : null;
       const binWriteToken =
         typeof meta.binWriteToken === "string" && meta.binWriteToken
           ? meta.binWriteToken
@@ -367,6 +375,7 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
         data: result.data,
         updatedAtMs,
         credentialVersion,
+        binVersion,
         binWriteToken,
       };
     } catch (err) {
@@ -453,6 +462,11 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
         Number.isFinite(currentMeta.credentialVersion)
           ? currentMeta.credentialVersion
           : null;
+      const currentBinVer =
+        typeof currentMeta.binVersion === "number" &&
+        Number.isFinite(currentMeta.binVersion)
+          ? currentMeta.binVersion
+          : null;
       const currentWriteToken =
         typeof currentMeta.binWriteToken === "string" &&
         currentMeta.binWriteToken
@@ -473,6 +487,18 @@ export function useIndexedDB(config: DBConfig = {}): UseIndexedDBReturn {
           expected.expectedCredentialVersion !== null &&
           currentMetaVer !== null &&
           currentMetaVer !== expected.expectedCredentialVersion) ||
+        (expected.maxExpectedCredentialVersion !== undefined &&
+          expected.maxExpectedCredentialVersion !== null &&
+          currentMetaVer !== null &&
+          currentMetaVer > expected.maxExpectedCredentialVersion) ||
+        (expected.expectedBinVersion !== undefined &&
+          expected.expectedBinVersion !== null &&
+          currentBinVer !== null &&
+          currentBinVer !== expected.expectedBinVersion) ||
+        (expected.maxExpectedBinVersion !== undefined &&
+          expected.maxExpectedBinVersion !== null &&
+          currentBinVer !== null &&
+          currentBinVer > expected.maxExpectedBinVersion) ||
         (expected.expectedUpdatedAtMs !== undefined &&
           expected.expectedUpdatedAtMs !== null &&
           currentUpdatedAtMs !== expected.expectedUpdatedAtMs) ||

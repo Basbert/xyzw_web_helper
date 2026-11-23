@@ -41,16 +41,17 @@ const restoreBinIfMissing = async (
   tokenId: string,
   buffer: ArrayBuffer,
   credentialVersion: number,
+  binVersion?: number,
 ): Promise<"stored" | "exists" | "error"> => {
+  const metadata =
+    binVersion !== undefined
+      ? { credentialVersion, binVersion }
+      : { credentialVersion };
   try {
     if (typeof storeArrayBufferIfMissing === "function") {
-      return await storeArrayBufferIfMissing(tokenId, buffer, {
-        credentialVersion,
-      });
+      return await storeArrayBufferIfMissing(tokenId, buffer, metadata);
     }
-    const ok = Boolean(
-      await storeArrayBuffer(tokenId, buffer, { credentialVersion }),
-    );
+    const ok = Boolean(await storeArrayBuffer(tokenId, buffer, metadata));
     return ok ? "stored" : "error";
   } catch {
     return "error";
@@ -90,6 +91,7 @@ declare interface TokenData {
   roleId?: string | number | null;
   roleIndex?: number | null;
   credentialVersion?: number;
+  binVersion?: number;
 }
 
 declare interface WebSocketConnection {
@@ -540,6 +542,7 @@ export const useTokenStore = defineStore("tokens", () => {
     "roleIndex",
   ]);
   const CRED_VERSION_KEY_PREFIX = "xyzw_cred_ver_";
+  const BIN_VERSION_KEY_PREFIX = "xyzw_bin_ver_";
   const STORE_WRITE_LOCK_NAME = "xyzw-gameTokens";
   const STORE_WRITE_LOCK_WAIT_MS = 10000;
   const hasCrossTabWebLocks = () =>
@@ -547,11 +550,18 @@ export const useTokenStore = defineStore("tokens", () => {
     Boolean(navigator.locks) &&
     typeof navigator.locks.request === "function";
   let credentialVersionSeed = 0;
+  let binVersionSeed = 0;
   let selectRequestSeq = 0;
   const tokenCredentialVersions = new Map<string, number>();
+  const tokenBinVersions = new Map<string, number>();
   const pendingBinRestoreBackups = new Map<
     string,
-    { buffer: ArrayBuffer; version: number; name: string }
+    {
+      buffer: ArrayBuffer;
+      binVersion: number;
+      roleId: string | null;
+      name: string;
+    }
   >();
   let storeWriteQueue: Promise<unknown> = Promise.resolve();
   const inFlightBattleVersion = new Map<
@@ -628,6 +638,93 @@ export const useTokenStore = defineStore("tokens", () => {
       }
     }
     return next;
+  };
+
+  const getBinVersion = (tokenId: string): number => {
+    let version = tokenBinVersions.get(tokenId) || 0;
+    const inMem = gameTokens.value.find((t) => t.id === tokenId);
+    if (
+      typeof inMem?.binVersion === "number" &&
+      Number.isFinite(inMem.binVersion)
+    ) {
+      version = Math.max(version, inMem.binVersion);
+    }
+    const { token: persisted } = readPersistedTokenState(tokenId);
+    if (
+      typeof persisted?.binVersion === "number" &&
+      Number.isFinite(persisted.binVersion)
+    ) {
+      version = Math.max(version, persisted.binVersion);
+    }
+    if (typeof localStorage !== "undefined" && localStorage?.getItem) {
+      try {
+        const rawVer = localStorage.getItem(
+          `${BIN_VERSION_KEY_PREFIX}${tokenId}`,
+        );
+        const numeric = Number(rawVer);
+        if (Number.isFinite(numeric) && numeric > 0) {
+          version = Math.max(version, numeric);
+        }
+      } catch {
+        // Ignore storage read errors.
+      }
+    }
+    return version;
+  };
+
+  const bumpBinVersion = (tokenId: string) => {
+    const current = getBinVersion(tokenId);
+    const next = Math.max(current, binVersionSeed) + 1;
+    binVersionSeed = next;
+    tokenBinVersions.set(tokenId, next);
+    if (typeof localStorage !== "undefined" && localStorage?.setItem) {
+      try {
+        localStorage.setItem(
+          `${BIN_VERSION_KEY_PREFIX}${tokenId}`,
+          String(next),
+        );
+      } catch {
+        // Ignore storage write errors.
+      }
+    }
+    return next;
+  };
+
+  const readStoredBinVersionRaw = (tokenId: string): string | null => {
+    if (typeof localStorage === "undefined" || !localStorage?.getItem) {
+      return null;
+    }
+    try {
+      return localStorage.getItem(`${BIN_VERSION_KEY_PREFIX}${tokenId}`);
+    } catch {
+      return null;
+    }
+  };
+
+  const restoreBinVersionState = (
+    tokenId: string,
+    previousMemVersion: number | undefined,
+    previousSeed: number,
+    previousStoredRaw: string | null,
+  ) => {
+    binVersionSeed = previousSeed;
+    if (previousMemVersion === undefined) {
+      tokenBinVersions.delete(tokenId);
+    } else {
+      tokenBinVersions.set(tokenId, previousMemVersion);
+    }
+    if (typeof localStorage !== "undefined") {
+      try {
+        const key = `${BIN_VERSION_KEY_PREFIX}${tokenId}`;
+        if (previousStoredRaw === null) {
+          localStorage.removeItem?.(key);
+        } else {
+          localStorage.setItem?.(key, previousStoredRaw);
+        }
+      } catch {
+        // Ignore best-effort rollback errors on secondary version key.
+      }
+    }
   };
 
   const extractRoleIdFromSessionToken = (
@@ -816,6 +913,7 @@ export const useTokenStore = defineStore("tokens", () => {
   const applyTokenUpdate = (
     tokenId: string,
     updates: Partial<TokenData>,
+    options: { bumpBin?: boolean } = {},
   ):
     | { ok: true; token: TokenData }
     | {
@@ -834,6 +932,9 @@ export const useTokenStore = defineStore("tokens", () => {
     const previousMemVersion = tokenCredentialVersions.get(tokenId);
     const previousSeed = credentialVersionSeed;
     const previousStoredVer = readStoredCredentialVersionRaw(tokenId);
+    const previousMemBinVersion = tokenBinVersions.get(tokenId);
+    const previousBinSeed = binVersionSeed;
+    const previousStoredBinVer = readStoredBinVersionRaw(tokenId);
 
     const touchesCredential = Object.keys(updates).some((key) =>
       CREDENTIAL_UPDATE_KEYS.has(key),
@@ -841,12 +942,16 @@ export const useTokenStore = defineStore("tokens", () => {
     const nextCredentialVersion = touchesCredential
       ? bumpCredentialVersion(tokenId)
       : existing.credentialVersion;
+    const nextBinVersion = options.bumpBin
+      ? bumpBinVersion(tokenId)
+      : existing.binVersion;
     const nextToken: TokenData = {
       ...existing,
       ...updates,
       ...(nextCredentialVersion !== undefined
         ? { credentialVersion: nextCredentialVersion }
         : {}),
+      ...(nextBinVersion !== undefined ? { binVersion: nextBinVersion } : {}),
       updatedAt: new Date().toISOString(),
     };
     withLocalGameTokensWrite(() => {
@@ -864,14 +969,30 @@ export const useTokenStore = defineStore("tokens", () => {
         previousSeed,
         previousStoredVer,
       );
+      restoreBinVersionState(
+        tokenId,
+        previousMemBinVersion,
+        previousBinSeed,
+        previousStoredBinVer,
+      );
       return {
         ok: false,
         reason: "storage_write_failed",
         error: persisted.error,
       };
     }
-    if (touchesCredential) {
+    if (options.bumpBin) {
       pendingBinRestoreBackups.delete(tokenId);
+    } else {
+      const existingBackup = pendingBinRestoreBackups.get(tokenId);
+      const nextRoleId = normalizeRoleId(nextToken.roleId);
+      if (
+        existingBackup?.roleId &&
+        nextRoleId &&
+        nextRoleId !== existingBackup.roleId
+      ) {
+        pendingBinRestoreBackups.delete(tokenId);
+      }
     }
     return { ok: true, token: nextToken };
   };
@@ -960,7 +1081,10 @@ export const useTokenStore = defineStore("tokens", () => {
           const restored = await storage.storeArrayBuffer(
             tokenId,
             previousBin,
-            { credentialVersion: getCredentialVersion(tokenId) },
+            {
+              credentialVersion: getCredentialVersion(tokenId),
+              binVersion: getBinVersion(tokenId),
+            },
           );
           return Boolean(restored);
         }
@@ -997,10 +1121,13 @@ export const useTokenStore = defineStore("tokens", () => {
           binRolledBack: true,
         };
       }
-      const nextBinVersion =
+      const nextCredVersion =
         Math.max(getCredentialVersion(tokenId), credentialVersionSeed) + 1;
+      const nextBinVersion =
+        Math.max(getBinVersion(tokenId), binVersionSeed) + 1;
       const saved = await storage.storeArrayBuffer(tokenId, options.binData, {
-        credentialVersion: nextBinVersion,
+        credentialVersion: nextCredVersion,
+        binVersion: nextBinVersion,
       });
       if (!saved) {
         return {
@@ -1026,7 +1153,9 @@ export const useTokenStore = defineStore("tokens", () => {
       }
     }
 
-    const applyResult = applyTokenUpdate(tokenId, options.updates);
+    const applyResult = applyTokenUpdate(tokenId, options.updates, {
+      bumpBin: binWritten,
+    });
     if (!applyResult.ok) {
       const binRolledBack = await rollbackBin();
       return {
@@ -1165,7 +1294,7 @@ export const useTokenStore = defineStore("tokens", () => {
           existing.id,
           {
             updates,
-            binData: existing.id !== role.id ? freshBin : null,
+            binData: needsBin ? freshBin : null,
             binStorage: storage,
             deleteOldBinKey: tempBinKey,
             closeActiveConnection: true,
@@ -1533,9 +1662,13 @@ export const useTokenStore = defineStore("tokens", () => {
           }
 
           const startCredentialVersion = getCredentialVersion(tokenId);
+          const startBinVersion = getBinVersion(tokenId);
           const previousMemVersion = tokenCredentialVersions.get(tokenId);
           const previousSeed = credentialVersionSeed;
           const previousStoredVer = readStoredCredentialVersionRaw(tokenId);
+          const previousMemBinVersion = tokenBinVersions.get(tokenId);
+          const previousBinSeed = binVersionSeed;
+          const previousStoredBinVer = readStoredBinVersionRaw(tokenId);
 
           // Probe localStorage writability with the unchanged list BEFORE
           // touching IndexedDB or broadcasting any removal to other tabs.
@@ -1559,6 +1692,7 @@ export const useTokenStore = defineStore("tokens", () => {
           let previousBin: ArrayBuffer | null = null;
           let previousBinUpdatedAtMs: number | null | undefined;
           let previousBinCredentialVersion: number | null = null;
+          let previousBinVersion: number | null = null;
           let previousBinWriteToken: string | null | undefined;
           let backupThrew = false;
           try {
@@ -1568,6 +1702,7 @@ export const useTokenStore = defineStore("tokens", () => {
                 previousBin = record.data;
                 previousBinUpdatedAtMs = record.updatedAtMs;
                 previousBinCredentialVersion = record.credentialVersion;
+                previousBinVersion = record.binVersion;
                 previousBinWriteToken = record.binWriteToken;
               }
             } else {
@@ -1590,8 +1725,28 @@ export const useTokenStore = defineStore("tokens", () => {
             };
           }
 
-          // Re-verify predicate AND credentialVersion BEFORE deleting BIN in case
-          // another tab refreshed lastUsed, upgraded, or re-logged in while reading BIN.
+          // If the BIN currently in IndexedDB already carries a credential/BIN version
+          // newer than the committed account record (an in-flight re-login in another tab
+          // that wrote NEW_BIN before persisting gameTokens), skip cleanup immediately so
+          // we never treat the uncommitted NEW_BIN as the expected version to delete.
+          const binHasNewerUncommittedVersion =
+            (previousBinCredentialVersion !== null &&
+              previousBinCredentialVersion > startCredentialVersion) ||
+            (previousBinVersion !== null &&
+              previousBinVersion > startBinVersion);
+          if (options.shouldDelete && binHasNewerUncommittedVersion) {
+            return {
+              ok: true,
+              listCleared: false,
+              binCleared: false,
+              retryable: false,
+              reason: null,
+              skipped: true,
+            };
+          }
+
+          // Re-verify predicate AND versions BEFORE deleting BIN in case another tab
+          // refreshed lastUsed, upgraded, or re-logged in while reading BIN.
           syncGameTokensFromStorage();
           const latestBeforeBinDelete = gameTokens.value.find(
             (token) => token.id === tokenId,
@@ -1609,7 +1764,8 @@ export const useTokenStore = defineStore("tokens", () => {
           if (
             options.shouldDelete &&
             (!options.shouldDelete(latestBeforeBinDelete) ||
-              getCredentialVersion(tokenId) !== startCredentialVersion)
+              getCredentialVersion(tokenId) !== startCredentialVersion ||
+              getBinVersion(tokenId) !== startBinVersion)
           ) {
             return {
               ok: true,
@@ -1632,12 +1788,19 @@ export const useTokenStore = defineStore("tokens", () => {
               const condResult = await deleteArrayBufferIfUnchanged(
                 tokenId,
                 previousBin === null
-                  ? { expectedData: null }
+                  ? {
+                      expectedData: null,
+                      maxExpectedCredentialVersion: startCredentialVersion,
+                      maxExpectedBinVersion: startBinVersion,
+                    }
                   : {
                       expectedData: previousBin,
                       expectedUpdatedAtMs: previousBinUpdatedAtMs,
                       expectedCredentialVersion:
                         previousBinCredentialVersion ?? startCredentialVersion,
+                      maxExpectedCredentialVersion: startCredentialVersion,
+                      expectedBinVersion: previousBinVersion ?? startBinVersion,
+                      maxExpectedBinVersion: startBinVersion,
                       expectedBinWriteToken: previousBinWriteToken,
                     },
               );
@@ -1727,16 +1890,17 @@ export const useTokenStore = defineStore("tokens", () => {
           if (
             options.shouldDelete &&
             (!options.shouldDelete(latestAfterBinDelete) ||
-              getCredentialVersion(tokenId) !== startCredentialVersion)
+              getCredentialVersion(tokenId) !== startCredentialVersion ||
+              getBinVersion(tokenId) !== startBinVersion)
           ) {
             let binRestored = true;
-            const credentialChanged =
-              getCredentialVersion(tokenId) !== startCredentialVersion;
-            if (deletedPreviousBin && previousBin && !credentialChanged) {
+            const binReplaced = getBinVersion(tokenId) !== startBinVersion;
+            if (deletedPreviousBin && previousBin && !binReplaced) {
               const restoreStatus = await restoreBinIfMissing(
                 tokenId,
                 previousBin,
-                startCredentialVersion,
+                getCredentialVersion(tokenId),
+                startBinVersion,
               );
               if (restoreStatus === "error") {
                 binRestored = false;
@@ -1745,7 +1909,8 @@ export const useTokenStore = defineStore("tokens", () => {
                 );
                 pendingBinRestoreBackups.set(tokenId, {
                   buffer: previousBin,
-                  version: startCredentialVersion,
+                  binVersion: startBinVersion,
+                  roleId: normalizeRoleId(latestAfterBinDelete.roleId),
                   name: latestAfterBinDelete.name || tokenId,
                 });
               }
@@ -1773,6 +1938,7 @@ export const useTokenStore = defineStore("tokens", () => {
 
           const latestBeforeRemove = [...gameTokens.value];
           bumpCredentialVersion(tokenId);
+          bumpBinVersion(tokenId);
           withLocalGameTokensWrite(() => {
             gameTokens.value = gameTokens.value.filter(
               (token) => token.id !== tokenId,
@@ -1789,22 +1955,30 @@ export const useTokenStore = defineStore("tokens", () => {
               previousSeed,
               previousStoredVer,
             );
+            restoreBinVersionState(
+              tokenId,
+              previousMemBinVersion,
+              previousBinSeed,
+              previousStoredBinVer,
+            );
             let binRestored = true;
             if (
               deletedPreviousBin &&
               previousBin &&
-              getCredentialVersion(tokenId) === startCredentialVersion
+              getBinVersion(tokenId) === startBinVersion
             ) {
               const restoreStatus = await restoreBinIfMissing(
                 tokenId,
                 previousBin,
-                startCredentialVersion,
+                getCredentialVersion(tokenId),
+                startBinVersion,
               );
               if (restoreStatus === "error") {
                 binRestored = false;
                 pendingBinRestoreBackups.set(tokenId, {
                   buffer: previousBin,
-                  version: startCredentialVersion,
+                  binVersion: startBinVersion,
+                  roleId: normalizeRoleId(latestAfterBinDelete.roleId),
                   name: latestAfterBinDelete.name || tokenId,
                 });
               }
@@ -3578,9 +3752,15 @@ export const useTokenStore = defineStore("tokens", () => {
             message: "导入失败：浏览器本地存储空间不足或不可写",
           };
         }
-        previousIds.forEach((id) => bumpCredentialVersion(id));
+        previousIds.forEach((id) => {
+          bumpCredentialVersion(id);
+          bumpBinVersion(id);
+        });
         data.tokens.forEach((token: any) => {
-          if (token?.id) bumpCredentialVersion(token.id);
+          if (token?.id) {
+            bumpCredentialVersion(token.id);
+            bumpBinVersion(token.id);
+          }
         });
         pendingBinRestoreBackups.clear();
         cleanupInvalidTokens();
@@ -3624,9 +3804,15 @@ export const useTokenStore = defineStore("tokens", () => {
             tokenIds: [...group.tokenIds],
           }));
           const previousSeed = credentialVersionSeed;
+          const previousBinSeed = binVersionSeed;
           const previousVersionSnapshots = new Map<
             string,
-            { mem: number | undefined; stored: string | null }
+            {
+              mem: number | undefined;
+              stored: string | null;
+              binMem: number | undefined;
+              binStored: string | null;
+            }
           >();
 
           tokenIdsToCleanup = Array.from(
@@ -3790,8 +3976,11 @@ export const useTokenStore = defineStore("tokens", () => {
             previousVersionSnapshots.set(tokenId, {
               mem: tokenCredentialVersions.get(tokenId),
               stored: readStoredCredentialVersionRaw(tokenId),
+              binMem: tokenBinVersions.get(tokenId),
+              binStored: readStoredBinVersionRaw(tokenId),
             });
             bumpCredentialVersion(tokenId);
+            bumpBinVersion(tokenId);
           });
           const restoreAllVersions = () => {
             previousVersionSnapshots.forEach((snap, tokenId) => {
@@ -3800,6 +3989,12 @@ export const useTokenStore = defineStore("tokens", () => {
                 snap.mem,
                 previousSeed,
                 snap.stored,
+              );
+              restoreBinVersionState(
+                tokenId,
+                snap.binMem,
+                previousBinSeed,
+                snap.binStored,
               );
             });
           };
@@ -4000,26 +4195,42 @@ export const useTokenStore = defineStore("tokens", () => {
         await Promise.all(
           entries.map(async ([tokenId, backup]) => {
             const latest = gameTokens.value.find((t) => t.id === tokenId);
-            if (!latest || getCredentialVersion(tokenId) !== backup.version) {
+            const latestRoleId = normalizeRoleId(latest?.roleId);
+            const roleChanged = Boolean(
+              backup.roleId && latestRoleId && latestRoleId !== backup.roleId,
+            );
+            if (
+              !latest ||
+              roleChanged ||
+              getBinVersion(tokenId) !== backup.binVersion
+            ) {
               pendingBinRestoreBackups.delete(tokenId);
               return;
             }
             const restoreStatus = await restoreBinIfMissing(
               tokenId,
               backup.buffer,
-              backup.version,
+              getCredentialVersion(tokenId),
+              backup.binVersion,
             );
             if (restoreStatus === "stored") {
               pendingBinRestoreBackups.delete(tokenId);
               restoredIds.push(tokenId);
             } else if (restoreStatus === "exists") {
               syncGameTokensFromStorage();
-              const stillExists = gameTokens.value.some(
+              const latestAfter = gameTokens.value.find(
                 (t) => t.id === tokenId,
               );
+              const latestAfterRoleId = normalizeRoleId(latestAfter?.roleId);
+              const afterRoleChanged = Boolean(
+                backup.roleId &&
+                latestAfterRoleId &&
+                latestAfterRoleId !== backup.roleId,
+              );
               if (
-                !stillExists ||
-                getCredentialVersion(tokenId) !== backup.version
+                !latestAfter ||
+                afterRoleChanged ||
+                getBinVersion(tokenId) !== backup.binVersion
               ) {
                 pendingBinRestoreBackups.delete(tokenId);
               }
