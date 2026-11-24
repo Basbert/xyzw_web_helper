@@ -118,45 +118,78 @@
 
     <section
       v-show="activeSection === 'daily'"
-      class="daily-extras"
-      aria-label="爬塔和阵容"
+      class="daily-secondary"
+      :class="{ 'has-tower-status': isShowTowerStatus }"
+      aria-label="阵容、爬塔与逐鹿竞猜"
     >
-      <WeirdTowerStatus v-if="isWeirdTowerWeek" />
-      <details v-else class="weird-tower-collapsed">
-        <summary>怪异塔（当前非黑市周，暂未开放；点击可展开查看）</summary>
-        <div class="weird-tower-collapsed-body">
-          <WeirdTowerStatus />
-        </div>
-      </details>
-      <TowerStatus v-if="activeSection === 'daily' && isShowTowerStatus" />
-      <TeamFormation />
-    </section>
-
-    <details
-      id="daily-apex-target"
-      v-show="activeSection === 'daily'"
-      class="apex-guess-details"
-      :open="apexDetailsOpen"
-      tabindex="-1"
-      @toggle="onApexDetailsToggle"
-    >
-      <summary
-        @click="apexDetailsUserToggled = true"
-        @keydown.enter="apexDetailsUserToggled = true"
-        @keydown.space="apexDetailsUserToggled = true"
-      >
-        逐鹿盐山 · 竞猜
-        <span class="apex-summary-status">{{ apexGuessSummary }}</span>
-      </summary>
-      <div class="apex-guess-wrapper">
-        <ApexGuessCard
-          :active="activeSection === 'daily'"
-          @nav-to-apex="activeSection = 'apexChallengeGroup'"
-          @status-change="apexGuessSummary = $event"
-          @state-change="apexGuessDetailState = $event"
-        />
+      <div class="daily-secondary-main">
+        <TeamFormation />
+        <TowerStatus v-if="activeSection === 'daily' && isShowTowerStatus" />
       </div>
-    </details>
+
+      <div
+        class="daily-secondary-aside"
+        :class="{ 'is-weird-tower-week': isWeirdTowerWeek }"
+      >
+        <details
+          id="daily-apex-target"
+          class="daily-collapse-card apex-guess-details"
+          :open="apexDetailsOpen"
+          tabindex="-1"
+          @toggle="onApexDetailsToggle"
+        >
+          <summary
+            class="daily-collapse-summary"
+            @click="apexDetailsUserToggled = true"
+            @keydown.enter="apexDetailsUserToggled = true"
+            @keydown.space="apexDetailsUserToggled = true"
+          >
+            <img
+              src="/icons/legionCup.png"
+              alt=""
+              class="collapse-summary-icon"
+            />
+            <span class="collapse-summary-text">
+              <span class="collapse-summary-title">逐鹿盐山 · 竞猜</span>
+              <span class="collapse-summary-meta apex-summary-status">
+                {{ apexGuessSummary }}
+              </span>
+            </span>
+          </summary>
+          <div class="daily-collapse-body apex-guess-wrapper">
+            <ApexGuessCard
+              :active="activeSection === 'daily'"
+              @nav-to-apex="activeSection = 'apexChallengeGroup'"
+              @status-change="apexGuessSummary = $event"
+              @state-change="apexGuessDetailState = $event"
+            />
+          </div>
+        </details>
+
+        <WeirdTowerStatus
+          v-if="isWeirdTowerWeek"
+          class="weird-tower-open-card"
+        />
+        <details v-else class="daily-collapse-card weird-tower-collapsed">
+          <summary class="daily-collapse-summary">
+            <img
+              src="/icons/1733492491706152.png"
+              alt=""
+              class="collapse-summary-icon"
+            />
+            <span class="collapse-summary-text">
+              <span class="collapse-summary-title">怪异塔</span>
+              <span class="collapse-summary-meta">
+                非黑市周暂未开放 · 点击展开
+              </span>
+            </span>
+          </summary>
+          <div class="daily-collapse-body weird-tower-collapsed-body">
+            <WeirdTowerStatus />
+          </div>
+        </details>
+      </div>
+    </section>
 
     <details v-if="activeSection !== 'tenHall'" class="role-details">
       <summary>角色资料与资源</summary>
@@ -903,23 +936,175 @@ onUnmounted(() => {
   color: var(--text-secondary);
 }
 
-.weird-tower-collapsed {
+.daily-secondary {
   grid-column: 1 / -1;
-  padding: 12px 16px;
-  border: 1px dashed var(--border-light);
-  border-radius: 12px;
-  background: var(--bg-primary);
-  color: var(--text-secondary);
-  font-size: 13px;
+  display: grid;
+  grid-template-columns: minmax(270px, 0.8fr) minmax(0, 1.5fr);
+  gap: var(--spacing-lg);
+  align-items: start;
+  min-width: 0;
 
-  summary {
-    cursor: pointer;
-    font-weight: 500;
+  &.has-tower-status {
+    grid-template-columns: minmax(0, 1fr);
+
+    .daily-secondary-main {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: var(--spacing-lg);
+      align-items: stretch;
+    }
+  }
+}
+
+.daily-secondary-main {
+  min-width: 0;
+}
+
+.daily-secondary-aside {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--spacing-lg);
+  align-items: start;
+
+  &.is-weird-tower-week .weird-tower-open-card {
+    order: -1;
+  }
+}
+
+.daily-collapse-card {
+  min-width: 0;
+  border: 1px solid var(--border-light);
+  border-radius: var(--border-radius-xl);
+  background: var(--bg-primary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  transition:
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
+
+  &:hover {
+    border-color: var(--border-medium, var(--border-light));
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+  }
+
+  &[open] {
+    border-style: solid;
+  }
+}
+
+.weird-tower-collapsed:not([open]) {
+  border-style: dashed;
+}
+
+.daily-collapse-summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px;
+  cursor: pointer;
+  user-select: none;
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+
+  &::after {
+    content: "";
+    flex: none;
+    width: 8px;
+    height: 8px;
+    margin-left: auto;
+    border-right: 2px solid var(--text-secondary);
+    border-bottom: 2px solid var(--text-secondary);
+    transform: rotate(-45deg);
+    transition: transform var(--transition-fast);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: 2px;
+    border-radius: var(--border-radius-xl);
+  }
+}
+
+.daily-collapse-card[open] > .daily-collapse-summary {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-light);
+  border-radius: var(--border-radius-xl) var(--border-radius-xl) 0 0;
+  background: var(--bg-secondary);
+
+  .collapse-summary-icon {
+    display: none;
+  }
+
+  .collapse-summary-text {
+    flex-direction: row;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+  }
+
+  .collapse-summary-title {
+    font-size: 13px;
+    color: var(--text-secondary);
+  }
+
+  &::after {
+    transform: rotate(45deg);
+  }
+}
+
+.collapse-summary-icon {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.collapse-summary-text {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.collapse-summary-title {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.collapse-summary-meta {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.daily-collapse-body {
+  padding: 0;
+
+  :deep(.status-card) {
+    min-width: 0;
+    min-height: 0;
+    border: 0;
+    border-radius: 0 0 var(--border-radius-xl) var(--border-radius-xl);
+    box-shadow: none;
+    transform: none;
+  }
+
+  :deep(.status-card:hover) {
+    transform: none;
+    box-shadow: none;
   }
 }
 
 .weird-tower-collapsed-body {
-  margin-top: 12px;
+  margin-top: 0;
 }
 .game-status-container {
   display: grid;
@@ -1063,15 +1248,11 @@ onUnmounted(() => {
   background: var(--bg-primary);
 }
 
-.daily-workspace,
-.daily-extras {
+.daily-workspace {
   grid-column: 1 / -1;
   display: grid;
   gap: var(--spacing-lg);
   min-width: 0;
-}
-
-.daily-workspace {
   grid-template-columns: minmax(270px, 0.8fr) minmax(0, 1.5fr);
   align-items: stretch;
 }
@@ -1128,42 +1309,9 @@ onUnmounted(() => {
   }
 }
 
-.daily-extras {
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-}
-
 .apex-guess-details {
-  grid-column: 1 / -1;
-  min-width: 0;
-
-  summary {
-    padding: 10px 2px;
-    color: var(--text-secondary);
-    cursor: pointer;
-    font-size: 14px;
-    user-select: none;
-    transition: color var(--transition-fast);
-
-    &:hover {
-      color: var(--primary-color);
-    }
-  }
-
-  summary:focus-visible {
-    outline: 2px solid var(--primary-color);
-    outline-offset: 3px;
-  }
-
   .apex-summary-status {
-    margin-left: 10px;
     color: var(--primary-color);
-    font-size: 13px;
-  }
-
-  .apex-guess-wrapper {
-    margin-top: 12px;
-    display: grid;
-    grid-template-columns: minmax(0, 420px);
   }
 }
 
@@ -1234,7 +1382,9 @@ onUnmounted(() => {
 }
 
 @media (max-width: 900px) {
-  .daily-workspace {
+  .daily-workspace,
+  .daily-secondary,
+  .daily-secondary.has-tower-status .daily-secondary-main {
     grid-template-columns: minmax(0, 1fr);
   }
 }
@@ -1245,7 +1395,7 @@ onUnmounted(() => {
   }
 
   .maintenance-cards,
-  .daily-extras {
+  .daily-secondary-aside {
     grid-template-columns: minmax(0, 1fr);
   }
 }

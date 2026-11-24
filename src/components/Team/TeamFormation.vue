@@ -54,7 +54,10 @@
       </div>
 
       <div class="heroes-container">
-        <div v-if="!loading" class="heroes-formation">
+        <div
+          v-if="!loading && currentTeamHeroes.length"
+          class="heroes-formation"
+        >
           <!-- 前排 2个 -->
           <div class="formation-row front-row">
             <div
@@ -363,13 +366,15 @@ watch(
 
 <style scoped lang="scss">
 .team-formation-card {
+  min-width: 0;
   min-height: 220px;
 }
 
 .card-header {
   display: flex;
-  align-items: flex-start;
-  gap: var(--spacing-md);
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--spacing-sm) var(--spacing-md);
   margin-bottom: var(--spacing-md);
 }
 
@@ -380,24 +385,38 @@ watch(
   flex-shrink: 0;
 }
 
+.info {
+  flex: 1 1 112px;
+  min-width: 0;
+}
+
 .info h3 {
   margin: 0 0 2px 0;
   font-size: var(--font-size-md);
   font-weight: var(--font-weight-semibold);
+  line-height: 1.3;
 }
 
 .info p {
   margin: 0;
   color: var(--text-secondary);
   font-size: var(--font-size-sm);
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .team-selector {
   display: flex;
+  align-items: center;
   gap: var(--spacing-xs);
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 .team-button {
+  flex-shrink: 0;
   width: 32px;
   height: 32px;
   border: none;
@@ -425,9 +444,11 @@ watch(
 }
 
 .refresh-button {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
+  white-space: nowrap;
   height: 32px;
   padding: 0 12px;
   border: 1px solid var(--border-color, #e5e7eb);
@@ -522,7 +543,7 @@ watch(
 
 .formation-row {
   display: flex;
-  gap: var(--spacing-lg);
+  gap: var(--spacing-md);
   justify-content: center;
   width: 100%;
 }
@@ -533,6 +554,7 @@ watch(
   align-items: center;
   gap: 4px;
   min-width: 64px;
+  flex: 0 1 88px;
 }
 
 .hero-circle {
@@ -562,9 +584,11 @@ watch(
   font-size: 12px;
   color: var(--text-secondary);
   text-align: center;
-  min-width: 90px;
-  max-width: 140px;
+  min-width: 0;
+  max-width: 100%;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .empty-team {
