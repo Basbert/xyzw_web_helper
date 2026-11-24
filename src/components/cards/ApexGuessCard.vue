@@ -1,6 +1,6 @@
 <template>
-  <div class="status-card apex-guess-card">
-    <div class="card-header">
+  <div class="status-card apex-guess-card" :class="{ 'is-embedded': embedded }">
+    <div v-if="!embedded" class="card-header">
       <img src="/icons/legionCup.png" alt="" class="status-icon" />
       <div class="status-info">
         <h3>逐鹿盐山 · 竞猜</h3>
@@ -33,7 +33,11 @@
           v-if="guessState.kind === 'ready' && guessState.hasOpenGuesses"
           class="sub-line"
         >
-          已选过的对阵会跳过；助威数仅供参考，不代表胜率。
+          {{
+            embedded
+              ? "自动竞猜按助威数选队。已选对阵会跳过。"
+              : "已选过的对阵会跳过；助威数仅供参考，不代表胜率。"
+          }}
         </p>
       </div>
       <div v-if="lastResult" class="guess-result" aria-live="polite">
@@ -119,7 +123,10 @@ const claimResults = reactive(new Map());
 </script>
 
 <script setup>
-const props = defineProps({ active: { type: Boolean, default: true } });
+const props = defineProps({
+  active: { type: Boolean, default: true },
+  embedded: Boolean,
+});
 const emit = defineEmits(["navToApex", "statusChange", "stateChange"]);
 const tokenStore = useTokenStore();
 const message = useMessage();
@@ -529,6 +536,70 @@ const handleAutoGuess = async () => {
       color: var(--text-secondary);
       cursor: not-allowed;
     }
+  }
+}
+
+.apex-guess-card.is-embedded {
+  gap: 12px;
+  padding: 16px;
+
+  .card-content {
+    margin-bottom: 0;
+  }
+
+  .guess-status-desc {
+    padding: 0;
+  }
+
+  .reward-status {
+    color: var(--text-secondary);
+  }
+
+  .card-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+    margin-top: 0;
+  }
+
+  .card-actions .action-button {
+    min-height: 40px;
+    padding: 8px 10px;
+    font-size: 13px;
+    overflow-wrap: anywhere;
+
+    &:enabled {
+      background: #087449;
+    }
+
+    &:hover:enabled {
+      background: #065d3a;
+    }
+  }
+
+  .card-actions .reward-button:enabled {
+    border: 1px solid var(--border-medium);
+    color: var(--text-primary);
+    background: var(--bg-primary);
+
+    &:hover {
+      background: var(--bg-secondary);
+    }
+  }
+
+  .secondary-actions {
+    grid-column: 1 / -1;
+    margin-top: 0;
+
+    button:enabled {
+      color: var(--text-primary);
+      text-underline-offset: 3px;
+    }
+  }
+
+  .card-actions button:focus-visible {
+    outline-color: var(--text-primary);
+    outline-offset: 2px;
   }
 }
 </style>

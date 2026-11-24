@@ -28,6 +28,10 @@ function fixture(kind, nextTick = async () => {}) {
   const target = {
     open: false,
     focus: () => calls.push("focus"),
+    querySelector: (selector) => {
+      assert.equal(selector, ":scope > summary");
+      return { focus: () => calls.push("focus-summary") };
+    },
     scrollIntoView: () => calls.push("scroll"),
   };
   const context = {
@@ -59,7 +63,11 @@ test("首页三个快捷入口定位到日常区域，竞猜入口自动展开",
     await f.context.run(kind);
     assert.equal(f.context.activeSection.value, "daily");
     assert.equal(f.target.open, kind === "apex");
-    assert.deepEqual(f.calls, [id, "focus", "scroll"]);
+    assert.deepEqual(f.calls, [
+      id,
+      kind === "apex" ? "focus-summary" : "focus",
+      "scroll",
+    ]);
   }
 });
 

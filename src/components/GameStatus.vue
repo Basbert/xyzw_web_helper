@@ -127,15 +127,13 @@
         <TowerStatus v-if="activeSection === 'daily' && isShowTowerStatus" />
       </div>
 
-      <div
-        class="daily-secondary-aside"
-        :class="{ 'is-weird-tower-week': isWeirdTowerWeek }"
-      >
+      <div class="daily-secondary-aside">
+        <WeirdTowerStatus v-if="isWeirdTowerWeek" />
+
         <details
           id="daily-apex-target"
           class="daily-collapse-card apex-guess-details"
           :open="apexDetailsOpen"
-          tabindex="-1"
           @toggle="onApexDetailsToggle"
         >
           <summary
@@ -156,9 +154,10 @@
               </span>
             </span>
           </summary>
-          <div class="daily-collapse-body apex-guess-wrapper">
+          <div class="daily-collapse-body">
             <ApexGuessCard
               :active="activeSection === 'daily'"
+              embedded
               @nav-to-apex="activeSection = 'apexChallengeGroup'"
               @status-change="apexGuessSummary = $event"
               @state-change="apexGuessDetailState = $event"
@@ -166,11 +165,10 @@
           </div>
         </details>
 
-        <WeirdTowerStatus
-          v-if="isWeirdTowerWeek"
-          class="weird-tower-open-card"
-        />
-        <details v-else class="daily-collapse-card weird-tower-collapsed">
+        <details
+          v-if="!isWeirdTowerWeek"
+          class="daily-collapse-card weird-tower-collapsed"
+        >
           <summary class="daily-collapse-summary">
             <img
               src="/icons/1733492491706152.png"
@@ -179,12 +177,10 @@
             />
             <span class="collapse-summary-text">
               <span class="collapse-summary-title">怪异塔</span>
-              <span class="collapse-summary-meta">
-                非黑市周暂未开放 · 点击展开
-              </span>
+              <span class="collapse-summary-meta">黑市周开放</span>
             </span>
           </summary>
-          <div class="daily-collapse-body weird-tower-collapsed-body">
+          <div class="daily-collapse-body">
             <WeirdTowerStatus />
           </div>
         </details>
@@ -785,7 +781,7 @@ const openReminder = async (kind) => {
     await nextTick();
     const target = document.getElementById("daily-apex-target");
     if (target) target.open = true;
-    target?.focus({ preventScroll: true });
+    target?.querySelector(":scope > summary")?.focus({ preventScroll: true });
     target?.scrollIntoView({ behavior: "auto", block: "start" });
   }
   if (kind === "daily") {
@@ -837,7 +833,9 @@ const openDailyTarget = async (kind) => {
   const target = document.getElementById(targets[kind]);
   if (!target) return;
   if (kind === "apex") target.open = true;
-  target.focus({ preventScroll: true });
+  const focusTarget =
+    kind === "apex" ? target.querySelector(":scope > summary") : target;
+  focusTarget?.focus({ preventScroll: true });
   target.scrollIntoView({ behavior: "auto", block: "start" });
 };
 watch(() => route.query.daily, openDailyTarget, { immediate: true });
@@ -963,13 +961,9 @@ onUnmounted(() => {
 .daily-secondary-aside {
   min-width: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  gap: var(--spacing-lg);
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--spacing-md);
   align-items: start;
-
-  &.is-weird-tower-week .weird-tower-open-card {
-    order: -1;
-  }
 }
 
 .daily-collapse-card {
@@ -977,31 +971,22 @@ onUnmounted(() => {
   border: 1px solid var(--border-light);
   border-radius: var(--border-radius-xl);
   background: var(--bg-primary);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-  transition:
-    border-color var(--transition-fast),
-    box-shadow var(--transition-fast);
 
   &:hover {
     border-color: var(--border-medium, var(--border-light));
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
   }
-
-  &[open] {
-    border-style: solid;
-  }
-}
-
-.weird-tower-collapsed:not([open]) {
-  border-style: dashed;
 }
 
 .daily-collapse-summary {
   list-style: none;
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) 12px;
   align-items: center;
-  gap: 10px;
-  padding: 14px 16px;
+  gap: 12px;
+  min-height: 62px;
+  padding: 10px 16px;
+  border-bottom: 1px solid transparent;
+  border-radius: var(--border-radius-xl);
   cursor: pointer;
   user-select: none;
 
@@ -1011,44 +996,23 @@ onUnmounted(() => {
 
   &::after {
     content: "";
-    flex: none;
     width: 8px;
     height: 8px;
-    margin-left: auto;
+    justify-self: center;
     border-right: 2px solid var(--text-secondary);
     border-bottom: 2px solid var(--text-secondary);
     transform: rotate(-45deg);
-    transition: transform var(--transition-fast);
   }
 
   &:focus-visible {
-    outline: 2px solid var(--primary-color);
-    outline-offset: 2px;
-    border-radius: var(--border-radius-xl);
+    outline: 2px solid var(--text-primary);
+    outline-offset: -3px;
   }
 }
 
 .daily-collapse-card[open] > .daily-collapse-summary {
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border-light);
+  border-bottom-color: var(--border-light);
   border-radius: var(--border-radius-xl) var(--border-radius-xl) 0 0;
-  background: var(--bg-secondary);
-
-  .collapse-summary-icon {
-    display: none;
-  }
-
-  .collapse-summary-text {
-    flex-direction: row;
-    align-items: baseline;
-    flex-wrap: wrap;
-    gap: 4px 10px;
-  }
-
-  .collapse-summary-title {
-    font-size: 13px;
-    color: var(--text-secondary);
-  }
 
   &::after {
     transform: rotate(45deg);
@@ -1056,10 +1020,9 @@ onUnmounted(() => {
 }
 
 .collapse-summary-icon {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   object-fit: contain;
-  flex-shrink: 0;
 }
 
 .collapse-summary-text {
@@ -1086,8 +1049,6 @@ onUnmounted(() => {
 }
 
 .daily-collapse-body {
-  padding: 0;
-
   :deep(.status-card) {
     min-width: 0;
     min-height: 0;
@@ -1103,8 +1064,15 @@ onUnmounted(() => {
   }
 }
 
-.weird-tower-collapsed-body {
-  margin-top: 0;
+.weird-tower-collapsed .daily-collapse-body {
+  :deep(.card-header .status-icon),
+  :deep(.card-header .status-info) {
+    display: none;
+  }
+
+  :deep(.card-header) {
+    justify-content: flex-end;
+  }
 }
 .game-status-container {
   display: grid;
@@ -1309,12 +1277,6 @@ onUnmounted(() => {
   }
 }
 
-.apex-guess-details {
-  .apex-summary-status {
-    color: var(--primary-color);
-  }
-}
-
 .role-details {
   grid-column: 1 / -1;
   min-width: 0;
@@ -1389,13 +1351,25 @@ onUnmounted(() => {
   }
 }
 
+@media (min-width: 901px) {
+  .daily-secondary.has-tower-status .daily-secondary-aside {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--spacing-lg);
+  }
+}
+
+@media (min-width: 1160px) {
+  .daily-secondary-aside {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 600px) {
   .maintenance-panel {
     padding: 16px;
   }
 
-  .maintenance-cards,
-  .daily-secondary-aside {
+  .maintenance-cards {
     grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -3,54 +3,55 @@
     <div class="card-header">
       <img
         src="/icons/Ob7pyorzmHiJcbab2c25af264d0758b527bc1b61cc3b.png"
-        alt="阵容"
+        alt=""
         class="icon"
       />
-      <div class="info">
-        <h3>阵容</h3>
-        <p>当前使用的战斗阵容</p>
-      </div>
-      <div class="team-selector">
-        <button
-          v-for="teamId in availableTeams"
-          :key="teamId"
-          :disabled="loading || switching"
-          class="team-button"
-          :class="[{ active: currentTeam === teamId }]"
-          @click="selectTeam(teamId)"
+      <h3>阵容</h3>
+      <button
+        type="button"
+        class="refresh-button"
+        :disabled="loading"
+        title="刷新队伍数据"
+        @click="refreshTeamData(true)"
+      >
+        <svg
+          class="refresh-icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          aria-hidden="true"
         >
-          {{ teamId }}
-        </button>
-        <button
-          class="refresh-button"
-          :disabled="loading"
-          title="刷新队伍数据"
-          @click="refreshTeamData(true)"
-        >
-          <svg
-            class="refresh-icon"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
-            <path d="M21 3v5h-5" />
-            <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
-            <path d="M3 21v-5h5" />
-          </svg>
-          <span class="refresh-text">刷新</span>
-        </button>
-      </div>
+          <path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8" />
+          <path d="M21 3v5h-5" />
+          <path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16" />
+          <path d="M3 21v-5h5" />
+        </svg>
+        <span class="refresh-text">刷新</span>
+      </button>
+      <p>当前使用的战斗阵容</p>
     </div>
 
     <div class="card-content">
-      <div class="current-team-info">
-        <span class="label">当前阵容</span>
-        <span class="team-number">
-          <template v-if="!loading">阵容 {{ currentTeam }}</template>
-          <template v-else>加载中…</template>
+      <div class="team-controls">
+        <span class="team-caption">
+          {{ loading ? "预设阵容" : `当前阵容 ${currentTeam}` }}
         </span>
+        <div class="team-selector" role="group" aria-label="预设阵容">
+          <button
+            v-for="teamId in availableTeams"
+            :key="teamId"
+            type="button"
+            :disabled="loading || switching"
+            class="team-button"
+            :class="{ active: currentTeam === teamId }"
+            :aria-pressed="currentTeam === teamId"
+            :aria-label="`阵容 ${teamId}`"
+            @click="selectTeam(teamId)"
+          >
+            {{ teamId }}
+          </button>
+        </div>
       </div>
 
       <div class="heroes-container">
@@ -366,53 +367,81 @@ watch(
 
 <style scoped lang="scss">
 .team-formation-card {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 220px;
+  border: 1px solid var(--border-light);
+  box-shadow: none;
+
+  &:hover {
+    transform: none;
+    box-shadow: none;
+  }
+
+  .card-content {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    margin-bottom: 0;
+  }
 }
 
 .card-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "icon title refresh"
+    "icon description description";
   align-items: center;
-  flex-wrap: wrap;
-  gap: var(--spacing-sm) var(--spacing-md);
-  margin-bottom: var(--spacing-md);
+  gap: 2px 12px;
+  margin-bottom: 14px;
 }
 
 .icon {
+  grid-area: icon;
   width: 32px;
   height: 32px;
   object-fit: contain;
-  flex-shrink: 0;
 }
 
-.info {
-  flex: 1 1 112px;
-  min-width: 0;
-}
-
-.info h3 {
-  margin: 0 0 2px 0;
+.card-header h3 {
+  grid-area: title;
+  margin: 0;
+  color: var(--text-primary);
   font-size: var(--font-size-md);
   font-weight: var(--font-weight-semibold);
   line-height: 1.3;
 }
 
-.info p {
+.card-header p {
+  grid-area: description;
   margin: 0;
   color: var(--text-secondary);
-  font-size: var(--font-size-sm);
+  font-size: 13px;
   line-height: 1.4;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.team-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.team-caption {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: var(--font-weight-medium);
 }
 
 .team-selector {
   display: flex;
   align-items: center;
   gap: var(--spacing-xs);
-  flex-shrink: 0;
-  margin-left: auto;
+  flex-wrap: wrap;
 }
 
 .team-button {
@@ -434,7 +463,7 @@ watch(
 }
 
 .team-button.active {
-  background: var(--primary-color);
+  background: var(--primary-color-hover);
   color: white;
 }
 
@@ -444,6 +473,7 @@ watch(
 }
 
 .refresh-button {
+  grid-area: refresh;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -459,6 +489,12 @@ watch(
   font-weight: 500;
   cursor: pointer;
   transition: all var(--transition-fast, 0.15s ease);
+}
+
+.team-button:focus-visible,
+.refresh-button:focus-visible {
+  outline: 2px solid var(--text-primary);
+  outline-offset: 2px;
 }
 
 .refresh-button:hover {
@@ -505,27 +541,10 @@ watch(
   }
 }
 
-.card-content .current-team-info {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: var(--spacing-sm);
-}
-
-.card-content .label {
-  font-size: var(--font-size-sm);
-  color: var(--text-secondary);
-}
-
-.card-content .team-number {
-  font-size: var(--font-size-lg);
-  font-weight: var(--font-weight-bold);
-  color: var(--text-primary);
-}
-
 .heroes-container {
-  background: var(--bg-tertiary);
-  border-radius: var(--border-radius-medium);
+  flex: 1;
+  background: var(--bg-secondary);
+  border-radius: var(--border-radius-large);
   padding: var(--spacing-sm);
   min-height: 60px;
   display: flex;
@@ -597,19 +616,6 @@ watch(
 }
 
 @media (max-width: 768px) {
-  .card-header {
-    flex-direction: column;
-    gap: var(--spacing-sm);
-    text-align: center;
-    align-items: center;
-  }
-
-  .team-selector {
-    justify-content: center;
-    flex-wrap: wrap;
-    gap: var(--spacing-xs);
-  }
-
   .heroes-container {
     padding: var(--spacing-sm);
   }
@@ -637,6 +643,17 @@ watch(
     max-width: 60px;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .team-button,
+  .refresh-button,
+  .refresh-icon {
+    transition: none;
+  }
+
+  .refresh-button:disabled .refresh-icon {
+    animation: none;
   }
 }
 </style>
