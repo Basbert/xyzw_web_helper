@@ -18,11 +18,7 @@
               </n-icon>
               <span>{{ connectionStatusText }}</span>
             </div>
-            <n-button
-              text
-              :disabled="connectionStatus === 'connecting'"
-              @click="toggleConnection"
-            >
+            <n-button text :disabled="isConnecting" @click="toggleConnection">
               {{ isConnected ? "断开连接" : "重新连接" }}
             </n-button>
           </div>
@@ -43,6 +39,16 @@
       >
         在此页接管连接
       </n-button>
+      <n-button
+        v-else-if="credentialRecovery === 'relogin-required'"
+        text
+        type="primary"
+        size="small"
+        style="margin-left: 10px"
+        @click="router.push('/tokens')"
+      >
+        重新登录
+      </n-button>
     </div>
 
     <!-- 功能模块网格 -->
@@ -58,11 +64,7 @@
       <div class="ws-status-card">
         <div class="status-header">
           <h3>连接状态</h3>
-          <n-button
-            text
-            :disabled="connectionStatus === 'connecting'"
-            @click="toggleConnection"
-          >
+          <n-button text :disabled="isConnecting" @click="toggleConnection">
             {{ isConnected ? "断开连接" : "重新连接" }}
           </n-button>
         </div>
@@ -127,6 +129,16 @@ const isConnected = computed(() => {
   return connectionStatus.value === "connected";
 });
 
+const credentialRecovery = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  return tokenId && tokenStore.getConnectionCredentialRecovery?.(tokenId);
+});
+const isConnecting = computed(
+  () =>
+    connectionStatus.value === "connecting" ||
+    credentialRecovery.value === "refreshing",
+);
+
 const isBlockedByOtherTab = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
   return Boolean(
@@ -140,15 +152,17 @@ const isBlockedByOtherTab = computed(() => {
 const recoveryNote = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
   const state = tokenId && tokenStore.connectionRecoveryStatus?.[tokenId];
+  if (isBlockedByOtherTab.value)
+    return "该账号正在另一个助手标签页连接；关闭那个页面后会自动重试，或直接在此页接管。";
+  if (credentialRecovery.value === "refreshing")
+    return "正在更新登录凭据，请稍候。";
+  if (credentialRecovery.value === "relogin-required")
+    return "登录校验未通过，请在账号管理重新登录。";
   if (state === "waiting") {
     if (connectionStatus.value === "connecting")
       return "正在重新连接助手，请稍候。";
-    if (tokenStore.isConnectionActiveInAnotherTab(tokenId))
-      return "该账号正在另一个助手标签页连接；关闭那个页面后会自动重试，或直接在此页接管。";
     return "暂未连接，正在自动重试。切到后台时浏览器可能暂停页面或延迟重连。";
   }
-  if (isBlockedByOtherTab.value)
-    return "该账号正在另一个助手标签页连接；关闭那个页面后会自动重试，或直接在此页接管。";
   if (state === "restored")
     return "连接已恢复，请先核对中断任务的状态和游戏内结果，再决定是否继续。";
   return "";
@@ -261,7 +275,7 @@ const disconnectWebSocket = () => {
 const toggleConnection = () => {
   if (connectionStatus.value === "connected") {
     disconnectWebSocket();
-  } else if (connectionStatus.value !== "connecting") {
+  } else if (!isConnecting.value) {
     connectWebSocket();
   }
 };
@@ -278,6 +292,7 @@ onMounted(() => {
     if (
       status !== "connected" &&
       status !== "connecting" &&
+      !credentialRecovery.value &&
       tokenStore.connectionRecoveryStatus?.[tokenId] !== "waiting"
     ) {
       connectWebSocket();
@@ -308,38 +323,6 @@ watch(
       initializeGameData({ readOnly: id !== previousId });
     }
   },
-);
-
-// 监听当前选中 Token 的连接错误（如 token 过期）并给出明确提示
-watch(
-  () => {
-    if (!tokenStore.selectedToken)
-      return { status: "disconnected", lastError: null };
-    const conn = tokenStore.wsConnections[tokenStore.selectedToken.id];
-    return { status: conn?.status, lastError: conn?.lastError };
-  },
-  (cur) => {
-    if (!cur) return;
-    if (cur.status === "error" && cur.lastError) {
-      const err = String(cur.lastError.error || "").toLowerCase();
-      if (err.includes("token") && err.includes("expired")) {
-        const importMethod = tokenStore.selectedToken?.importMethod;
-        if (
-          importMethod === "url" ||
-          importMethod === "bin" ||
-          importMethod === "wxQrcode" ||
-          importMethod === "mobile" ||
-          importMethod === "wxForceLogout"
-        ) {
-          message.warning("Token已过期，正在尝试自动刷新...");
-          return;
-        }
-        message.error("当前 Token 已过期，请重新导入后再试");
-        router.push("/tokens");
-      }
-    }
-  },
-  { deep: true },
 );
 
 // 初始化游戏数据

@@ -81,8 +81,9 @@ async function fixture(options = {}) {
       },
       "@/utils/xyzwWebSocket": {
         XyzwWebSocketClient: class {
-          constructor() {
+          constructor({ url }) {
             this.socket = null;
+            this.url = url;
             clients.push(this);
           }
           setMessageListener(listener) {
@@ -602,12 +603,58 @@ test("initTokenStore cleans up monitor interval and storage listener on scope di
   assert.ok(f.removedListeners.some(([name]) => name === "storage"));
 });
 
-test("握手失败后刷新 Token 先标记恢复，创建被另一页阻挡后仍会重试", async () => {
-  const f = await fixture();
+test("首次握手异常先用原 Token 重试，成功后不刷新凭据", async () => {
+  let refreshes = 0;
+  const f = await fixture({
+    deferClient: (count) => count === 1,
+    fetchTokenPayloadFromUrl: async () => {
+      refreshes++;
+      return { token: "test-token-refreshed-long" };
+    },
+  });
   f.module.gameTokens.value[0].importMethod = "url";
   f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
-  f.store.wsConnections.alpha.connectedAt = null;
+
+  await f.clients[0].onDisconnect({ code: 1006, reason: "连接握手超时" });
+  assert.equal(refreshes, 0);
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  await f.runNext();
+  assert.equal(f.clients.length, 2);
+  assert.equal(f.clients[1].url, f.clients[0].url);
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+  assert.equal(refreshes, 0);
+});
+
+test("业务回包或模糊的过期文字不会中断正常连接", async () => {
+  let refreshes = 0;
+  const f = await fixture({
+    fetchTokenPayloadFromUrl: async () => {
+      refreshes++;
+      return { token: "test-token-refreshed-long" };
+    },
+  });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
+  for (const packet of [
+    { error: "Token has not expired" },
+    { error: "activity reward token expired" },
+    { cmd: "apex_getguesslistresp", error: "token expired" },
+    { resp: 2, error: "token expired" },
+  ]) {
+    await f.clients[0].listener(packet);
+    assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+  }
+  assert.equal(refreshes, 0);
+  assert.equal(f.store.connectionRecoveryStatus.alpha, undefined);
+});
+
+test("连续握手失败后可刷新 Token，创建被另一页阻挡后仍会重试", async () => {
+  const f = await fixture({ deferClient: (count) => count <= 2 });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
   await f.clients[0].onDisconnect({ code: 1006 });
+  await f.runNext();
+  await f.clients[1].onDisconnect({ code: 1006 });
   assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
   assert.equal(f.module.gameTokens.value[0].token, "test-token-refreshed-long");
   f.values.set(
@@ -619,11 +666,34 @@ test("握手失败后刷新 Token 先标记恢复，创建被另一页阻挡后�
     }),
   );
   await f.runNext();
-  assert.equal(f.clients.length, 1);
+  assert.equal(f.clients.length, 2);
   assert.equal([...f.timers.values()][0].delay, 60000);
   f.values.delete("ws_connection_alpha");
   await f.runNext();
-  assert.equal(f.clients.length, 2);
+  assert.equal(f.clients.length, 3);
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "restored");
+});
+
+test("失败的握手兜底一轮只刷新一次，仍按断线继续重连", async () => {
+  let refreshes = 0;
+  const f = await fixture({
+    deferClient: (count) => count <= 3,
+    fetchTokenPayloadFromUrl: async () => {
+      refreshes++;
+      throw new Error("模拟网络不可达");
+    },
+  });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
+
+  for (let i = 0; i < 3; i++) {
+    await f.clients[i].onDisconnect({ code: 1006 });
+    assert.equal(f.store.getConnectionCredentialRecovery("alpha"), undefined);
+    assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+    await f.runNext();
+  }
+  assert.equal(refreshes, 1);
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
   assert.equal(f.store.connectionRecoveryStatus.alpha, "restored");
 });
 
@@ -637,8 +707,7 @@ test("Token 刷新长时间无响应时仍安排恢复重试", async () => {
   });
   f.module.gameTokens.value[0].importMethod = "url";
   f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
-  f.store.wsConnections.alpha.connectedAt = null;
-  const pending = f.clients[0].onDisconnect({ code: 1006 });
+  const pending = f.clients[0].listener({ error: "token expired" });
   await Promise.resolve();
   assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
   assert.equal([...f.timers.values()][0].delay, 15000);
@@ -658,8 +727,7 @@ test("刷新等待期间手动断开不会在刷新完成后恢复连接", async
   });
   f.module.gameTokens.value[0].importMethod = "url";
   f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
-  f.store.wsConnections.alpha.connectedAt = null;
-  const pending = f.clients[0].onDisconnect({ code: 1006 });
+  const pending = f.clients[0].listener({ error: "token expired" });
   await Promise.resolve();
   f.store.closeWebSocketConnection("alpha");
   resolveRefresh({ token: "test-token-refreshed-long" });
@@ -674,14 +742,82 @@ test("收到 Token 过期消息后的自动刷新同样标记恢复并等待新�
   const f = await fixture();
   f.module.gameTokens.value[0].importMethod = "url";
   f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
-  f.clients[0].listener({ error: "token expired" });
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await f.clients[0].listener({ error: "token expired" });
   assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
   assert.equal(f.clients.length, 1);
   await f.runNext();
   assert.equal(f.clients.length, 2);
   assert.equal(f.store.connectionRecoveryStatus.alpha, "restored");
   assert.deepEqual(f.sent, ["role_getroleinfo", "role_getroleinfo"]);
+});
+
+test("重复认证拒绝和重连后的同一凭据只发起一次在途刷新", async () => {
+  let refreshes = 0;
+  let resolveRefresh;
+  const f = await fixture({
+    fetchTokenPayloadFromUrl: () => {
+      refreshes++;
+      return new Promise((resolve) => {
+        resolveRefresh = resolve;
+      });
+    },
+  });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
+  const rejection = { error: "Token has expired." };
+  const first = f.clients[0].listener(rejection);
+  await f.clients[0].listener(rejection);
+  assert.equal(f.store.getConnectionCredentialRecovery("alpha"), "refreshing");
+  assert.equal(refreshes, 1);
+  assert.equal(f.timers.size, 1);
+
+  await f.runNext();
+  const afterWatchdog = f.clients[1].listener(rejection);
+  assert.equal(refreshes, 1);
+  assert.equal(f.store.getConnectionCredentialRecovery("alpha"), "refreshing");
+  resolveRefresh({ token: "test-token-refreshed-long" });
+  await Promise.all([first, afterWatchdog]);
+  await f.runNext();
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+  assert.equal(f.store.getConnectionCredentialRecovery("alpha"), undefined);
+  assert.notEqual(f.clients[2].url, f.clients[0].url);
+});
+
+test("明确拒绝且手动账号无法自动换新时提示重登，更新凭据后提示消失", async () => {
+  const f = await fixture();
+  await f.clients[0].onDisconnect({ code: 1008, reason: "Token has expired." });
+  assert.equal(
+    f.store.getConnectionCredentialRecovery("alpha"),
+    "relogin-required",
+  );
+  assert.equal(f.store.getWebSocketStatus("alpha"), "disconnected");
+  f.listeners.visibilitychange();
+  assert.equal(f.timers.size, 0);
+
+  f.store.updateToken("alpha", { token: "test-token-refreshed-long" });
+  assert.equal(f.store.getConnectionCredentialRecovery("alpha"), undefined);
+  f.listeners.visibilitychange();
+  await f.runNext();
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+});
+
+test("旧凭据被拒绝时用已更新的凭据重连，不会再刷新新凭据", async () => {
+  let refreshes = 0;
+  const f = await fixture({
+    fetchTokenPayloadFromUrl: async () => {
+      refreshes++;
+      return { token: "unexpected-token-refreshed-long" };
+    },
+  });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
+  f.store.updateToken("alpha", { token: "new-imported-token-long" });
+  await f.clients[0].listener({ error: "token expired" });
+  assert.equal(refreshes, 0);
+  assert.equal(f.store.getConnectionCredentialRecovery("alpha"), undefined);
+  await f.runNext();
+  assert.ok(f.clients[1].url.includes("new-imported-token-long"));
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
 });
 
 test("多个标签页通过跨标签锁原子领取连接，只有一个创建客户端", async () => {

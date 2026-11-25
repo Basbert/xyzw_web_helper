@@ -4,7 +4,6 @@ import { defineStore } from "pinia";
 import { computed, onScopeDispose, ref, toRaw, watch } from "vue";
 
 import useIndexedDB from "@/hooks/useIndexedDB";
-import router from "@/router";
 import { createAccountGameData } from "@/utils/accountGameData";
 import { normalizeRoleId } from "@/utils/accountIdentity.js";
 import { g_utils } from "@/utils/bonProtocol";
@@ -112,6 +111,11 @@ declare interface WebSocketConnection {
   randomSeedSynced?: boolean;
   lastRandomSeedSource?: number | null;
   lastRandomSeed?: number | null;
+  handshakeFailure?: "retry" | "refresh-attempted";
+  credentialRecovery?: {
+    version: number;
+    status: "refreshing" | "relogin-required";
+  };
 }
 
 declare type WebCtx = Record<string, Partial<WebSocketConnection>>;
@@ -133,6 +137,24 @@ declare interface CrossTabConnectionState {
 
 const getErrorMessage = (error: unknown, fallback = "未知错误") =>
   error instanceof Error ? error.message : String(error || fallback);
+
+const isTokenExpiredReason = (reason: unknown) =>
+  typeof reason === "string" &&
+  /^token\s+(?:(?:is|has)\s+)?expired[.!。]?$/i.test(reason.trim());
+
+// Login rejection is a connection-level message, independent of game requests.
+const isConnectionTokenRejection = (message: ProtoMsg) => {
+  if (
+    !isTokenExpiredReason(message.error) ||
+    (message.resp != null && message.resp !== 0)
+  )
+    return false;
+  const command = message.cmd;
+  return (
+    !command ||
+    (typeof command === "string" && command.toLowerCase().startsWith("_sys/"))
+  );
+};
 
 class ConnectionLeaseTimeoutError extends Error {
   constructor() {
@@ -2841,53 +2863,33 @@ export const useTokenStore = defineStore("tokens", () => {
     return executeCredentialRefresh(tokenId, { respectCooldown: false });
   };
 
-  // 尝试自动刷新Token
-  const attemptTokenRefresh = async (
+  const automaticCredentialRefreshes = new Map<
+    string,
+    {
+      version: number;
+      token: string;
+      request: Promise<CredentialRefreshOutcome>;
+    }
+  >();
+
+  // The watchdog can replace the socket while refresh is still pending.
+  const refreshConnectionCredential = (
     tokenId: string,
-    forceReconnect = false,
-    deferReconnect = false,
+    version: number,
+    token: string,
   ) => {
-    const outcome = await executeCredentialRefresh(tokenId, {
+    const pending = automaticCredentialRefreshes.get(tokenId);
+    if (pending?.version === version && pending.token === token)
+      return pending.request;
+
+    const request = executeCredentialRefresh(tokenId, {
       respectCooldown: true,
+    }).finally(() => {
+      if (automaticCredentialRefreshes.get(tokenId)?.request === request)
+        automaticCredentialRefreshes.delete(tokenId);
     });
-
-    if (outcome.status === "cooldown" || outcome.status === "stale") {
-      return false;
-    }
-
-    if (outcome.status === "refreshed") {
-      wsLogger.info(`Token刷新成功 [${tokenId}]`);
-
-      const currentPath = router.currentRoute.value.path;
-      const shouldReconnect =
-        forceReconnect ||
-        currentPath === "/tokens" ||
-        currentPath === "/admin/game-features";
-
-      if (
-        shouldReconnect &&
-        !deferReconnect &&
-        selectedTokenId.value === tokenId &&
-        desiredConnections.has(tokenId) &&
-        gameTokens.value.some((t) => t.id === tokenId)
-      ) {
-        wsLogger.info(`触发自动重连 [${tokenId}]`);
-        if (wsConnections.value[tokenId]) {
-          wsConnections.value[tokenId].reconnectAttempts = 0;
-        }
-        await selectToken(tokenId, true);
-      }
-      return true;
-    }
-
-    if (wsConnections.value[tokenId]) {
-      wsConnections.value[tokenId].lastError = {
-        timestamp: new Date().toISOString(),
-        error: "登录凭据已失效，请前往账号管理重新登录",
-      };
-    }
-    wsLogger.error(`Token刷新失败，请手动重新导入 [${tokenId}]`);
-    return false;
+    automaticCredentialRefreshes.set(tokenId, { version, token, request });
+    return request;
   };
 
   // 游戏消息处理
@@ -2902,40 +2904,7 @@ export const useTokenStore = defineStore("tokens", () => {
         return;
       }
       if (message.error) {
-        const errText = String(message.error).toLowerCase();
         gameLogger.warn(`消息处理跳过 [${tokenId}]:`, message.error);
-        if (errText.includes("token") && errText.includes("expired")) {
-          const conn = wsConnections.value[tokenId];
-          if (conn) {
-            conn.status = "error";
-            conn.lastError = {
-              timestamp: new Date().toISOString(),
-              error: "token expired",
-            };
-          }
-
-          const gameToken = gameTokens.value.find((t) => t.id === tokenId);
-          if (gameToken) {
-            // Treat token refresh as recovery, including when the network
-            // response hangs; never replay the interrupted game command.
-            connectionRecovery.schedule(tokenId, { delayMs: 15000 });
-            const refreshed = await attemptTokenRefresh(tokenId, true, true);
-            if (
-              wsConnections.value[tokenId] === conn &&
-              shouldKeepRecovering(tokenId)
-            ) {
-              connectionRecovery.schedule(tokenId, {
-                reset: true,
-                immediate: true,
-              });
-            }
-            if (!refreshed) {
-              wsLogger.error(
-                `Token 已过期且无法自动刷新，请重新导入 [${tokenId}]`,
-              );
-            }
-          }
-        }
         return;
       }
 
@@ -3457,6 +3426,12 @@ export const useTokenStore = defineStore("tokens", () => {
   const desiredConnections = new Set<string>();
   const connectionGeneration = new Map<string, number>();
   const connectionRecoveryStatus = ref<Record<string, string>>({});
+  const getConnectionCredentialRecovery = (tokenId: string) => {
+    const recovery = wsConnections.value[tokenId]?.credentialRecovery;
+    return recovery && recovery.version === getCredentialVersion(tokenId)
+      ? recovery.status
+      : undefined;
+  };
   const shouldKeepRecovering = (tokenId: string) => {
     const status = wsConnections.value[tokenId]?.status;
     return (
@@ -3464,7 +3439,8 @@ export const useTokenStore = defineStore("tokens", () => {
       selectedTokenId.value === tokenId &&
       gameTokens.value.some((token) => token.id === tokenId) &&
       status !== "connected" &&
-      status !== "disconnecting"
+      status !== "disconnecting" &&
+      getConnectionCredentialRecovery(tokenId) !== "relogin-required"
     );
   };
   const connectionRecovery = createConnectionRecovery({
@@ -3684,6 +3660,7 @@ export const useTokenStore = defineStore("tokens", () => {
       // Atomically claim the per-account lease across upgraded tabs. Keep the
       // existing fallback for browsers without Web Locks; those cannot offer
       // the same cross-tab guarantee.
+      let previousConnection: Partial<WebSocketConnection> | undefined;
       const claimConnection = async (isActive: () => boolean) => {
         if (
           !isActive() ||
@@ -3699,7 +3676,7 @@ export const useTokenStore = defineStore("tokens", () => {
             return false;
           if (checkCrossTabConnection(tokenId)) return false;
         }
-        const previousConnection = wsConnections.value[tokenId];
+        previousConnection = wsConnections.value[tokenId];
         if (previousConnection) {
           wsLogger.debug(`优雅关闭现有连接: ${tokenId}`);
           await closeWebSocketConnectionAsync(
@@ -3790,6 +3767,11 @@ export const useTokenStore = defineStore("tokens", () => {
 
       const wsUrl = customWsUrl || baseWsUrl;
       const safeWsUrl = wsUrl.split("?")[0];
+      const previousHandshakeFailure =
+        fromRecovery && previousConnection?.client?.url === wsUrl
+          ? previousConnection.handshakeFailure
+          : undefined;
+      const credentialVersion = getCredentialVersion(tokenId);
 
       // 7. 创建新的WebSocket客户端（增强版）
       const wsClient = new XyzwWebSocketClient({
@@ -3819,6 +3801,90 @@ export const useTokenStore = defineStore("tokens", () => {
       const connection = wsConnections.value[tokenId];
       const isCurrentConnection = () =>
         Boolean(connection && wsConnections.value[tokenId] === connection);
+      const usingCurrentCredential = () => {
+        syncGameTokensFromStorage();
+        const latest = gameTokens.value.find((item) => item.id === tokenId);
+        return (
+          latest?.token === base64Token &&
+          (latest.wsUrl ?? null) === customWsUrl &&
+          getCredentialVersion(tokenId) === credentialVersion
+        );
+      };
+      const recoverConnectionCredential = async (
+        confirmedRejection: boolean,
+      ) => {
+        if (connection.credentialRecovery) return;
+        const matches = usingCurrentCredential();
+        if (!isCurrentConnection()) return;
+        const refreshGeneration = connectionGeneration.get(tokenId);
+
+        if (confirmedRejection) {
+          connection.status = "error";
+          connection.lastError = {
+            timestamp: new Date().toISOString(),
+            error: "服务端拒绝了当前登录凭据",
+          };
+          if (matches) {
+            connection.credentialRecovery = {
+              version: credentialVersion,
+              status: "refreshing",
+            };
+          }
+          try {
+            wsClient.cancelPendingCommands?.("登录校验未通过");
+            wsClient.disconnect();
+          } catch (error) {
+            wsLogger.warn(`关闭登录校验失败的连接 [${tokenId}]`, error);
+          }
+          releaseConnectionLock(tokenId, "connect");
+          updateCrossTabConnectionState(tokenId, "disconnected");
+        }
+
+        if (!matches) {
+          connectionRecovery.schedule(tokenId, {
+            reset: true,
+            immediate: true,
+          });
+          return;
+        }
+        // Keep the ordinary reconnect watchdog if the credential source hangs.
+        connectionRecovery.schedule(tokenId, { delayMs: 15000 });
+        const outcome = await refreshConnectionCredential(
+          tokenId,
+          credentialVersion,
+          base64Token,
+        );
+        if (!isCurrentConnection() || connection.status === "disconnecting")
+          return;
+
+        if (confirmedRejection) {
+          delete connection.credentialRecovery;
+          if (
+            refreshGeneration === connectionGeneration.get(tokenId) &&
+            outcome.status !== "refreshed" &&
+            outcome.status !== "stale" &&
+            usingCurrentCredential() &&
+            isCurrentConnection()
+          ) {
+            connection.credentialRecovery = {
+              version: credentialVersion,
+              status: "relogin-required",
+            };
+            connection.status = "disconnected";
+            connectionRecovery.cancel(tokenId);
+            return;
+          }
+        }
+        if (
+          refreshGeneration === connectionGeneration.get(tokenId) &&
+          (outcome.status === "refreshed" || outcome.status === "stale")
+        ) {
+          connectionRecovery.schedule(tokenId, {
+            reset: true,
+            immediate: true,
+          });
+        }
+      };
       (
         wsClient as XyzwWebSocketClient & {
           beforeSend?: (() => boolean) | null;
@@ -3948,36 +4014,38 @@ export const useTokenStore = defineStore("tokens", () => {
         releaseConnectionLock(tokenId, "connect");
         if (wsConnections.value[tokenId]) {
           const conn = wsConnections.value[tokenId];
+          if (conn.status === "disconnected" || conn.credentialRecovery) return;
           const wasDisconnecting = conn.status === "disconnecting";
           conn.status = "disconnected";
           conn.randomSeedSynced = false;
           updateCrossTabConnectionState(tokenId, "disconnected");
 
-          // 如果连接异常断开(1006)且从未连接成功(握手失败)，尝试刷新Token
-          // connectedAt 为 null 表示 socket.onopen 还没触发就断开了，通常意味着握手失败（如403 Forbidden）
+          if (wasDisconnecting) return;
           if (
-            event.code === 1006 &&
-            !conn.connectedAt &&
-            !wasDisconnecting &&
-            desiredConnections.has(tokenId) &&
-            selectedTokenId.value === tokenId
+            isTokenExpiredReason(event.reason) &&
+            !checkCrossTabConnection(tokenId)
           ) {
-            wsLogger.warn(`检测到握手失败(1006)，尝试刷新Token [${tokenId}]`);
-            // Mark this as recovery before refreshing. If refresh hangs, the
-            // watchdog resumes ordinary retry without replaying game actions.
-            connectionRecovery.schedule(tokenId, { delayMs: 15000 });
-            await attemptTokenRefresh(tokenId, true, true);
-            if (isCurrentConnection() && shouldKeepRecovering(tokenId)) {
-              connectionRecovery.schedule(tokenId, {
-                reset: true,
-                immediate: true,
-              });
-            }
+            await recoverConnectionCredential(true);
             return;
           }
-          if (!wasDisconnecting && isCurrentConnection()) {
-            connectionRecovery.schedule(tokenId);
+
+          // 1006 does not expose why the handshake failed. Retry the same
+          // credential first, then try refreshing once if it still fails.
+          if (event.code === 1006 && !conn.connectedAt) {
+            conn.handshakeFailure = previousHandshakeFailure ?? "retry";
+            if (
+              previousHandshakeFailure === "retry" &&
+              shouldKeepRecovering(tokenId) &&
+              (typeof navigator === "undefined" ||
+                navigator.onLine !== false) &&
+              !checkCrossTabConnection(tokenId)
+            ) {
+              conn.handshakeFailure = "refresh-attempted";
+              await recoverConnectionCredential(false);
+              return;
+            }
           }
+          connectionRecovery.schedule(tokenId);
         }
       };
 
@@ -4015,7 +4083,15 @@ export const useTokenStore = defineStore("tokens", () => {
             data: message,
             cmd: message?.cmd,
           };
-          handleGameMessage(tokenId, message, wsClient);
+          if (
+            message &&
+            isConnectionTokenRejection(message) &&
+            ["connected", "connecting"].includes(connection.status || "") &&
+            ensureActiveSendLease(tokenId)
+          ) {
+            return recoverConnectionCredential(true);
+          }
+          return handleGameMessage(tokenId, message, wsClient);
         }
       });
 
@@ -5857,6 +5933,7 @@ export const useTokenStore = defineStore("tokens", () => {
     closeWebSocketConnection,
     closeWebSocketConnectionIfCurrent,
     getWebSocketStatus,
+    getConnectionCredentialRecovery,
     isConnectionActiveInAnotherTab,
     reconcileStaleCrossTabLeases,
     takeOverCrossTabConnection,

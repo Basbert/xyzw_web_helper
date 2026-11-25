@@ -378,12 +378,17 @@ const isConnected = computed(() => {
 });
 
 const connectingAccount = ref(null);
+const credentialRecovery = computed(() => {
+  const tokenId = tokenStore.selectedToken?.id;
+  return tokenId && tokenStore.getConnectionCredentialRecovery?.(tokenId);
+});
 const isConnecting = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
   if (!tokenId) return false;
   return (
     connectingAccount.value === tokenId ||
-    tokenStore.getWebSocketStatus(tokenId) === "connecting"
+    tokenStore.getWebSocketStatus(tokenId) === "connecting" ||
+    credentialRecovery.value === "refreshing"
   );
 });
 
@@ -556,20 +561,21 @@ const takeOverSelectedAccount = async () => {
 const accountNotice = computed(() => {
   const tokenId = tokenStore.selectedToken?.id;
   if (!tokenId || isConnected.value) return null;
-  const conn = tokenStore.wsConnections?.[tokenId];
-  const lastError = conn?.lastError?.error || "";
-  if (/凭据已失效|token expired|重新登录/i.test(lastError)) {
-    return {
-      type: "warning",
-      text: "当前账号登录凭据已失效，请前往账号管理扫码或验证码原地刷新（无需清除账号）。",
-      showRelogin: true,
-    };
-  }
   if (tokenStore.isConnectionActiveInAnotherTab?.(tokenId)) {
     return {
       type: "info",
       text: "该账号正在另一个助手标签页连接；关闭那个页面后会自动重试，或直接在此页接管。",
       showTakeover: true,
+    };
+  }
+  if (credentialRecovery.value === "refreshing") {
+    return { type: "info", text: "正在更新登录凭据，请稍候。" };
+  }
+  if (credentialRecovery.value === "relogin-required") {
+    return {
+      type: "warning",
+      text: "登录校验未通过，请在账号管理重新登录。",
+      showRelogin: true,
     };
   }
   const recovery = tokenStore.connectionRecoveryStatus?.[tokenId];
@@ -669,6 +675,7 @@ onMounted(async () => {
   if (
     selected &&
     tokenStore.getWebSocketStatus(selected.id) === "disconnected" &&
+    !credentialRecovery.value &&
     tokenStore.connectionRecoveryStatus?.[selected.id] !== "waiting"
   ) {
     connectSelectedAccount({
