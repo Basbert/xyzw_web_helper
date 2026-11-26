@@ -90,7 +90,7 @@ test("fetchTokenPayloadFromUrl enforces timeout, safe fetch options, and JSON va
           });
         }),
     }),
-    { message: /请求超时/, retryable: true },
+    /请求超时/,
   );
 
   await assert.rejects(
@@ -99,7 +99,7 @@ test("fetchTokenPayloadFromUrl enforces timeout, safe fetch options, and JSON va
         throw new TypeError("Failed to fetch");
       },
     }),
-    { message: "暂时无法访问 Token 来源", retryable: true },
+    /暂时无法访问 Token 来源/,
   );
 
   await assert.rejects(
@@ -147,8 +147,8 @@ test("transformToken and getServerList configure timeouts and omit invalid refer
   }
 });
 
-test("transformToken rejects server error responses instead of returning empty session JSON", async () => {
-  const { transformToken } = await loadModule(
+test("game login and role-list exchanges preserve explicit protocol rejection", async () => {
+  const { transformToken, getServerList } = await loadModule(
     new URL("../src/utils/token.ts", import.meta.url),
     {
       axios: {
@@ -176,10 +176,12 @@ test("transformToken rejects server error responses instead of returning empty s
     { AbortController, setTimeout, clearTimeout },
   );
 
-  await assert.rejects(
-    transformToken(new ArrayBuffer(8)),
-    /登录凭据校验失败：token expired/,
-  );
+  for (const exchange of [transformToken, getServerList]) {
+    await assert.rejects(exchange(new ArrayBuffer(8)), {
+      message: "登录凭据校验失败：token expired",
+      loginErrorReason: "token expired",
+    });
+  }
 });
 
 test("transformToken rejects empty objects and payloads without credential fields", async () => {
@@ -196,7 +198,7 @@ test("transformToken rejects empty objects and payloads without credential field
     });
     await assert.rejects(
       transformToken(new ArrayBuffer(8)),
-      /登录凭据已失效或缺少凭据字段/,
+      /登录接口响应缺少凭据字段/,
     );
   }
 });

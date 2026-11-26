@@ -49,6 +49,7 @@ async function fixture(options = {}) {
       "@/hooks/useIndexedDB": {
         default: () => ({
           getArrayBuffer: options.getArrayBuffer || (() => {}),
+          error: options.idbError,
           storeArrayBuffer() {},
           deleteArrayBuffer() {},
           clearAll() {},
@@ -685,13 +686,13 @@ test("连续握手失败后可刷新 Token，创建被另一页阻挡后仍会�
   assert.equal(f.store.connectionRecoveryStatus.alpha, "restored");
 });
 
-test("失败的握手兜底一轮只刷新一次，仍按断线继续重连", async () => {
+test("刷新来源不可用时握手兜底只尝试一次，仍按断线继续重连", async () => {
   let refreshes = 0;
   const f = await fixture({
     deferClient: (count) => count <= 3,
     fetchTokenPayloadFromUrl: async () => {
       refreshes++;
-      throw new Error("模拟网络不可达");
+      throw Object.assign(new Error("HTTP 状态码：401"), { status: 401 });
     },
   });
   f.module.gameTokens.value[0].importMethod = "url";
@@ -759,7 +760,7 @@ test("扫码账号明确被拒后，BIN 换取凭据暂时超时会继续恢复"
   assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
 });
 
-test("连接明确被拒且刷新来源返回 401 时提示重登", async () => {
+test("自定义刷新来源的 HTTP 401 只提示查看账号管理", async () => {
   const f = await fixture({
     fetchTokenPayloadFromUrl: async () => {
       throw Object.assign(new Error("HTTP 状态码：401"), { status: 401 });
@@ -770,9 +771,59 @@ test("连接明确被拒且刷新来源返回 401 时提示重登", async () => 
   await f.clients[0].listener({ error: "token expired" });
   assert.equal(
     f.store.getConnectionCredentialRecovery("alpha"),
+    "refresh-unavailable",
+  );
+  assert.equal(f.timers.size, 0);
+});
+
+test("无法确认的刷新响应保留自动恢复，不提示重新登录", async () => {
+  const f = await fixture({ fetchTokenPayloadFromUrl: async () => ({}) });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
+  await f.clients[0].listener({ error: "token expired" });
+  assert.equal(f.store.getConnectionCredentialRecovery("alpha"), undefined);
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  assert.equal(f.timers.size, 1);
+});
+
+test("本地 BIN 缺失时只提示查看账号管理", async () => {
+  const f = await fixture();
+  f.module.gameTokens.value[0].importMethod = "wxQrcode";
+  await f.clients[0].listener({ error: "token expired" });
+  assert.equal(
+    f.store.getConnectionCredentialRecovery("alpha"),
+    "refresh-unavailable",
+  );
+  assert.equal(f.timers.size, 0);
+  assert.equal(f.module.gameTokens.value.length, 2);
+});
+
+test("本地数据库读取暂时失败时继续自动恢复", async () => {
+  const f = await fixture({ idbError: vue.ref("暂时无法读取数据库") });
+  f.module.gameTokens.value[0].importMethod = "wxQrcode";
+  await f.clients[0].listener({ error: "token expired" });
+  assert.equal(f.store.getConnectionCredentialRecovery("alpha"), undefined);
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  assert.equal(f.timers.size, 1);
+});
+
+test("游戏登录接口明确返回登录凭据过期时提示重新登录", async () => {
+  const f = await fixture({
+    getArrayBuffer: async () => new ArrayBuffer(8),
+    transformToken: async () => {
+      throw Object.assign(new Error("登录凭据校验失败：token expired"), {
+        loginErrorReason: "token expired",
+      });
+    },
+  });
+  f.module.gameTokens.value[0].importMethod = "wxQrcode";
+  await f.clients[0].listener({ error: "token expired" });
+  assert.equal(
+    f.store.getConnectionCredentialRecovery("alpha"),
     "relogin-required",
   );
   assert.equal(f.timers.size, 0);
+  assert.equal(f.module.gameTokens.value.length, 2);
 });
 
 test("连续握手失败时，暂时无法换取凭据后还能再次刷新", async () => {
@@ -896,12 +947,12 @@ test("重复认证拒绝和重连后的同一凭据只发起一次在途刷新",
   assert.notEqual(f.clients[2].url, f.clients[0].url);
 });
 
-test("明确拒绝且手动账号无法自动换新时提示重登，更新凭据后提示消失", async () => {
+test("手动账号无自动来源时显示中性提示，更新凭据后提示消失", async () => {
   const f = await fixture();
   await f.clients[0].onDisconnect({ code: 1008, reason: "Token has expired." });
   assert.equal(
     f.store.getConnectionCredentialRecovery("alpha"),
-    "relogin-required",
+    "refresh-unavailable",
   );
   assert.equal(f.store.getWebSocketStatus("alpha"), "disconnected");
   f.listeners.visibilitychange();

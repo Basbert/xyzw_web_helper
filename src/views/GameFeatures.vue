@@ -40,14 +40,19 @@
         在此页接管连接
       </n-button>
       <n-button
-        v-else-if="credentialRecovery === 'relogin-required'"
+        v-else-if="
+          credentialRecovery === 'relogin-required' ||
+          credentialRecovery === 'refresh-unavailable'
+        "
         text
         type="primary"
         size="small"
         style="margin-left: 10px"
         @click="router.push('/tokens')"
       >
-        重新登录
+        {{
+          credentialRecovery === "relogin-required" ? "重新登录" : "账号管理"
+        }}
       </n-button>
     </div>
 
@@ -157,7 +162,9 @@ const recoveryNote = computed(() => {
   if (credentialRecovery.value === "refreshing")
     return "正在更新登录凭据，请稍候。";
   if (credentialRecovery.value === "relogin-required")
-    return "登录校验未通过，请在账号管理重新登录。";
+    return "游戏登录接口确认凭据已过期。";
+  if (credentialRecovery.value === "refresh-unavailable")
+    return "暂时无法自动恢复，可手动重新连接或检查账号设置。";
   if (state === "waiting") {
     if (connectionStatus.value === "connecting")
       return "正在重新连接助手，请稍候。";

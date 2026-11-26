@@ -73,13 +73,13 @@
             在此页接管连接
           </n-button>
           <n-button
-            v-if="accountNotice.showRelogin"
+            v-else-if="accountNotice.accountAction"
             size="tiny"
-            type="warning"
+            :type="accountNotice.type === 'warning' ? 'warning' : 'primary'"
             secondary
             @click="handleManageTokens"
           >
-            重新登录
+            {{ accountNotice.accountAction }}
           </n-button>
         </div>
 
@@ -574,16 +574,22 @@ const accountNotice = computed(() => {
   if (credentialRecovery.value === "relogin-required") {
     return {
       type: "warning",
-      text: "登录校验未通过，请在账号管理重新登录。",
-      showRelogin: true,
+      text: "游戏登录接口确认凭据已过期。",
+      accountAction: "重新登录",
+    };
+  }
+  if (credentialRecovery.value === "refresh-unavailable") {
+    return {
+      type: "info",
+      text: "暂时无法自动恢复，可手动重新连接或检查账号设置。",
+      accountAction: "账号管理",
     };
   }
   const recovery = tokenStore.connectionRecoveryStatus?.[tokenId];
   if (recovery === "waiting") {
     return {
       type: "info",
-      text: "连接已断开，正在自动等待重连；若长时间未恢复可点击重新登录。",
-      showRelogin: true,
+      text: "连接暂时中断，正在自动重试。",
     };
   }
   return null;

@@ -190,11 +190,8 @@ export const fetchTokenPayloadFromUrl = async (
           error !== null &&
           "name" in error &&
           error.name === "AbortError");
-      throw Object.assign(
-        new Error(
-          timedOut ? `请求超时（${timeoutMs}ms）` : "暂时无法访问 Token 来源",
-        ),
-        { retryable: true },
+      throw new Error(
+        timedOut ? `请求超时（${timeoutMs}ms）` : "暂时无法访问 Token 来源",
       );
     });
 
@@ -219,6 +216,23 @@ export const fetchTokenPayloadFromUrl = async (
   } finally {
     clearTimeout(timeoutId);
   }
+};
+
+const assertLoginResponseOk = (message: {
+  error?: unknown;
+  code?: unknown;
+}) => {
+  if (
+    !message?.error &&
+    !(Number.isInteger(message?.code) && Number(message.code) !== 0)
+  )
+    return;
+  const loginErrorReason =
+    typeof message.error === "string" ? message.error.trim() : "";
+  const detail = loginErrorReason || `错误码 ${String(message.code)}`;
+  throw Object.assign(new Error(`登录凭据校验失败：${detail}`), {
+    loginErrorReason,
+  });
 };
 
 /**
@@ -247,16 +261,10 @@ export const transformToken = async (arrayBuffer: ArrayBuffer) => {
       code?: unknown;
       getData: () => unknown;
     };
-    if (msg?.error || (Number.isInteger(msg?.code) && Number(msg.code) !== 0)) {
-      const reason =
-        typeof msg.error === "string" && msg.error.trim()
-          ? msg.error.trim()
-          : `错误码 ${String(msg.code)}`;
-      throw new Error(`登录凭据校验失败：${reason}`);
-    }
-    const rawData = msg.getData();
+    assertLoginResponseOk(msg);
+    const rawData = msg?.getData();
     if (!rawData || typeof rawData !== "object" || Array.isArray(rawData)) {
-      throw new Error("登录凭据换取失败，请重新登录");
+      throw new Error("登录接口响应格式无法识别");
     }
     const data = rawData as Record<string, unknown>;
     const credentialKeys = ["roleToken", "token", "gameToken"];
@@ -265,7 +273,7 @@ export const transformToken = async (arrayBuffer: ArrayBuffer) => {
       return typeof value === "string" && value.trim().length > 0;
     });
     if (!hasCredentialField) {
-      throw new Error("登录凭据已失效或缺少凭据字段，请重新登录");
+      throw new Error("登录接口响应缺少凭据字段");
     }
     const currentTime = Date.now();
     const sessId = currentTime * 100 + Math.floor(Math.random() * 100);
@@ -300,6 +308,7 @@ export const getServerList = async (arrayBuffer: ArrayBuffer) => {
 
   const msg = g_utils.parse(res.data);
   // console.log("解析结果:", msg);
+  if (msg?.error) assertLoginResponseOk(msg);
 
   const data = (msg.getData() ?? {}) as { roles?: Record<string, unknown> };
   return JSON.stringify({

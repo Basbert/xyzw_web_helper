@@ -114,7 +114,7 @@ declare interface WebSocketConnection {
   handshakeFailure?: "retry" | "refresh-attempted";
   credentialRecovery?: {
     version: number;
-    status: "refreshing" | "relogin-required";
+    status: "refreshing" | "refresh-unavailable" | "relogin-required";
   };
 }
 
@@ -138,30 +138,27 @@ declare interface CrossTabConnectionState {
 const getErrorMessage = (error: unknown, fallback = "未知错误") =>
   error instanceof Error ? error.message : String(error || fallback);
 
-const isTemporaryCredentialRefreshError = (error: unknown): boolean => {
-  if (typeof error !== "object" || error === null) return false;
-  const requestError = error as {
-    retryable?: boolean;
-    status?: number;
-    response?: { status?: number };
-    isAxiosError?: boolean;
-    code?: string;
-  };
-  if (requestError.retryable === true) return true;
-  const status = requestError.status ?? requestError.response?.status;
-  if (typeof status === "number")
-    return status === 408 || status === 429 || (status >= 500 && status < 600);
-  return (
-    requestError.isAxiosError === true &&
-    ["ERR_NETWORK", "ECONNABORTED", "ETIMEDOUT"].includes(
-      requestError.code ?? "",
-    )
-  );
-};
-
 const isTokenExpiredReason = (reason: unknown) =>
   typeof reason === "string" &&
   /^token\s+(?:(?:is|has)\s+)?expired[.!。]?$/i.test(reason.trim());
+
+type CredentialRefreshFailureReason = "login-expired" | "unavailable";
+
+const getCredentialRefreshFailureReason = (
+  error: unknown,
+): CredentialRefreshFailureReason | undefined => {
+  if (typeof error !== "object" || error === null) return;
+  const requestError = error as {
+    loginErrorReason?: unknown;
+    status?: number;
+    response?: { status?: number };
+  };
+  if (isTokenExpiredReason(requestError.loginErrorReason))
+    return "login-expired";
+  const status = requestError.status ?? requestError.response?.status;
+  if (status === 401 || status === 403 || status === 404 || status === 410)
+    return "unavailable";
+};
 
 // Login rejection is a connection-level message, independent of game requests.
 const isConnectionTokenRejection = (message: ProtoMsg) => {
@@ -2632,7 +2629,11 @@ export const useTokenStore = defineStore("tokens", () => {
     | { status: "stale" }
     | { status: "unsupported" }
     | { status: "cooldown" }
-    | { status: "failed"; message: string; retryable?: boolean };
+    | {
+        status: "failed";
+        message: string;
+        reason?: CredentialRefreshFailureReason;
+      };
 
   const executeCredentialRefresh = async (
     tokenId: string,
@@ -2723,6 +2724,7 @@ export const useTokenStore = defineStore("tokens", () => {
           wsLogger.error(`Token刷新失败: 未保存 combUser [${tokenId}]`);
           return {
             status: "failed",
+            reason: "unavailable",
             message: "该账号未保存 combUser，无法自动刷新",
           };
         }
@@ -2773,10 +2775,17 @@ export const useTokenStore = defineStore("tokens", () => {
         }
 
         if (!userToken) {
+          if (hasIdbError()) {
+            return {
+              status: "failed",
+              message: "暂时无法读取该账号的本地 BIN 凭据",
+            };
+          }
           wsLogger.error(`Token刷新失败: 未找到BIN数据 [${tokenId}]`);
           return {
             status: "failed",
-            message: "未找到该账号的本地 BIN 凭据，请重新登录",
+            reason: "unavailable",
+            message: "未找到该账号的本地 BIN 凭据",
           };
         }
 
@@ -2797,8 +2806,9 @@ export const useTokenStore = defineStore("tokens", () => {
             );
             return {
               status: "failed",
+              reason: "unavailable",
               message:
-                "旧名称 BIN 与当前账号角色身份不一致或无法确认，已保留原数据，请重新登录",
+                "旧名称 BIN 与当前账号角色身份不一致或无法确认，已保留原数据",
             };
           }
         } else if (
@@ -2811,7 +2821,8 @@ export const useTokenStore = defineStore("tokens", () => {
           );
           return {
             status: "failed",
-            message: "BIN 认证角色与当前账号不一致，已保留原数据，请重新登录",
+            reason: "unavailable",
+            message: "BIN 认证角色与当前账号不一致，已保留原数据",
           };
         }
         method = "bin";
@@ -2844,14 +2855,16 @@ export const useTokenStore = defineStore("tokens", () => {
         if (commit.binRolledBack === false) {
           return {
             status: "failed",
+            reason: "unavailable",
             message:
               commit.reason === "storage_write_failed"
-                ? "保存账号列表到本地存储失败，且恢复旧 BIN 凭据失败（本地凭据可能不一致），请重新登录"
-                : "更新账号凭据失败，且恢复旧 BIN 凭据失败（本地凭据可能不一致），请重新登录",
+                ? "保存账号列表到本地存储失败，且恢复旧 BIN 凭据失败，请在账号管理检查凭据"
+                : "更新账号凭据失败，且恢复旧 BIN 凭据失败，请在账号管理检查凭据",
           };
         }
         return {
           status: "failed",
+          reason: "unavailable",
           message:
             commit.reason === "role_mismatch"
               ? "刷新返回的 Token 对应角色与当前账号不一致，已保留原凭据"
@@ -2868,14 +2881,15 @@ export const useTokenStore = defineStore("tokens", () => {
         token: commit.token ?? null,
       };
     } catch (error) {
-      wsLogger.error(`Token刷新过程出错 [${tokenId}]:`, error);
+      const message = getErrorMessage(error, "Token刷新失败");
+      wsLogger.error(`Token刷新过程出错 [${tokenId}]:`, message);
       if (!isRefreshStillCurrent()) {
         return { status: "stale" };
       }
       return {
         status: "failed",
-        message: getErrorMessage(error) || "Token刷新失败",
-        retryable: isTemporaryCredentialRefreshError(error),
+        message,
+        reason: getCredentialRefreshFailureReason(error),
       };
     }
   };
@@ -3456,13 +3470,14 @@ export const useTokenStore = defineStore("tokens", () => {
   };
   const shouldKeepRecovering = (tokenId: string) => {
     const status = wsConnections.value[tokenId]?.status;
+    const credentialRecovery = getConnectionCredentialRecovery(tokenId);
     return (
       desiredConnections.has(tokenId) &&
       selectedTokenId.value === tokenId &&
       gameTokens.value.some((token) => token.id === tokenId) &&
       status !== "connected" &&
       status !== "disconnecting" &&
-      getConnectionCredentialRecovery(tokenId) !== "relogin-required"
+      (!credentialRecovery || credentialRecovery === "refreshing")
     );
   };
   const connectionRecovery = createConnectionRecovery({
@@ -3881,32 +3896,36 @@ export const useTokenStore = defineStore("tokens", () => {
         if (!isCurrentConnection() || connection.status === "disconnecting")
           return;
 
-        const retryable =
-          outcome.status === "cooldown" ||
-          (outcome.status === "failed" && outcome.retryable);
-        // Keep handshake refresh eligible while pending or failing temporarily.
-        // Replacement sockets can share a pending refresh through the store.
-        if (!confirmedRejection && !retryable)
+        const reason = outcome.status === "failed" ? outcome.reason : undefined;
+        const refreshUnavailable =
+          outcome.status === "unsupported" || reason === "unavailable";
+        // A handshake alone cannot identify an authentication failure.
+        if (
+          !confirmedRejection &&
+          (refreshUnavailable || outcome.status === "refreshed")
+        )
           connection.handshakeFailure = "refresh-attempted";
 
-        if (confirmedRejection) {
-          delete connection.credentialRecovery;
-          if (
-            refreshGeneration === connectionGeneration.get(tokenId) &&
-            !retryable &&
-            outcome.status !== "refreshed" &&
-            outcome.status !== "stale" &&
-            usingCurrentCredential() &&
-            isCurrentConnection()
-          ) {
-            connection.credentialRecovery = {
-              version: credentialVersion,
-              status: "relogin-required",
-            };
-            connection.status = "disconnected";
-            connectionRecovery.cancel(tokenId);
-            return;
-          }
+        if (confirmedRejection) delete connection.credentialRecovery;
+        const recoveryStatus =
+          reason === "login-expired"
+            ? "relogin-required"
+            : confirmedRejection && refreshUnavailable
+              ? "refresh-unavailable"
+              : undefined;
+        if (
+          recoveryStatus &&
+          refreshGeneration === connectionGeneration.get(tokenId) &&
+          usingCurrentCredential() &&
+          isCurrentConnection()
+        ) {
+          connection.credentialRecovery = {
+            version: credentialVersion,
+            status: recoveryStatus,
+          };
+          connection.status = "disconnected";
+          connectionRecovery.cancel(tokenId);
+          return;
         }
         if (
           refreshGeneration === connectionGeneration.get(tokenId) &&
