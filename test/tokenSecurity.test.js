@@ -90,7 +90,23 @@ test("fetchTokenPayloadFromUrl enforces timeout, safe fetch options, and JSON va
           });
         }),
     }),
-    /请求超时/,
+    { message: /请求超时/, retryable: true },
+  );
+
+  await assert.rejects(
+    fetchTokenPayloadFromUrl("https://example.com/unavailable.json", {
+      fetcher: async () => {
+        throw new TypeError("Failed to fetch");
+      },
+    }),
+    { message: "暂时无法访问 Token 来源", retryable: true },
+  );
+
+  await assert.rejects(
+    fetchTokenPayloadFromUrl("https://example.com/limited.json", {
+      fetcher: async () => ({ ok: false, status: 429 }),
+    }),
+    { message: "HTTP 状态码：429", status: 429 },
   );
 
   await assert.rejects(

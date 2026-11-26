@@ -138,6 +138,27 @@ declare interface CrossTabConnectionState {
 const getErrorMessage = (error: unknown, fallback = "未知错误") =>
   error instanceof Error ? error.message : String(error || fallback);
 
+const isTemporaryCredentialRefreshError = (error: unknown): boolean => {
+  if (typeof error !== "object" || error === null) return false;
+  const requestError = error as {
+    retryable?: boolean;
+    status?: number;
+    response?: { status?: number };
+    isAxiosError?: boolean;
+    code?: string;
+  };
+  if (requestError.retryable === true) return true;
+  const status = requestError.status ?? requestError.response?.status;
+  if (typeof status === "number")
+    return status === 408 || status === 429 || (status >= 500 && status < 600);
+  return (
+    requestError.isAxiosError === true &&
+    ["ERR_NETWORK", "ECONNABORTED", "ETIMEDOUT"].includes(
+      requestError.code ?? "",
+    )
+  );
+};
+
 const isTokenExpiredReason = (reason: unknown) =>
   typeof reason === "string" &&
   /^token\s+(?:(?:is|has)\s+)?expired[.!。]?$/i.test(reason.trim());
@@ -2611,7 +2632,7 @@ export const useTokenStore = defineStore("tokens", () => {
     | { status: "stale" }
     | { status: "unsupported" }
     | { status: "cooldown" }
-    | { status: "failed"; message: string };
+    | { status: "failed"; message: string; retryable?: boolean };
 
   const executeCredentialRefresh = async (
     tokenId: string,
@@ -2854,6 +2875,7 @@ export const useTokenStore = defineStore("tokens", () => {
       return {
         status: "failed",
         message: getErrorMessage(error) || "Token刷新失败",
+        retryable: isTemporaryCredentialRefreshError(error),
       };
     }
   };
@@ -3768,7 +3790,9 @@ export const useTokenStore = defineStore("tokens", () => {
       const wsUrl = customWsUrl || baseWsUrl;
       const safeWsUrl = wsUrl.split("?")[0];
       const previousHandshakeFailure =
-        fromRecovery && previousConnection?.client?.url === wsUrl
+        fromRecovery &&
+        previousConnection?.client?.url === wsUrl &&
+        previousConnection.actualToken === actualToken
           ? previousConnection.handshakeFailure
           : undefined;
       const credentialVersion = getCredentialVersion(tokenId);
@@ -3857,10 +3881,19 @@ export const useTokenStore = defineStore("tokens", () => {
         if (!isCurrentConnection() || connection.status === "disconnecting")
           return;
 
+        const retryable =
+          outcome.status === "cooldown" ||
+          (outcome.status === "failed" && outcome.retryable);
+        // Keep handshake refresh eligible while pending or failing temporarily.
+        // Replacement sockets can share a pending refresh through the store.
+        if (!confirmedRejection && !retryable)
+          connection.handshakeFailure = "refresh-attempted";
+
         if (confirmedRejection) {
           delete connection.credentialRecovery;
           if (
             refreshGeneration === connectionGeneration.get(tokenId) &&
+            !retryable &&
             outcome.status !== "refreshed" &&
             outcome.status !== "stale" &&
             usingCurrentCredential() &&
@@ -4030,7 +4063,7 @@ export const useTokenStore = defineStore("tokens", () => {
           }
 
           // 1006 does not expose why the handshake failed. Retry the same
-          // credential first, then try refreshing once if it still fails.
+          // credential first. The refresh outcome decides if it can be tried again.
           if (event.code === 1006 && !conn.connectedAt) {
             conn.handshakeFailure = previousHandshakeFailure ?? "retry";
             if (
@@ -4040,7 +4073,6 @@ export const useTokenStore = defineStore("tokens", () => {
                 navigator.onLine !== false) &&
               !checkCrossTabConnection(tokenId)
             ) {
-              conn.handshakeFailure = "refresh-attempted";
               await recoverConnectionCredential(false);
               return;
             }
@@ -5070,7 +5102,7 @@ export const useTokenStore = defineStore("tokens", () => {
   };
 
   const isTokenExpired = (token: TokenData, cutoffMs: number): boolean => {
-    // URL和bin/扫码/手机导入的token设为长期有效，不会过期；升级为长期有效的token也不会过期
+    // 这些账号保留在本地，无论服务端签发的 Token 是否到期。
     if (
       token.importMethod === "url" ||
       token.importMethod === "bin" ||
@@ -5081,7 +5113,7 @@ export const useTokenStore = defineStore("tokens", () => {
     ) {
       return false;
     }
-    // 手动导入的token按原逻辑处理（24小时过期）
+    // 未升级的手动导入记录在 24 小时未使用后可被本地清理。
     const lastUsedMs = new Date(
       token.lastUsed || token.createdAt || 0,
     ).getTime();

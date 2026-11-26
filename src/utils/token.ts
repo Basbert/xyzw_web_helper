@@ -183,10 +183,25 @@ export const fetchTokenPayloadFromUrl = async (
       credentials: "omit",
       referrerPolicy: "no-referrer",
       signal: controller.signal,
+    }).catch((error: unknown) => {
+      const timedOut =
+        controller.signal.aborted ||
+        (typeof error === "object" &&
+          error !== null &&
+          "name" in error &&
+          error.name === "AbortError");
+      throw Object.assign(
+        new Error(
+          timedOut ? `请求超时（${timeoutMs}ms）` : "暂时无法访问 Token 来源",
+        ),
+        { retryable: true },
+      );
     });
 
     if (!response.ok) {
-      throw new Error(`HTTP 状态码：${response.status}`);
+      throw Object.assign(new Error(`HTTP 状态码：${response.status}`), {
+        status: response.status,
+      });
     }
 
     let data: unknown;
@@ -201,16 +216,6 @@ export const fetchTokenPayloadFromUrl = async (
     }
 
     return data as Record<string, unknown>;
-  } catch (error) {
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "name" in error &&
-      error.name === "AbortError"
-    ) {
-      throw new Error(`请求超时（${timeoutMs}ms）`);
-    }
-    throw error;
   } finally {
     clearTimeout(timeoutId);
   }

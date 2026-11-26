@@ -24,6 +24,16 @@ async function fixture(options = {}) {
   };
   let nextTimer = 0;
   let nextInterval = 0;
+  const clock = options.now
+    ? class extends Date {
+        constructor(...args) {
+          super(...(args.length ? args : [options.now()]));
+        }
+        static now() {
+          return options.now();
+        }
+      }
+    : Date;
   const storage = {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, value),
@@ -38,7 +48,7 @@ async function fixture(options = {}) {
       vue,
       "@/hooks/useIndexedDB": {
         default: () => ({
-          getArrayBuffer() {},
+          getArrayBuffer: options.getArrayBuffer || (() => {}),
           storeArrayBuffer() {},
           deleteArrayBuffer() {},
           clearAll() {},
@@ -73,7 +83,7 @@ async function fixture(options = {}) {
           (async () => ({ token: "test-token-refreshed-long" })),
         scheduleAuthUserRequest: (callback) => callback(),
         setAuthUserRateLimiterCallback() {},
-        transformToken() {},
+        transformToken: options.transformToken || (() => {}),
       },
       "@/utils/wechatForceLogout": {
         refreshTokenFromCombUser() {},
@@ -107,6 +117,7 @@ async function fixture(options = {}) {
     },
     {
       AbortController,
+      Date: clock,
       WebSocket: { CLOSED: 3 },
       localStorage: storage,
       navigator: network,
@@ -715,6 +726,108 @@ test("Token 刷新长时间无响应时仍安排恢复重试", async () => {
   assert.equal(f.clients.length, 2);
   resolveRefresh({ token: "test-token-refreshed-long" });
   await pending;
+});
+
+test("扫码账号明确被拒后，BIN 换取凭据暂时超时会继续恢复", async () => {
+  let now = Date.now();
+  let refreshes = 0;
+  const f = await fixture({
+    now: () => now,
+    getArrayBuffer: async () => new ArrayBuffer(8),
+    transformToken: async () => {
+      if (++refreshes === 1) {
+        throw Object.assign(new Error("请求超时"), {
+          isAxiosError: true,
+          code: "ECONNABORTED",
+        });
+      }
+      return "test-token-refreshed-long";
+    },
+  });
+  f.module.gameTokens.value[0].importMethod = "wxQrcode";
+  const rejection = { error: "token expired" };
+  await f.clients[0].listener(rejection);
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  assert.equal(f.store.getConnectionCredentialRecovery("alpha"), undefined);
+
+  now += 15000;
+  await f.runNext();
+  await f.clients[1].listener(rejection);
+  await f.runNext();
+  assert.equal(refreshes, 2);
+  assert.ok(f.clients[2].url.includes("test-token-refreshed-long"));
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+});
+
+test("连接明确被拒且刷新来源返回 401 时提示重登", async () => {
+  const f = await fixture({
+    fetchTokenPayloadFromUrl: async () => {
+      throw Object.assign(new Error("HTTP 状态码：401"), { status: 401 });
+    },
+  });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
+  await f.clients[0].listener({ error: "token expired" });
+  assert.equal(
+    f.store.getConnectionCredentialRecovery("alpha"),
+    "relogin-required",
+  );
+  assert.equal(f.timers.size, 0);
+});
+
+test("连续握手失败时，暂时无法换取凭据后还能再次刷新", async () => {
+  let now = Date.now();
+  let refreshes = 0;
+  const f = await fixture({
+    now: () => now,
+    deferClient: (count) => count <= 3,
+    fetchTokenPayloadFromUrl: async () => {
+      if (++refreshes === 1) {
+        throw Object.assign(new Error("HTTP 状态码：503"), { status: 503 });
+      }
+      return { token: "test-token-refreshed-long" };
+    },
+  });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
+  for (let i = 0; i < 3; i++) {
+    await f.clients[i].onDisconnect({ code: 1006 });
+    assert.notEqual(
+      f.store.getConnectionCredentialRecovery("alpha"),
+      "relogin-required",
+    );
+    now += 15000;
+    await f.runNext();
+  }
+  assert.equal(refreshes, 2);
+  assert.ok(f.clients[3].url.includes("test-token-refreshed-long"));
+});
+
+test("新连接再次遭拒时，冷却期保留恢复而不要求重新登录", async () => {
+  let now = Date.now();
+  let refreshes = 0;
+  const f = await fixture({
+    now: () => now,
+    fetchTokenPayloadFromUrl: async () => ({
+      token: `test-token-refreshed-long-${++refreshes}`,
+    }),
+  });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
+  const rejection = { error: "token expired" };
+  await f.clients[0].listener(rejection);
+  await f.runNext();
+  await f.clients[1].listener(rejection);
+  assert.equal(refreshes, 1);
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  assert.equal(f.store.getConnectionCredentialRecovery("alpha"), undefined);
+
+  now += 15000;
+  await f.runNext();
+  await f.clients[2].listener(rejection);
+  await f.runNext();
+  assert.equal(refreshes, 2);
+  assert.ok(f.clients[3].url.includes("test-token-refreshed-long-2"));
 });
 
 test("刷新等待期间手动断开不会在刷新完成后恢复连接", async () => {
