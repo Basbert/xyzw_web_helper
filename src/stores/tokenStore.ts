@@ -1584,8 +1584,10 @@ export const useTokenStore = defineStore("tokens", () => {
 
     if (options.closeActiveConnection) {
       const status = getWebSocketStatus(tokenId);
-      if (status && status !== "disconnected") {
+      if (status !== "disconnected") {
         closeWebSocketConnection(tokenId);
+      } else if (shouldKeepRecovering(tokenId)) {
+        connectionRecovery.schedule(tokenId, { reset: true, immediate: true });
       }
     }
 
@@ -2896,7 +2898,13 @@ export const useTokenStore = defineStore("tokens", () => {
 
   // 手动刷新入口（与自动刷新、扫码导入共用同一凭据版本校验与串行锁）
   const refreshTokenManually = async (tokenId: string) => {
-    return executeCredentialRefresh(tokenId, { respectCooldown: false });
+    const outcome = await executeCredentialRefresh(tokenId, {
+      respectCooldown: false,
+    });
+    if (outcome.status === "refreshed" && shouldKeepRecovering(tokenId)) {
+      connectionRecovery.schedule(tokenId, { reset: true, immediate: true });
+    }
+    return outcome;
   };
 
   const automaticCredentialRefreshes = new Map<
@@ -3494,6 +3502,7 @@ export const useTokenStore = defineStore("tokens", () => {
       );
     },
     reconnect: (tokenId: string) => {
+      syncGameTokensFromStorage();
       const token = gameTokens.value.find((entry) => entry.id === tokenId);
       if (!token) return null;
       return createWebSocketConnection(tokenId, token.token, token.wsUrl, true);
@@ -3582,13 +3591,16 @@ export const useTokenStore = defineStore("tokens", () => {
       restoreSelectedConnection();
     }
   };
-  /**
-   * 页面刷新（F5/Cmd+R）或关闭标签页时同步释放本页持有的所有跨标签页连接租约与本地连接，
-   * 防止刷新或关掉重开后因残留 ws_connection_* 租约被误判为「已在其他网页登录」。
-   */
-  const handlePageUnload = () => {
+  // A page kept in the browser's back/forward cache keeps its store too.
+  const handlePageHide = () => {
     releaseAllLiveConnectionLocks();
-    const ownTokenIds = new Set<string>(Object.keys(wsConnections.value));
+    const ownTokenIds = new Set<string>([
+      ...Object.keys(wsConnections.value),
+      ...desiredConnections,
+    ]);
+    for (const lock of Object.values(connectionLocks.value)) {
+      if (lock.tokenId) ownTokenIds.add(lock.tokenId);
+    }
     if (typeof localStorage !== "undefined") {
       for (const key of listLocalStorageKeys()) {
         if (!key.startsWith("ws_connection_")) continue;
@@ -3608,9 +3620,16 @@ export const useTokenStore = defineStore("tokens", () => {
       }
     }
     for (const tokenId of ownTokenIds) {
+      connectionGeneration.set(
+        tokenId,
+        (connectionGeneration.get(tokenId) || 0) + 1,
+      );
+      connectionRecovery.cancel(tokenId);
       const conn = wsConnections.value[tokenId];
       if (conn) {
-        conn.status = "disconnecting";
+        if (conn.status === "connecting")
+          releaseConnectionLock(tokenId, "connect");
+        conn.status = "disconnected";
         try {
           conn.client?.disconnect?.();
         } catch {
@@ -3620,13 +3639,16 @@ export const useTokenStore = defineStore("tokens", () => {
       updateCrossTabConnectionState(tokenId, "disconnected");
     }
   };
+  const handlePageShow = (event: PageTransitionEvent) => {
+    if (event.persisted) handleVisibilityChange();
+  };
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", handleVisibilityChange);
   }
   if (typeof window !== "undefined" && window.addEventListener) {
     window.addEventListener("online", restoreSelectedConnection);
-    window.addEventListener("pagehide", handlePageUnload);
-    window.addEventListener("beforeunload", handlePageUnload);
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("pageshow", handlePageShow);
   }
   onScopeDispose(() => {
     if (typeof document !== "undefined") {
@@ -3634,8 +3656,8 @@ export const useTokenStore = defineStore("tokens", () => {
     }
     if (typeof window !== "undefined" && window.removeEventListener) {
       window.removeEventListener("online", restoreSelectedConnection);
-      window.removeEventListener("pagehide", handlePageUnload);
-      window.removeEventListener("beforeunload", handlePageUnload);
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("pageshow", handlePageShow);
       if (storageListener) {
         window.removeEventListener("storage", storageListener);
         storageListener = null;

@@ -342,7 +342,6 @@ const initializeGameData = async ({ readOnly = false } = {}) => {
     tokenStore.sendMessage(tokenId, "role_getroleinfo");
     tokenStore.sendMessage(tokenId, "tower_getinfo");
     tokenStore.sendMessage(tokenId, "evotower_getinfo");
-    tokenStore.sendMessage(tokenId, "presetteam_getinfo");
     // This command's side effects are not confirmed. On automatic recovery,
     // retain the previously known battle version and do not send it again.
     if (

@@ -10,7 +10,7 @@
       <button
         type="button"
         class="refresh-button"
-        :disabled="loading"
+        :disabled="!isConnected || loading || switching"
         title="刷新队伍数据"
         @click="refreshTeamData(true)"
       >
@@ -42,7 +42,7 @@
             v-for="teamId in availableTeams"
             :key="teamId"
             type="button"
-            :disabled="loading || switching"
+            :disabled="!isConnected || loading || switching"
             class="team-button"
             :class="{ active: currentTeam === teamId }"
             :aria-pressed="currentTeam === teamId"
@@ -104,7 +104,7 @@
         </div>
 
         <div v-if="!loading && !currentTeamHeroes.length" class="empty-team">
-          <p>暂无队伍信息</p>
+          <p>{{ isConnected ? "暂无队伍信息" : "连接恢复后加载阵容" }}</p>
         </div>
         <div v-if="loading" class="empty-team">
           <p>正在加载队伍信息…</p>
@@ -116,22 +116,46 @@
 
 <script setup lang="ts">
 import { useMessage } from "naive-ui";
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 import { useTokenStore } from "@/stores/tokenStore";
 import { HERO_DICT } from "@/utils/HeroList.js";
 
 const tokenStore = useTokenStore();
 const message = useMessage();
 
-const loading = ref(false);
 const switching = ref(false);
 const currentTeam = ref(1);
 const availableTeams = ref<number[]>([1, 2, 3, 4]);
-
-const wsStatus = computed(() => {
-  if (!tokenStore.selectedToken) return "disconnected";
-  return tokenStore.getWebSocketStatus(tokenStore.selectedToken.id);
+const accountId = computed(() => tokenStore.selectedToken?.id);
+const connectionClient = computed(() =>
+  accountId.value ? tokenStore.getWebSocketClient(accountId.value) : null,
+);
+const isConnected = computed(() => {
+  const tokenId = accountId.value;
+  return !!tokenId && tokenStore.getWebSocketStatus(tokenId) === "connected";
 });
+type TeamConnection = NonNullable<
+  ReturnType<typeof tokenStore.getWebSocketClient>
+>;
+const pendingLoad = shallowRef<{
+  tokenId: string;
+  client: TeamConnection;
+} | null>(null);
+const loading = computed(
+  () =>
+    isConnected.value &&
+    pendingLoad.value?.tokenId === accountId.value &&
+    pendingLoad.value?.client === connectionClient.value,
+);
+let active = true;
+onBeforeUnmount(() => {
+  active = false;
+});
+const hasCurrentConnection = (tokenId: string, client: TeamConnection) =>
+  active &&
+  tokenId === accountId.value &&
+  client === connectionClient.value &&
+  isConnected.value;
 
 const presetTeamRaw = computed(() => tokenStore.gameData?.presetTeam ?? null);
 
@@ -188,7 +212,6 @@ const presetTeam = computed(() => normalizePresetTeam(presetTeamRaw.value));
 
 const currentTeamHeroes = computed(() => {
   const team = (presetTeam.value.teams as any)[currentTeam.value]?.teamInfo;
-  console.log("🚀 ~ team:", team);
   if (!team) return [] as any[];
   const heroes: any[] = [];
   for (const [pos, hero] of Object.entries(team)) {
@@ -209,59 +232,40 @@ const currentTeamHeroes = computed(() => {
     });
   }
   heroes.sort((a, b) => a.position - b.position);
-  console.log("🚀 ~ heroes:", heroes);
   return heroes;
 });
 
-const executeGameCommand = async (
-  tokenId: string | number,
-  cmd: string,
-  params = {},
-  description = "",
-  timeout = 8000,
-) => {
+const refreshTeamData = async (showError = false) => {
+  const tokenId = accountId.value;
+  const client = connectionClient.value;
+  if (!tokenId || !client || !isConnected.value || loading.value) return;
+  const request = { tokenId, client };
+  pendingLoad.value = request;
   try {
-    return await tokenStore.sendMessageWithPromise(
-      String(tokenId),
-      cmd,
-      params,
-      timeout,
-    );
-  } catch (error: any) {
-    if (description)
-      message.error(`${description}失败：${error?.message ?? error}`);
-    throw error;
-  }
-};
-
-const getTeamInfoWithCache = async (force = false) => {
-  if (!tokenStore.selectedToken) {
-    message.warning("请先选择Token");
-    return null;
-  }
-  const tokenId = tokenStore.selectedToken.id;
-  if (!force) {
-    const cached = (tokenStore.gameData as any)?.presetTeam?.presetTeamInfo;
-    if (cached) return cached;
-  }
-  loading.value = true;
-  try {
-    const result = await executeGameCommand(
+    const result = await tokenStore.sendMessageWithPromise(
       tokenId,
       "presetteam_getinfo",
       {},
-      "获取阵容信息",
+      8000,
     );
-    if (tokenStore.selectedToken?.id !== tokenId) return null;
-    tokenStore.$patch((state: any) => {
-      state.gameData = { ...(state.gameData ?? {}), presetTeam: result };
-    });
-    return result?.presetTeamInfo ?? null;
-  } catch (e) {
-    console.error("获取阵容信息失败:", e);
-    return null;
+    if (
+      pendingLoad.value === request &&
+      hasCurrentConnection(tokenId, client)
+    ) {
+      tokenStore.getAccountGameData(tokenId).value.presetTeam = result;
+    }
+  } catch (error) {
+    if (
+      showError &&
+      pendingLoad.value === request &&
+      hasCurrentConnection(tokenId, client)
+    ) {
+      message.error(
+        `获取阵容信息失败：${error instanceof Error ? error.message : error}`,
+      );
+    }
   } finally {
-    loading.value = false;
+    if (pendingLoad.value === request) pendingLoad.value = null;
   }
 };
 
@@ -277,83 +281,40 @@ const updateCurrentTeam = () => {
 };
 
 const selectTeam = async (teamId: number) => {
-  if (switching.value || loading.value) return;
-  if (!tokenStore.selectedToken) {
-    message.warning("请先选择Token");
+  const tokenId = accountId.value;
+  const client = connectionClient.value;
+  if (
+    !tokenId ||
+    !client ||
+    !isConnected.value ||
+    switching.value ||
+    loading.value
+  )
     return;
-  }
-  const tokenId = tokenStore.selectedToken.id;
   const prev = currentTeam.value;
   switching.value = true;
   try {
-    await executeGameCommand(
+    await tokenStore.sendMessageWithPromise(
       tokenId,
       "presetteam_saveteam",
       { teamId },
-      `切换到阵容 ${teamId}`,
+      8000,
     );
-    if (tokenStore.selectedToken?.id !== tokenId) return;
+    if (!hasCurrentConnection(tokenId, client)) return;
     currentTeam.value = teamId;
     message.success(`已切换到阵容 ${teamId}`);
     await refreshTeamData(true);
-  } catch (e) {
-    if (tokenStore.selectedToken?.id === tokenId) {
+  } catch (error) {
+    if (hasCurrentConnection(tokenId, client)) {
       currentTeam.value = prev;
+      message.error(
+        `切换阵容失败：${error instanceof Error ? error.message : error}`,
+      );
     }
   } finally {
     switching.value = false;
   }
 };
-
-const refreshTeamData = async (force = false) => {
-  await getTeamInfoWithCache(force);
-};
-
-onMounted(async () => {
-  if (tokenStore.selectedToken && wsStatus.value === "connected") {
-    await refreshTeamData(false);
-    updateAvailableTeams();
-    updateCurrentTeam();
-    if (!presetTeamRaw.value) {
-      await refreshTeamData(true);
-      updateAvailableTeams();
-      updateCurrentTeam();
-    }
-  }
-});
-
-watch(wsStatus, (newStatus, oldStatus) => {
-  if (
-    newStatus === "connected" &&
-    oldStatus !== "connected" &&
-    tokenStore.selectedToken
-  ) {
-    setTimeout(async () => {
-      await refreshTeamData(false);
-      updateAvailableTeams();
-      updateCurrentTeam();
-      if (!presetTeamRaw.value) {
-        await refreshTeamData(true);
-        updateAvailableTeams();
-        updateCurrentTeam();
-      }
-    }, 1000);
-  }
-});
-
-watch(
-  () => tokenStore.selectedToken,
-  async (newToken, oldToken) => {
-    if (newToken && newToken.id !== (oldToken as any)?.id) {
-      const status = tokenStore.getWebSocketStatus(newToken.id);
-      if (status === "connected") {
-        await refreshTeamData(true);
-        updateAvailableTeams();
-        updateCurrentTeam();
-      }
-    }
-  },
-);
 
 watch(
   () => presetTeamRaw.value,
@@ -361,8 +322,11 @@ watch(
     updateAvailableTeams();
     updateCurrentTeam();
   },
-  { deep: true },
+  { deep: true, immediate: true },
 );
+watch([accountId, connectionClient, isConnected], () => refreshTeamData(), {
+  immediate: true,
+});
 </script>
 
 <style scoped lang="scss">

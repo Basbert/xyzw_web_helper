@@ -52,12 +52,7 @@ test("automatic connection recovery refreshes read-only data without sending fig
   const calls = await run("restored");
   assert.deepEqual(
     calls.map((call) => call[1]),
-    [
-      "role_getroleinfo",
-      "tower_getinfo",
-      "evotower_getinfo",
-      "presetteam_getinfo",
-    ],
+    ["role_getroleinfo", "tower_getinfo", "evotower_getinfo"],
   );
 });
 
@@ -65,12 +60,7 @@ test("切换到已连接账号时只读初始化，不自动触发战斗", async
   const calls = await run(undefined, { readOnly: true });
   assert.deepEqual(
     calls.map((call) => call[1]),
-    [
-      "role_getroleinfo",
-      "tower_getinfo",
-      "evotower_getinfo",
-      "presetteam_getinfo",
-    ],
+    ["role_getroleinfo", "tower_getinfo", "evotower_getinfo"],
   );
 });
 
@@ -111,7 +101,6 @@ test("first connection keeps the existing battle version initialization", async 
       "role_getroleinfo",
       "tower_getinfo",
       "evotower_getinfo",
-      "presetteam_getinfo",
       "fight_startlevel",
       "set-version",
     ],

@@ -208,6 +208,93 @@ test("manual disconnect cancels recovery and returning to the page does not reco
   assert.equal(f.clients.length, 1);
 });
 
+test("返回浏览器缓存中的页面会恢复原账号连接，无需刷新登录凭据", async () => {
+  let refreshes = 0;
+  const f = await fixture({
+    fetchTokenPayloadFromUrl: async () => {
+      refreshes++;
+      return { token: "unexpected-token-refreshed-long" };
+    },
+  });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
+  f.listeners.pagehide({ persisted: true });
+  assert.equal(f.store.getWebSocketStatus("alpha"), "disconnected");
+  assert.equal(
+    JSON.parse(f.values.get("ws_connection_alpha")).action,
+    "disconnected",
+  );
+  assert.equal(f.timers.size, 0);
+
+  f.listeners.pageshow({ persisted: true });
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  await f.runNext();
+  assert.equal(f.clients.length, 2);
+  assert.equal(f.clients[1].url, f.clients[0].url);
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+  assert.equal(refreshes, 0);
+  assert.deepEqual(f.sent, ["role_getroleinfo", "role_getroleinfo"]);
+});
+
+test("当前掉线账号手动换取新凭据后立即用新凭据恢复连接", async () => {
+  let refreshes = 0;
+  const f = await fixture({
+    fetchTokenPayloadFromUrl: async () => {
+      if (++refreshes === 1)
+        throw Object.assign(new Error("HTTP 状态码：401"), { status: 401 });
+      return { token: "test-token-refreshed-long" };
+    },
+  });
+  f.module.gameTokens.value[0].importMethod = "url";
+  f.module.gameTokens.value[0].sourceUrl = "https://example.invalid/token";
+  await f.clients[0].listener({ error: "token expired" });
+  assert.equal(
+    f.store.getConnectionCredentialRecovery("alpha"),
+    "refresh-unavailable",
+  );
+  assert.equal(f.timers.size, 0);
+
+  assert.equal(
+    (await f.store.refreshTokenManually("alpha")).status,
+    "refreshed",
+  );
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  await f.runNext();
+  assert.ok(f.clients[1].url.includes("test-token-refreshed-long"));
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+  assert.deepEqual(f.sent, ["role_getroleinfo", "role_getroleinfo"]);
+});
+
+test("当前掉线账号原地重新导入后用新凭据恢复连接", async () => {
+  const f = await fixture();
+  await f.clients[0].listener({ error: "token expired" });
+  assert.equal(
+    f.store.getConnectionCredentialRecovery("alpha"),
+    "refresh-unavailable",
+  );
+
+  const committed = await f.store.commitRoleUpsert({
+    role: {
+      id: "alpha",
+      name: "Alpha",
+      server: "测试服",
+      token: "test-token-reimported-long",
+      importMethod: "wxQrcode",
+    },
+    needsBin: true,
+    binStorage: {
+      getArrayBuffer: async () => new Uint8Array([1, 2]).buffer,
+      storeArrayBuffer: async () => true,
+    },
+    findExisting: (tokens) => tokens.find((token) => token.id === "alpha"),
+  });
+  assert.equal(committed.committed, true);
+  assert.equal(f.store.connectionRecoveryStatus.alpha, "waiting");
+  await f.runNext();
+  assert.ok(f.clients[1].url.includes("test-token-reimported-long"));
+  assert.equal(f.store.getWebSocketStatus("alpha"), "connected");
+});
+
 test("switching the selected account cancels the old account's retry", async () => {
   const f = await fixture();
   await f.clients[0].onDisconnect({ code: 1006 });
